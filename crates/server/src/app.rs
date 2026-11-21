@@ -19,6 +19,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
+use crate::bucket::Bucket;
 use crate::limits::{ACCOUNT_WAIT, AccountLimit, GlobalLimit, limit_account, limit_global};
 use crate::metrics::Metrics;
 use crate::pool::{ImapPool, PoolConfig};
@@ -52,6 +53,9 @@ pub struct AppConfig {
     /// Gmail push through Cloud Pub/Sub: the topic and what push tokens
     /// must say. Needs `upstream` with Google configured.
     pub google_push: Option<(String, postkeep_upstream::PushExpectations)>,
+    /// The bucket uploaded files wait in; `None` turns uploads off, while
+    /// `upload_attachment` and `/upload` stay, refusing.
+    pub bucket: Option<Arc<dyn Bucket>>,
 }
 
 /// Limits applied to every request.
@@ -399,7 +403,10 @@ pub fn router_with(
             watchers.refresh(account);
         }));
     }
-    let tools = MailTools::new(store, servers, pool, tokens, webhook_control, selecting);
+    let uploads = crate::upload::router(store.clone(), config.bucket.clone(), auth.clone());
+    let upload_url = format!("{}{}", auth.config().issuer(), crate::upload::UPLOAD_PATH);
+    let tools = MailTools::new(store, servers, pool, tokens, webhook_control, selecting)
+        .with_uploads(upload_url, config.bucket);
     let tools = install_tool_extensions(tools, &extensions);
     let protected = mcp_routes(tools, &auth, hosts, host_check, origins, limits, cancel);
 
@@ -415,6 +422,8 @@ pub fn router_with(
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             limits.max_body_bytes,
         ))
+        // Uploads keep their own size and time limits, inside the global cap.
+        .merge(uploads)
         .layer(middleware::from_fn_with_state(
             GlobalLimit::new(limits.max_concurrent_requests),
             limit_global,
@@ -691,23 +700,29 @@ async fn healthz(State(store): State<Store>) -> impl IntoResponse {
 }
 
 /// Removes expired codes and tokens and abandoned client registrations
-/// every `period` until `cancel` fires.
+/// every `period` until `cancel` fires. With uploads on, use
+/// [`purge_on_schedule`] with the bucket, so their pieces are deleted too.
 pub async fn purge_expired(
     store: Store,
     policy: PurgePolicy,
     period: Duration,
     cancel: CancellationToken,
 ) {
-    purge_on_schedule(store, policy, period, None, cancel).await;
+    purge_on_schedule(store, policy, period, None, None, cancel).await;
 }
 
 /// [`purge_expired`], skipping the runs `ownership` leaves to another
-/// process.
-pub(crate) async fn purge_on_schedule(
+/// process, and then the uploads' cleanup, which deletes the pieces of used
+/// uploads in `bucket`.
+///
+/// A cleanup under way when `cancel` fires is dropped: the uploads it had not
+/// forgotten yet wait for the next one.
+pub async fn purge_on_schedule(
     store: Store,
     policy: PurgePolicy,
     period: Duration,
     ownership: Option<Arc<dyn WatchOwnership>>,
+    bucket: Option<Arc<dyn Bucket>>,
     cancel: CancellationToken,
 ) {
     let mut interval = tokio::time::interval(period);
@@ -722,6 +737,16 @@ pub(crate) async fn purge_on_schedule(
                     Ok(0) => {}
                     Ok(removed) => tracing::debug!(removed, "purged expired OAuth records"),
                     Err(err) => tracing::warn!(error = %err, "could not purge expired OAuth records"),
+                }
+                let clean = async {
+                    match store.uploads_to_clean(crate::upload::UPLOAD_TIME, crate::upload::CLEAN_BATCH).await {
+                        Ok(used) => crate::upload::delete_pieces(&store, bucket.as_deref(), &used).await,
+                        Err(err) => tracing::warn!(error = %err, "could not clean up uploads"),
+                    }
+                };
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    () = clean => {}
                 }
             }
         }
@@ -880,6 +905,7 @@ mod tests {
             policy,
             Duration::from_millis(20),
             Some(turns.clone()),
+            None,
             cancel.clone(),
         ));
 

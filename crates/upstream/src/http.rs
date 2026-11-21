@@ -1,7 +1,8 @@
 //! A small HTTPS client for the provider APIs.
 //!
-//! Requests go to the fixed provider endpoints in [`Endpoints`], never to
-//! URLs taken from user input. An Outlook attachment session returns its own
+//! Requests go to the fixed provider endpoints in [`Endpoints`], and to the
+//! upload bucket an operator's setting names, never to URLs taken from user
+//! input. An Outlook attachment session returns its own
 //! upload URL, which must match [`Endpoints::outlook_uploads`] by origin.
 //! The webhook crate's private-address filtering is not needed here.
 //! Responses are size-limited, every request

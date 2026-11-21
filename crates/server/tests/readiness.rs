@@ -47,6 +47,7 @@ async fn store(dir: &tempfile::TempDir) -> Store {
 
 fn router(store: Store) -> Router {
     let config = AppConfig {
+        bucket: None,
         auth: AuthConfig::new("https://mail.example.com", app::MCP_PATH).unwrap(),
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),

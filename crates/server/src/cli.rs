@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -331,6 +332,10 @@ pub struct ServeArgs {
     /// Microsoft and Google sign-in.
     #[command(flatten)]
     pub providers: ProviderArgs,
+
+    /// The bucket uploaded files wait in.
+    #[command(flatten)]
+    pub uploads: UploadArgs,
 }
 
 impl ServeArgs {
@@ -409,6 +414,85 @@ pub struct ProviderArgs {
     /// endpoint URL, `{POSTKEEP_PUBLIC_URL}/push/google`.
     #[arg(long, env = "POSTKEEP_GOOGLE_PUBSUB_AUDIENCE")]
     pub google_pubsub_audience: Option<String>,
+}
+
+/// The S3-compatible bucket uploaded files wait in, sealed by postkeep. Uploads
+/// are off until its address, key ID and secret are set, all three together.
+#[derive(Debug, Args)]
+#[command(next_help_heading = "Uploads")]
+pub struct UploadArgs {
+    /// The bucket's `https://` address, which turns uploads on; files go under
+    /// `uploads/` in it.
+    #[arg(
+        long,
+        env = "POSTKEEP_UPLOAD_BUCKET_URL",
+        hide_env_values = true,
+        requires_all = ["upload_bucket_key_id", "upload_bucket_secret"]
+    )]
+    pub upload_bucket_url: Option<SecretString>,
+    /// The region the bucket's requests are signed for: `auto` for Tigris and
+    /// Cloudflare R2, the bucket's region for AWS.
+    #[arg(long, env = "POSTKEEP_UPLOAD_BUCKET_REGION", default_value = "auto")]
+    pub upload_bucket_region: String,
+    /// The ID of an access key for the bucket.
+    #[arg(
+        long,
+        env = "POSTKEEP_UPLOAD_BUCKET_KEY_ID",
+        hide_env_values = true,
+        requires_all = ["upload_bucket_url", "upload_bucket_secret"]
+    )]
+    pub upload_bucket_key_id: Option<SecretString>,
+    /// The access key's secret.
+    #[arg(
+        long,
+        env = "POSTKEEP_UPLOAD_BUCKET_SECRET",
+        hide_env_values = true,
+        requires_all = ["upload_bucket_url", "upload_bucket_key_id"]
+    )]
+    pub upload_bucket_secret: Option<SecretString>,
+}
+
+/// Why the bucket's address is refused; it never holds the address.
+const BUCKET_URL: &str = "POSTKEEP_UPLOAD_BUCKET_URL must be an https:// address with no user, \
+    password, query or fragment, and a plain path";
+
+impl UploadArgs {
+    /// The bucket these settings name, or `None` when none is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns fixed words that name the setting, never its value, unless the
+    /// address is `https://` with no user, password, query or fragment, and a
+    /// path, if any, of letters, digits, `-`, `.`, `_` and `/`, which is
+    /// signed as it is sent.
+    pub fn bucket(&self) -> Result<Option<Arc<dyn crate::bucket::Bucket>>, &'static str> {
+        let (Some(url), Some(key_id), Some(secret)) = (
+            &self.upload_bucket_url,
+            &self.upload_bucket_key_id,
+            &self.upload_bucket_secret,
+        ) else {
+            return Ok(None);
+        };
+        let url = url::Url::parse(url.expose_secret()).map_err(|_| BUCKET_URL)?;
+        let plain_path = url
+            .path()
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'/'));
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || !plain_path
+        {
+            return Err(BUCKET_URL);
+        }
+        let region = self.upload_bucket_region.clone();
+        let http = postkeep_upstream::Http::new(concat!("postkeep/", env!("CARGO_PKG_VERSION")));
+        let bucket =
+            crate::bucket::S3Bucket::new(url, region, key_id.clone(), secret.clone(), http);
+        Ok(Some(Arc::new(bucket)))
+    }
 }
 
 impl ProviderArgs {
@@ -1235,6 +1319,90 @@ mod tests {
         let result =
             Cli::try_parse_from(["postkeep", "serve", "--public-url", "https://a.example"]);
         assert!(result.is_err());
+    }
+
+    /// `serve` with the upload settings `extra`, beside the ones it needs.
+    fn serve_with(extra: &[&str]) -> Result<ServeArgs, clap::Error> {
+        let base = [
+            "postkeep",
+            "serve",
+            "--public-url",
+            "https://a.example",
+            "--master-key",
+            "00",
+        ];
+        let cli = Cli::try_parse_from(base.iter().chain(extra))?;
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve");
+        };
+        Ok(*args)
+    }
+
+    const MARKER: &str = "made-up-marker";
+
+    fn bucket_at(url: &str) -> Result<bool, &'static str> {
+        let key = format!("{MARKER}-key");
+        let args = serve_with(&[
+            "--upload-bucket-url",
+            url,
+            "--upload-bucket-key-id",
+            &key,
+            "--upload-bucket-secret",
+            MARKER,
+        ])
+        .unwrap();
+        Ok(args.uploads.bucket()?.is_some())
+    }
+
+    #[test]
+    fn upload_settings_never_show_their_values() {
+        let command = Cli::command();
+        let serve = command.find_subcommand("serve").unwrap();
+        for flag in [
+            "upload-bucket-url",
+            "upload-bucket-key-id",
+            "upload-bucket-secret",
+        ] {
+            let argument = serve.get_arguments().find(|a| a.get_long() == Some(flag));
+            assert!(argument.unwrap().is_hide_env_values_set(), "{flag}");
+        }
+        assert_eq!(bucket_at(&format!("https://{MARKER}.example/b")), Ok(true));
+        let url = format!("https://{MARKER}.example/b");
+        let flags = [
+            "--upload-bucket-url",
+            &url,
+            "--upload-bucket-key-id",
+            MARKER,
+        ];
+        let args = serve_with(&[&flags[..], &["--upload-bucket-secret", MARKER]].concat());
+        assert!(!format!("{:?}", args.unwrap()).contains(MARKER));
+    }
+
+    #[test]
+    fn a_bucket_address_is_plain_https() {
+        assert_eq!(bucket_at("https://s3.example:9000/b-1/x_y.z"), Ok(true));
+        for url in [
+            format!("http://{MARKER}.example"),
+            format!("https://{MARKER}@s3.example"),
+            format!("https://s3.example/b?{MARKER}"),
+            format!("https://s3.example/b#{MARKER}"),
+            format!("https://s3.example/{MARKER}%20b"),
+            format!("https://s3.example/{MARKER}~b"),
+        ] {
+            let refused = bucket_at(&url).unwrap_err();
+            assert_eq!(refused, BUCKET_URL);
+            assert!(!refused.contains(MARKER));
+        }
+    }
+
+    #[test]
+    fn upload_settings_are_set_together() {
+        assert!(serve_with(&[]).unwrap().uploads.upload_bucket_url.is_none());
+        let error = serve_with(&["--upload-bucket-key-id", MARKER])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--upload-bucket-url"), "{error}");
+        assert!(!error.contains(MARKER), "{error}");
     }
 
     fn serve_arg_help(flag: &str) -> String {

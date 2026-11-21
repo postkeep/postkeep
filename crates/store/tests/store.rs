@@ -22,11 +22,13 @@ use common::{AUTH, KnownKey, PASSWORD, PAYLOAD, SECRET};
 #[cfg(feature = "postgres")]
 use postkeep_store::PushSubscription;
 use postkeep_store::{
-    AccountId, AddedFilterRule, AppendOutcome, AuthorizationRequest, ChangedFilterRule, CodeGrant,
-    DeliveryEffect, DeliveryRecord, FilterRule, GrantSubject, HeldSend, HeldSendMatch,
-    KEPT_DELIVERIES, LoadedWebhook, MAX_CONSECUTIVE_FAILURES, MasterKey, NewClient, NewFilterRule,
-    OAuthAccount, OutboxLimitChange, Provider, PurgePolicy, Redemption, RefreshRotation,
-    SessionTtl, Store, StoreError, UpstreamTokens, WatchCursor, WebhookSettings,
+    AccountId, AddedFilterRule, AppendOutcome, AuthorizationRequest, ChangedFilterRule,
+    ClaimRefused, Claimed, CodeGrant, DataKey, DeliveryEffect, DeliveryRecord, FilterRule,
+    GrantSubject, HeldSend, HeldSendMatch, KEPT_DELIVERIES, LoadedWebhook,
+    MAX_CONSECUTIVE_FAILURES, MasterKey, NewClient, NewFilterRule, OAuthAccount, OutboxLimitChange,
+    PIECE_TAG, Provider, PurgePolicy, Redemption, RefreshRotation, SessionTtl, Store, StoreError,
+    UploadBounds, UploadLookup, UploadOwner, UpstreamTokens, WatchCursor, WebhookSettings,
+    open_piece, seal_piece,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -1174,6 +1176,273 @@ async fn exercise_held_sends(store: &Store) {
 async fn sqlite_held_sends() {
     let (store, _dir) = sqlite().await;
     exercise_held_sends(&store).await;
+}
+
+/// The least an upload counts toward the stored bounds, as the server sets it.
+const LEAST: i64 = 64 * 1024;
+
+async fn tenant_mailbox(store: &Store, tenant: &str, label: &str) -> AccountId {
+    let email = format!("{}@example.com", unique(label));
+    let scoped = store.for_tenant(tenant);
+    scoped
+        .upsert_account(&email, &secret("pw"))
+        .await
+        .unwrap()
+        .id
+}
+
+/// A new waiting upload of `owner` for `ttl`, as its id and token.
+async fn upload(store: &Store, owner: UploadOwner<'_>, ttl: Duration) -> (String, String) {
+    let (id, token) = (unique("id"), unique("token"));
+    let made = store.create_upload(owner, &id, &token, ttl, 100).await;
+    assert!(made.unwrap().is_some());
+    (id, token)
+}
+
+async fn claim(store: &Store, token: &str, bounds: UploadBounds) -> Result<Claimed, ClaimRefused> {
+    store
+        .claim_upload(token, &unique("object"), 1, bounds)
+        .await
+        .unwrap()
+}
+
+async fn exercise_uploads(store: &Store, url: &str) {
+    use ClaimRefused::{Server, Tenant, Unknown};
+    let tenant = unique("uploads");
+    let a = tenant_mailbox(store, &tenant, "up-a").await;
+    let b = tenant_mailbox(store, &tenant, "up-b").await;
+    let c = tenant_mailbox(store, &unique("uploads"), "up-c").await;
+    let owner = UploadOwner {
+        account: &a,
+        principal: "caller",
+        app: "app",
+    };
+    let (on_b, on_c) = (
+        UploadOwner {
+            account: &b,
+            ..owner
+        },
+        UploadOwner {
+            account: &c,
+            ..owner
+        },
+    );
+    let open = UploadBounds {
+        tenant_arriving: 2,
+        tenant_stored: i64::MAX / 4,
+        server_arriving: i64::MAX,
+        server_stored: i64::MAX / 4,
+        least: LEAST,
+        window: MINUTE,
+    };
+
+    // The tenant's waiting uploads are capped across its mailboxes; ended ones
+    // take no place, and take no file.
+    let ended = unique("ended");
+    let made = store.create_upload(owner, "ended", &ended, Duration::ZERO, 2);
+    assert!(made.await.unwrap().is_some());
+    for (owner, waits) in [(owner, true), (on_b, true), (owner, false), (on_c, true)] {
+        let (id, token) = (unique("id"), unique("token"));
+        let made = store.create_upload(owner, &id, &token, MINUTE, 2);
+        assert_eq!(made.await.unwrap().is_some(), waits);
+    }
+    assert_eq!(claim(store, &ended, open).await.unwrap_err(), Unknown);
+
+    // Once its file is in, only its owner finds it, with its key and digest.
+    let (id, token) = upload(store, owner, MINUTE).await;
+    let claimed = claim(store, &token, open).await.unwrap();
+    let found = store.upload_for(owner, &id, MINUTE).await.unwrap();
+    assert!(matches!(found, UploadLookup::Arriving), "{found:?}");
+    assert!(store.finish_upload(&claimed, 5, &[7; 32]).await.unwrap());
+    let UploadLookup::Stored {
+        object,
+        key: opened,
+        digest,
+        size,
+        ..
+    } = store.upload_for(owner, &id, MINUTE).await.unwrap()
+    else {
+        panic!("not stored");
+    };
+    assert_eq!(
+        (object.as_str(), opened.expose(), digest, size),
+        (claimed.object(), claimed.key().expose(), [7; 32], 5)
+    );
+    let (other_app, other_principal) = (
+        UploadOwner {
+            app: "other-app",
+            ..owner
+        },
+        UploadOwner {
+            principal: "other",
+            ..owner
+        },
+    );
+    for stranger in [other_app, other_principal, on_b] {
+        let found = store.upload_for(stranger, &id, MINUTE).await.unwrap();
+        assert!(matches!(found, UploadLookup::Missing), "{found:?}");
+    }
+
+    // All or none: with one already used, neither is used. A used upload is
+    // missing, but counts as stored, at least 64 KiB even when empty, until
+    // its row is forgotten.
+    let (empty, token) = upload(store, owner, MINUTE).await;
+    let second = claim(store, &token, open).await.unwrap();
+    assert!(store.finish_upload(&second, 0, &[0; 32]).await.unwrap());
+    let first = store.use_uploads(owner, &[&id]).await.unwrap().unwrap();
+    assert_eq!(
+        store.use_uploads(owner, &[&empty, &id]).await.unwrap(),
+        Err(1)
+    );
+    let found = store.upload_for(owner, &empty, MINUTE).await.unwrap();
+    assert!(
+        matches!(found, UploadLookup::Stored { size: 0, .. }),
+        "{found:?}"
+    );
+    let used = store.use_uploads(owner, &[&empty]).await.unwrap().unwrap();
+    for gone in [&id, &empty] {
+        let found = store.upload_for(owner, gone, MINUTE).await.unwrap();
+        assert!(matches!(found, UploadLookup::Missing), "{found:?}");
+    }
+    let small = UploadBounds {
+        tenant_stored: 3 * LEAST - 1,
+        ..open
+    };
+    let (_, token) = upload(store, owner, MINUTE).await;
+    assert_eq!(claim(store, &token, small).await.unwrap_err(), Tenant);
+    for done in first.iter().chain(&used) {
+        store.forget_upload(done).await.unwrap();
+    }
+    // The refusal left the token working; a stopped upload uses it up.
+    let stopped = claim(store, &token, small).await.unwrap();
+    let done = store.use_attempt(&stopped).await.unwrap();
+    assert_eq!(claim(store, &token, open).await.unwrap_err(), Unknown);
+    store.forget_upload(&done).await.unwrap();
+
+    // Of two claims of one token, one wins.
+    let (_, token) = upload(store, owner, MINUTE).await;
+    let (one, two) = tokio::join!(claim(store, &token, open), claim(store, &token, open));
+    let won = match (one, two) {
+        (Ok(won), Err(Unknown)) | (Err(Unknown), Ok(won)) => won,
+        other => panic!("{other:?}"),
+    };
+    // The tenant's arrivals are counted across its mailboxes; another tenant's
+    // go through, up to the server's bounds.
+    let (_, token) = upload(store, on_b, MINUTE).await;
+    claim(store, &token, open).await.unwrap();
+    let (_, token) = upload(store, owner, MINUTE).await;
+    assert_eq!(claim(store, &token, open).await.unwrap_err(), Tenant);
+    let (_, elsewhere) = upload(store, on_c, MINUTE).await;
+    for full in [
+        UploadBounds {
+            server_arriving: 0,
+            ..open
+        },
+        UploadBounds {
+            server_stored: 0,
+            ..open
+        },
+    ] {
+        assert_eq!(claim(store, &elsewhere, full).await.unwrap_err(), Server);
+    }
+    claim(store, &elsewhere, open).await.unwrap();
+
+    // After a restart the claims left behind keep their reservations and stop
+    // counting as arriving after their window. A stored upload past its hour
+    // and the arrivals past their window are used by the next cleanup, which
+    // deletes ended waiting uploads and returns at most `most`.
+    let (late, ending) = upload(store, owner, Duration::from_secs(2)).await;
+    let stored = store.claim_upload(
+        &ending,
+        "late-object",
+        1,
+        UploadBounds {
+            window: Duration::ZERO,
+            ..open
+        },
+    );
+    let stored = stored.await.unwrap().unwrap();
+    assert!(store.finish_upload(&stored, 9, &[9; 32]).await.unwrap());
+    let restarted = Store::connect(url, &key()).await.unwrap();
+    let kept = UploadBounds {
+        tenant_arriving: i64::MAX,
+        tenant_stored: 4 * LEAST - 1,
+        ..open
+    };
+    assert_eq!(claim(&restarted, &token, kept).await.unwrap_err(), Tenant);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let window = Duration::from_secs(2);
+    let found = restarted.upload_for(owner, &late, MINUTE).await.unwrap();
+    assert!(matches!(found, UploadLookup::Missing), "{found:?}");
+    assert_eq!(
+        restarted.uploads_to_clean(window, 1).await.unwrap().len(),
+        1
+    );
+    let cleaned = restarted.uploads_to_clean(window, 10_000).await.unwrap();
+    let names: Vec<&str> = cleaned.iter().map(|used| used.object.as_str()).collect();
+    for name in [won.object(), "late-object"] {
+        assert!(names.contains(&name), "{name} not in {names:?}");
+    }
+    let late_key: Option<String> =
+        sqlx::query_scalar("SELECT key_ciphertext FROM uploads WHERE object = $1")
+            .bind("late-object")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(late_key, None);
+    let ended: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM uploads WHERE account_id = $1 AND claimed_at IS NULL AND expires_at <= $2")
+        .bind(&a.0)
+        .bind(postkeep_store::now())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(ended, 0);
+    claim(&restarted, &token, open).await.unwrap();
+
+    // With the account, its uploads go.
+    for account in [&a, &b, &c] {
+        store.delete_account(account).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM uploads WHERE account_id = $1")
+            .bind(&account.0)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+    restarted.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_uploads() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}", dir.path().join("test.db").display());
+    let store = Store::connect(&url, &key()).await.unwrap();
+    exercise_uploads(&store, &url).await;
+}
+
+/// A piece opens only under its own key and number, whole; an empty one opens
+/// to nothing.
+#[test]
+fn upload_pieces_open_only_as_sealed() {
+    let (key, other) = (DataKey::generate().unwrap(), DataKey::generate().unwrap());
+    let sealed = |bytes: &[u8]| {
+        let mut buffer = Vec::with_capacity(bytes.len() + PIECE_TAG);
+        buffer.extend_from_slice(bytes);
+        seal_piece(&key, 3, &mut buffer).unwrap();
+        buffer
+    };
+    let mut piece = sealed(b"piece");
+    assert_eq!(piece.len(), 5 + PIECE_TAG);
+    for (key, number, cut) in [(&key, 2, 0), (&other, 3, 0), (&key, 3, 1)] {
+        let mut copy = piece[..piece.len() - cut].to_vec();
+        assert!(open_piece(key, number, &mut copy).is_err());
+    }
+    open_piece(&key, 3, &mut piece).unwrap();
+    assert_eq!(piece, b"piece");
+    let mut empty = sealed(b"");
+    assert_eq!(empty.len(), PIECE_TAG);
+    open_piece(&key, 3, &mut empty).unwrap();
+    assert_eq!(empty, Vec::<u8>::new());
 }
 
 /// The check sees the rules as they are, and can refuse the new one. It runs
@@ -3660,5 +3929,6 @@ async fn postgres_all() {
     exercise_writes_for_a_deleted_account(&store).await;
     exercise_account_clients(&store).await;
     exercise_held_sends(&store).await;
+    exercise_uploads(&store, &url).await;
     exercise_webhooks(&store).await;
 }

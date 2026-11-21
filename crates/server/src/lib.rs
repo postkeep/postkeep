@@ -23,6 +23,7 @@
 //! using them.
 
 pub mod app;
+pub mod bucket;
 pub mod cli;
 mod forward;
 #[cfg(feature = "fuzzing")]
@@ -41,6 +42,7 @@ mod run;
 mod selector;
 mod text;
 pub mod tools;
+pub mod upload;
 pub mod watch;
 
 pub use run::{

@@ -20,8 +20,8 @@ base64.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"], optional = true }
 bytes = "1"
 getrandom.workspace = true
-hex = "0.4"
-hmac = "0.13"
+hex.workspace = true
+hmac.workspace = true
 http = "1"
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client"] }

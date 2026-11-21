@@ -159,7 +159,7 @@
               "additionalProperties": false,
               "properties": {
                 "content": {
-                  "description": "File bytes as standard padded base64, with no line breaks. Give `content` or `text`, not both.",
+                  "description": "File bytes as standard padded base64, with no line breaks. Give one of `content`, `text` and `upload_id`.",
                   "type": [
                     "string",
                     "null"
@@ -177,7 +177,14 @@
                   "type": "string"
                 },
                 "text": {
-                  "description": "A UTF-8 file. Give `text` or `content`, not both.",
+                  "description": "A UTF-8 file. Give one of `text`, `content` and `upload_id`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "upload_id": {
+                  "description": "The `upload_id` from `upload_attachment`, once its file is sent. Give one of `upload_id`, `content` and `text`.",
                   "type": [
                     "string",
                     "null"
@@ -194,7 +201,7 @@
           "additionalProperties": false,
           "properties": {
             "attachments": {
-              "description": "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content or UTF-8 text. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file.",
+              "description": "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content, UTF-8 text, or the upload_id from upload_attachment for a file you send yourself. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file.",
               "items": {
                 "$ref": "#/$defs/NewAttachmentWire"
               },
@@ -1395,7 +1402,7 @@
               "additionalProperties": false,
               "properties": {
                 "content": {
-                  "description": "File bytes as standard padded base64, with no line breaks. Give `content` or `text`, not both.",
+                  "description": "File bytes as standard padded base64, with no line breaks. Give one of `content`, `text` and `upload_id`.",
                   "type": [
                     "string",
                     "null"
@@ -1413,7 +1420,14 @@
                   "type": "string"
                 },
                 "text": {
-                  "description": "A UTF-8 file. Give `text` or `content`, not both.",
+                  "description": "A UTF-8 file. Give one of `text`, `content` and `upload_id`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "upload_id": {
+                  "description": "The `upload_id` from `upload_attachment`, once its file is sent. Give one of `upload_id`, `content` and `text`.",
                   "type": [
                     "string",
                     "null"
@@ -1430,7 +1444,7 @@
           "additionalProperties": false,
           "properties": {
             "attachments": {
-              "description": "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content or UTF-8 text. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file.",
+              "description": "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content, UTF-8 text, or the upload_id from upload_attachment for a file you send yourself. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file.",
               "items": {
                 "$ref": "#/$defs/NewAttachmentWire"
               },
@@ -1813,7 +1827,7 @@
               "additionalProperties": false,
               "properties": {
                 "content": {
-                  "description": "File bytes as standard padded base64, with no line breaks. Give `content` or `text`, not both.",
+                  "description": "File bytes as standard padded base64, with no line breaks. Give one of `content`, `text` and `upload_id`.",
                   "type": [
                     "string",
                     "null"
@@ -1831,7 +1845,14 @@
                   "type": "string"
                 },
                 "text": {
-                  "description": "A UTF-8 file. Give `text` or `content`, not both.",
+                  "description": "A UTF-8 file. Give one of `text`, `content` and `upload_id`.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "upload_id": {
+                  "description": "The `upload_id` from `upload_attachment`, once its file is sent. Give one of `upload_id`, `content` and `text`.",
                   "type": [
                     "string",
                     "null"
@@ -1848,7 +1869,7 @@
           "additionalProperties": false,
           "properties": {
             "attachments": {
-              "description": "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content or UTF-8 text. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file.",
+              "description": "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content, UTF-8 text, or the upload_id from upload_attachment for a file you send yourself. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file.",
               "items": {
                 "$ref": "#/$defs/NewAttachmentWire"
               },
@@ -2614,6 +2635,56 @@
           "readOnlyHint": false,
           "destructiveHint": false,
           "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "upload_attachment",
+        "title": "Upload attachment",
+        "description": "Get a one-time upload to send one file's bytes to with a command, to attach it to a message: any file too large or too binary to write into attachments. Only for agents that can run commands where the file is. If you can't, and the file's bytes aren't in your context, tell the user it can't be attached from here.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "expires_at": {
+              "description": "When the upload ends, as RFC 3339.",
+              "type": "string"
+            },
+            "next": {
+              "description": "How to send the file and attach it.",
+              "type": "string"
+            },
+            "token": {
+              "description": "The one-time token for the `PUT`'s `Authorization: Bearer` header.",
+              "type": "string"
+            },
+            "upload_id": {
+              "description": "The id to give as `upload_id` in attachments once the file is there.",
+              "type": "string"
+            },
+            "url": {
+              "description": "Where to `PUT` the file's bytes.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "upload_id",
+            "url",
+            "token",
+            "expires_at",
+            "next"
+          ],
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
           "openWorldHint": false
         }
       }

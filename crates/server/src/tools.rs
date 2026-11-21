@@ -39,7 +39,7 @@ use postkeep_mail::{
 };
 use postkeep_store::{
     AccountId, EffectiveOutboxLimits, FilterRule, HeldSend, HeldSendMatch, LoadedWebhook,
-    MAX_CONSECUTIVE_FAILURES, OutboxLimitChange, OutboxPolicy, Store, StoreError, Webhook,
+    MAX_CONSECUTIVE_FAILURES, OutboxLimitChange, OutboxPolicy, Store, StoreError, Webhook, now,
 };
 use postkeep_upstream::{ApiClient, TokenManager, UpstreamProvider, pkce};
 use postkeep_webhook::WebhookUrl;
@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span};
 
+use crate::bucket::Bucket;
 use crate::mailbox::id::IMAP_PREFIX;
 use crate::mailbox::selection::{MAILBOX_REFUSAL, REFUSAL, SearchSelection};
 use crate::mailbox::{
@@ -71,6 +72,7 @@ use crate::metrics::Metrics;
 use crate::pool::{Fingerprint, ImapPool};
 use crate::request_log::{Note, outcome_of};
 use crate::selector::{MailboxSelector, Selection};
+use crate::upload::{MAX_UPLOAD_MIB, MOST_UPLOADS, UPLOAD_TTL, UPLOADS_OFF};
 use crate::watch::DEFAULT_MAX_FILTER_RULES;
 use crate::{forward, selector, text};
 
@@ -81,7 +83,8 @@ macro_rules! id_doc {
 }
 macro_rules! attachments_doc {
     () => {
-        "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content or UTF-8 text. \
+        "Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content, UTF-8 text, \
+         or the upload_id from upload_attachment for a file you send yourself. \
          By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. \
          Sent means the provider took the message; a recipient's server can still bounce a large or blocked file."
     };
@@ -124,8 +127,8 @@ mod filters;
 pub(crate) use attachments::FileDigest;
 pub use attachments::{DownloadAttachmentParams, NewAttachment};
 use attachments::{
-    MAX_ATTACHMENT_MIB, MAX_ATTACHMENTS, NewAttachmentWire, files_line, files_named,
-    read_attachments,
+    MAX_ATTACHMENT_MIB, MAX_ATTACHMENTS, NewAttachmentWire, Uploads, caller, files_line,
+    files_named, owner, read_attachments, split, uploads_end, with_files,
 };
 pub use extension::{
     ExtensionCall, RejectedPassword, ToolExtension, ToolFuture, WebhookProblem, WebhookProblemKind,
@@ -137,6 +140,13 @@ pub use filters::{
 
 /// How long a held call waits for the user's yes.
 const HOLD_TTL: Duration = Duration::from_mins(30);
+
+/// How long a hold lasts: [`HOLD_TTL`], or until the first of its message's
+/// uploads ends, at `ends` (Unix seconds), when that is sooner.
+fn hold_ttl(ends: Option<i64>) -> Duration {
+    let left = |ends: i64| Duration::from_secs(u64::try_from(ends - now()).unwrap_or(0));
+    ends.map_or(HOLD_TTL, |ends| HOLD_TTL.min(left(ends)))
+}
 /// Soft cap of unexpired holds per caller and mailbox.
 const MOST_HELD: i64 = 20;
 const NOT_A_YES: &str = "a request to send it is not a yes";
@@ -330,6 +340,9 @@ struct Context {
     usage: Option<Arc<dyn UsageHook>>,
     /// Where IMAP mailboxes count their logins and sends, if anywhere.
     metrics: Option<Metrics>,
+    /// The public URL of `/upload`, and the bucket that turns uploads on.
+    upload_url: String,
+    bucket: Option<Arc<dyn Bucket>>,
 }
 
 impl std::fmt::Debug for Context {
@@ -387,6 +400,8 @@ impl MailTools {
                 extension: None,
                 usage: None,
                 metrics: None,
+                upload_url: String::new(),
+                bucket: None,
             }),
         }
     }
@@ -400,6 +415,18 @@ impl MailTools {
             context.instructions.push_str(&paragraph);
         }
         context.extension = Some(extension);
+        Self {
+            context: Arc::new(context),
+        }
+    }
+
+    /// The same tools with uploads at `upload_url`, the public URL of
+    /// `/upload`, which `bucket` turns on.
+    #[must_use]
+    pub fn with_uploads(self, upload_url: String, bucket: Option<Arc<dyn Bucket>>) -> Self {
+        let mut context = Arc::unwrap_or_clone(self.context);
+        context.upload_url = upload_url;
+        context.bucket = bucket;
         Self {
             context: Arc::new(context),
         }
@@ -557,7 +584,8 @@ fn parse_addresses(field: &str, values: &[String]) -> Result<Vec<EmailAddress>, 
         .collect()
 }
 
-/// A plain-text message to the given recipients, refused without any.
+/// A plain-text message to the given recipients, refused without any, with
+/// its typed files, and its uploads to read at the send.
 fn plain_message(
     to: &[String],
     cc: &[String],
@@ -565,7 +593,8 @@ fn plain_message(
     subject: String,
     body: String,
     files: Vec<NewAttachment>,
-) -> Result<OutgoingMessage, String> {
+) -> Result<(OutgoingMessage, Uploads), String> {
+    let (attachments, uploads) = split(files);
     let message = OutgoingMessage {
         to: parse_addresses("to", to)?,
         cc: parse_addresses("cc", cc)?,
@@ -573,28 +602,30 @@ fn plain_message(
         subject,
         text_body: body,
         html_body: None,
-        attachments: files.into_iter().map(Into::into).collect(),
+        attachments,
     };
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
         return Err("at least one recipient is required".to_owned());
     }
-    Ok(message)
+    Ok((message, uploads))
 }
 
-/// A plain-text reply, to `to` when given.
+/// A plain-text reply, to `to` when given, with its uploads to read at the send.
 fn plain_reply(
     body: String,
     reply_all: bool,
     to: &[String],
     files: Vec<NewAttachment>,
-) -> Result<Reply, String> {
-    Ok(Reply {
+) -> Result<(Reply, Uploads), String> {
+    let (attachments, uploads) = split(files);
+    let reply = Reply {
         text_body: body,
         html_body: None,
-        attachments: files.into_iter().map(Into::into).collect(),
+        attachments,
         reply_all,
         to: parse_addresses("to", to)?,
-    })
+    };
+    Ok((reply, uploads))
 }
 
 fn folder_or_inbox(folder: Option<String>) -> String {
@@ -1711,6 +1742,46 @@ pub struct ActionOutput {
     pub result: String,
 }
 
+/// Result of `upload_attachment`.
+#[derive(Serialize, JsonSchema)]
+pub struct UploadOutput {
+    /// The id to give as `upload_id` in attachments once the file is there.
+    pub upload_id: String,
+    /// Where to `PUT` the file's bytes.
+    pub url: String,
+    /// The one-time token for the `PUT`'s `Authorization: Bearer` header.
+    pub token: String,
+    /// When the upload ends, as RFC 3339.
+    pub expires_at: String,
+    /// How to send the file and attach it.
+    pub next: String,
+}
+
+impl std::fmt::Debug for UploadOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadOutput")
+            .field("upload_id", &self.upload_id)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What `upload_attachment` tells the agent to do next.
+fn upload_next(upload_id: &str, url: &str, token: &str, expires_at: &str) -> String {
+    format!(
+        "Send the file's bytes, at most {MAX_UPLOAD_MIB} MiB, to url as an HTTP PUT with the \
+         header Authorization: Bearer {token}, for example: curl --fail-with-body -sS -T \
+         '/path/report.pdf' -H 'Authorization: Bearer {token}' '{url}' (curl.exe on Windows). \
+         Then pass {{\"upload_id\": \"{upload_id}\", \"filename\": \"report.pdf\"}} in \
+         attachments, with content_type if you know it. The token takes one file and ends at \
+         {expires_at}; if the PUT fails once the file has started, get a new upload. The \
+         upload_id goes on one message and is used up by the first try to send it or save it as \
+         a draft, even one that fails; for several files, a retry, or the same file on another \
+         message, get one upload each. Don't repeat the token to the user. Upload only what the \
+         user asked you to send."
+    )
+}
+
 /// The result of changing one or many messages.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ChangeOutput {
@@ -2446,76 +2517,102 @@ impl MailTools {
     async fn send_message(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(params): Parameters<SendParams>,
+        Parameters(mut params): Parameters<SendParams>,
         cancel: CancellationToken,
     ) -> Result<Json<SendOutput>, String> {
         let parts = &parts;
+        self.resolve(parts, &mut params.attachments).await?;
         let files = files_line(&params.attachments);
-        self.hold_step(parts, "send_message", params, async |params| {
-            if params.forward.is_some() && params.to.is_empty() {
-                return Err("Not sent: a forward needs at least one to recipient.".to_owned());
-            }
-            let mut message = plain_message(
-                &params.to,
-                &params.cc,
-                &params.bcc,
-                params.subject,
-                params.body,
-                params.attachments,
-            )?;
-            let options = SendOptions {
-                save_to_sent: params.save_to_sent.unwrap_or(true),
-            };
-            let selector = params.forward.map(|id| Selector {
-                id: Some(id),
-                ..Selector::default()
-            });
-            let mut permit = None;
-            let mut graph_files = Vec::new();
-            let (mailbox, forwarded) = if let Some(selector) = &selector {
-                let mailbox = self.mailbox(parts).await?;
-                let forwarded = if let Mailbox::Graph(graph) = &mailbox {
-                    let original = graph
-                        .forward_original(selector)
-                        .await
-                        .map_err(mailbox_error)?;
-                    graph_files.clone_from(&original.files);
-                    original
-                } else {
-                    let (raw, memory) = mailbox.original(selector).await.map_err(mailbox_error)?;
-                    permit = Some(memory);
-                    forward::build(raw, &mut message)?
-                };
-                (Some(mailbox), Some(forwarded))
-            } else {
-                (None, None)
-            };
-            Ok((forwarded, async move {
-                let mailbox = match mailbox {
-                    Some(mailbox) => mailbox,
-                    None => self.mailbox(parts).await?,
-                };
-                let sent = match (mailbox, selector) {
-                    (Mailbox::Graph(graph), Some(selector)) => {
-                        graph
-                            .forward(&selector, message, graph_files, options, cancel)
-                            .await
-                    }
-                    (Mailbox::Graph(graph), None) => {
-                        graph
-                            .send_with_cancel(Cow::Owned(message), options, cancel)
-                            .await
-                    }
-                    (mailbox, _) => mailbox.send(&message, options).await,
+        let ttl = hold_ttl(uploads_end(&params.attachments));
+        Box::pin(
+            self.hold_step(parts, "send_message", params, ttl, async |params| {
+                if params.forward.is_some() && params.to.is_empty() {
+                    return Err("Not sent: a forward needs at least one to recipient.".to_owned());
                 }
-                .map_err(mailbox_error)?;
-                drop(permit);
-                tracing::info!("message sent");
-                Ok(sent)
-            }))
-        })
+                let (mut message, uploads) = plain_message(
+                    &params.to,
+                    &params.cc,
+                    &params.bcc,
+                    params.subject,
+                    params.body,
+                    params.attachments,
+                )?;
+                let options = SendOptions {
+                    save_to_sent: params.save_to_sent.unwrap_or(true),
+                };
+                let selector = params.forward.map(|id| Selector {
+                    id: Some(id),
+                    ..Selector::default()
+                });
+                let mut permit = None;
+                let mut graph_files = Vec::new();
+                let (mailbox, forwarded) = if let Some(selector) = &selector {
+                    let mailbox = self.mailbox(parts).await?;
+                    let forwarded = if let Mailbox::Graph(graph) = &mailbox {
+                        let original = graph
+                            .forward_original(selector)
+                            .await
+                            .map_err(mailbox_error)?;
+                        graph_files.clone_from(&original.files);
+                        original
+                    } else {
+                        let (raw, memory) = mailbox
+                            .original(selector, uploads.total())
+                            .await
+                            .map_err(mailbox_error)?;
+                        permit = Some(memory);
+                        forward::build(raw, &mut message)?
+                    };
+                    (Some(mailbox), Some(forwarded))
+                } else {
+                    (None, None)
+                };
+                Ok((forwarded, async move {
+                    let permit = match permit {
+                        Some(permit) => Some(permit),
+                        None => uploads.reserve().await?,
+                    };
+                    let bucket = self.context.bucket.as_deref();
+                    uploads.load(bucket, &mut message.attachments).await?;
+                    let mailbox = match mailbox {
+                        Some(mailbox) => mailbox,
+                        None => self.mailbox(parts).await?,
+                    };
+                    let send = async move {
+                        match (mailbox, selector) {
+                            (Mailbox::Graph(graph), Some(selector)) => {
+                                graph
+                                    .forward(
+                                        &selector,
+                                        message,
+                                        graph_files,
+                                        options,
+                                        cancel,
+                                        permit,
+                                    )
+                                    .await
+                            }
+                            (Mailbox::Graph(graph), None) => {
+                                graph
+                                    .send_with_cancel(Cow::Owned(message), options, cancel, permit)
+                                    .await
+                            }
+                            (mailbox, _) => {
+                                let sent = mailbox.send(&message, options).await;
+                                drop(permit);
+                                sent
+                            }
+                        }
+                        .map_err(mailbox_error)
+                    };
+                    let sent = self.using_uploads(parts, &uploads, send).await?;
+                    tracing::info!("message sent");
+                    Ok(sent)
+                }))
+            }),
+        )
         .await
-        .map_err(|error| format!("{error}{files}"))
+        .map_err(|error| with_files(&error, &files))
     }
 
     /// Replies to a message.
@@ -2537,38 +2634,59 @@ impl MailTools {
     async fn reply_to_message(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(params): Parameters<ReplyParams>,
+        Parameters(mut params): Parameters<ReplyParams>,
         cancel: CancellationToken,
     ) -> Result<Json<SendOutput>, String> {
         let parts = &parts;
+        self.resolve(parts, &mut params.attachments).await?;
         let files = files_line(&params.attachments);
-        self.hold_step(parts, "reply_to_message", params, async |params| {
-            let reply = plain_reply(
-                params.body,
-                params.reply_all,
-                &params.to,
-                params.attachments,
-            )?;
-            let options = SendOptions {
-                save_to_sent: params.save_to_sent.unwrap_or(true),
-            };
-            let selector = selector!(params);
-            Ok((None, async move {
-                let sent = match self.mailbox(parts).await? {
-                    Mailbox::Graph(graph) => {
-                        graph
-                            .reply_with_cancel(&selector, Cow::Owned(reply), options, cancel)
-                            .await
-                    }
-                    mailbox => mailbox.reply(&selector, &reply, options).await,
-                }
-                .map_err(mailbox_error)?;
-                tracing::info!("reply sent");
-                Ok(sent)
-            }))
-        })
+        let ttl = hold_ttl(uploads_end(&params.attachments));
+        Box::pin(
+            self.hold_step(parts, "reply_to_message", params, ttl, async |params| {
+                let (mut reply, uploads) = plain_reply(
+                    params.body,
+                    params.reply_all,
+                    &params.to,
+                    params.attachments,
+                )?;
+                let options = SendOptions {
+                    save_to_sent: params.save_to_sent.unwrap_or(true),
+                };
+                let selector = selector!(params);
+                Ok((None, async move {
+                    let permit = uploads.reserve().await?;
+                    let bucket = self.context.bucket.as_deref();
+                    uploads.load(bucket, &mut reply.attachments).await?;
+                    let mailbox = self.mailbox(parts).await?;
+                    let send = async move {
+                        match mailbox {
+                            Mailbox::Graph(graph) => {
+                                graph
+                                    .reply_with_cancel(
+                                        &selector,
+                                        Cow::Owned(reply),
+                                        options,
+                                        cancel,
+                                        permit,
+                                    )
+                                    .await
+                            }
+                            mailbox => {
+                                let sent = mailbox.reply(&selector, &reply, options).await;
+                                drop(permit);
+                                sent
+                            }
+                        }
+                        .map_err(mailbox_error)
+                    };
+                    let sent = self.using_uploads(parts, &uploads, send).await?;
+                    tracing::info!("reply sent");
+                    Ok(sent)
+                }))
+            }),
+        )
         .await
-        .map_err(|error| format!("{error}{files}"))
+        .map_err(|error| with_files(&error, &files))
     }
 
     /// Saves a new draft.
@@ -2589,15 +2707,17 @@ impl MailTools {
     async fn create_draft(
         &self,
         Extension(parts): Extension<Parts>,
-        Parameters(params): Parameters<CreateDraftParams>,
+        Parameters(mut params): Parameters<CreateDraftParams>,
     ) -> Result<Json<CreateDraftOutput>, String> {
+        self.resolve(&parts, &mut params.attachments).await?;
         let files = files_line(&params.attachments);
+        let bucket = self.context.bucket.as_deref();
         async {
             let saved = if let Some(id) = params.id.filter(|id| !id.trim().is_empty()) {
                 if !params.cc.is_empty() || !params.bcc.is_empty() || !params.subject.is_empty() {
                     return Err("cc, bcc and subject can't be set when drafting a reply".to_owned());
                 }
-                let reply = plain_reply(
+                let (mut reply, uploads) = plain_reply(
                     params.body,
                     params.reply_all,
                     &params.to,
@@ -2607,15 +2727,22 @@ impl MailTools {
                     id: Some(id),
                     ..Selector::default()
                 };
-                self.mailbox(&parts)
-                    .await?
-                    .create_reply_draft(&selector, &reply)
-                    .await
+                let mailbox = self.mailbox(&parts).await?;
+                mailbox.drafts().map_err(mailbox_error)?;
+                let _permit = uploads.reserve().await?;
+                uploads.load(bucket, &mut reply.attachments).await?;
+                let save = async {
+                    mailbox
+                        .create_reply_draft(&selector, &reply)
+                        .await
+                        .map_err(mailbox_error)
+                };
+                self.using_uploads(&parts, &uploads, save).await?
             } else {
                 if params.reply_all {
                     return Err("reply_all can only be set when drafting a reply".to_owned());
                 }
-                let message = plain_message(
+                let (mut message, uploads) = plain_message(
                     &params.to,
                     &params.cc,
                     &params.bcc,
@@ -2623,9 +2750,13 @@ impl MailTools {
                     params.body,
                     params.attachments,
                 )?;
-                self.mailbox(&parts).await?.create_draft(&message).await
-            }
-            .map_err(mailbox_error)?;
+                let mailbox = self.mailbox(&parts).await?;
+                mailbox.drafts().map_err(mailbox_error)?;
+                let _permit = uploads.reserve().await?;
+                uploads.load(bucket, &mut message.attachments).await?;
+                let save = async { mailbox.create_draft(&message).await.map_err(mailbox_error) };
+                self.using_uploads(&parts, &uploads, save).await?
+            };
             tracing::info!("draft saved");
             Ok(Json(CreateDraftOutput {
                 message_id: saved.message_id,
@@ -2633,7 +2764,7 @@ impl MailTools {
             }))
         }
         .await
-        .map_err(|error: String| format!("{error}{files}"))
+        .map_err(|error: String| with_files(&error, &files))
     }
 
     /// Marks messages read/unread or flagged/unflagged.
@@ -2738,6 +2869,61 @@ impl MailTools {
             .map_err(mailbox_error)?;
         Ok(Json(ActionOutput {
             result: format!("created folder {name}"),
+        }))
+    }
+
+    /// Makes a one-time upload for one file's bytes.
+    #[tool(
+        title = "Upload attachment",
+        description = "Get a one-time upload to send one file's bytes to with a command, to attach it to a \
+                       message: any file too large or too binary to write into attachments. Only for agents \
+                       that can run commands where the file is. If you can't, and the file's bytes aren't in \
+                       your context, tell the user it can't be attached from here.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn upload_attachment(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(NoArguments {}): Parameters<NoArguments>,
+    ) -> Result<Json<UploadOutput>, String> {
+        if self.context.bucket.is_none() {
+            return Err(UPLOADS_OFF.to_owned());
+        }
+        let (account, caller) = caller(&parts)?;
+        let id = pkce::random_token().map_err(|_| "could not make an upload id")?;
+        let token = pkce::random_token().map_err(|_| "could not make an upload token")?;
+        let expires_at = self
+            .context
+            .store
+            .create_upload(
+                owner(&account, caller),
+                &id,
+                &token,
+                UPLOAD_TTL,
+                MOST_UPLOADS,
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "could not make an upload");
+                "could not make an upload just now; try again in a minute".to_owned()
+            })?
+            .ok_or(
+                "Too many uploads are waiting for their files here. Send their files, or wait \
+                 for them to end.",
+            )?;
+        let expires_at = rfc3339(expires_at).ok_or("could not read the upload's end")?;
+        let url = self.context.upload_url.clone();
+        Ok(Json(UploadOutput {
+            next: upload_next(&id, &url, &token, &expires_at),
+            upload_id: id,
+            url,
+            token,
+            expires_at,
         }))
     }
 
@@ -3409,12 +3595,14 @@ impl MailTools {
     }
 
     /// `prepare` checks the message and pins any original before asking to hold or taking a hold.
-    /// Sending waits for the returned future, after the hold and the usage check.
+    /// Sending waits for the returned future, after the hold and the usage check. A hold lasts
+    /// `ttl`.
     async fn hold_step<P, F>(
         &self,
         parts: &Parts,
         tool: &str,
         params: P,
+        ttl: Duration,
         prepare: impl AsyncFnOnce(P) -> Result<(Option<forward::Forwarded>, F), String>,
     ) -> Result<Json<SendOutput>, String>
     where
@@ -3428,11 +3616,7 @@ impl MailTools {
             .and_then(|arguments| arguments.remove("hold_id"))
             .and_then(|id| id.as_str().map(str::to_owned))
             .filter(|id| !id.trim().is_empty());
-        let mailbox = Self::require_account(parts)?;
-        let caller = parts
-            .extensions
-            .get::<Authenticated>()
-            .ok_or("not authenticated")?;
+        let (mailbox, caller) = attachments::caller(parts)?;
         let (forwarded, send) = prepare(params).await?;
         pin_forward(&mut arguments, forwarded.as_ref());
         let held = HeldSend {
@@ -3482,7 +3666,7 @@ impl MailTools {
                 let expires_at = self
                     .context
                     .store
-                    .hold_send(HeldSend { id: &id, ..held }, HOLD_TTL, MOST_HELD)
+                    .hold_send(HeldSend { id: &id, ..held }, ttl, MOST_HELD)
                     .await
                     .map_err(store_error)?
                     .ok_or(MOST_WAITING)?;
@@ -3511,7 +3695,7 @@ impl MailTools {
         .await;
         result.map_err(|error| {
             if hold_id.is_some() {
-                format!("{error} {AFTER_TAKE}")
+                with_files(&error, &format!(" {AFTER_TAKE}"))
             } else {
                 error
             }
@@ -3738,9 +3922,30 @@ mod tests {
         Attachment, AttachmentInfo, EmailAddress, GetMessageParams, MailTools, NOT_A_YES,
         RequestedBodyFormat, SendParams, SentCopy, Summary, describe_sent_copy, different_hold,
         format_address, forward, inline_images, message_summary, next_page_offset, next_step,
-        pin_forward, redact_delivery_summary,
+        pin_forward, redact_delivery_summary, upload_next,
     };
     use postkeep_mail::MessageFlags;
+
+    #[test]
+    fn an_upload_says_how_to_send_its_file_and_that_it_goes_once() {
+        let next = upload_next(
+            "ID",
+            "https://a.example/upload",
+            "TOKEN",
+            "2030-01-01T00:00:00Z",
+        );
+        for part in [
+            "-H 'Authorization: Bearer TOKEN' 'https://a.example/upload'",
+            "-T '/path/report.pdf'",
+            "{\"upload_id\": \"ID\", \"filename\": \"report.pdf\"}",
+            "ends at 2030-01-01T00:00:00Z",
+            "at most 25 MiB",
+            "goes on one message",
+            "if the PUT fails once the file has started, get a new upload",
+        ] {
+            assert!(next.contains(part), "{part}: {next}");
+        }
+    }
 
     #[test]
     fn action_inputs_refuse_ambiguous_empty_large_and_permanent_batches() {

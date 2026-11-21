@@ -745,6 +745,7 @@ impl Store {
             "DELETE FROM grants WHERE account_id = $1",
             "DELETE FROM account_sessions WHERE account_id = $1",
             "DELETE FROM held_sends WHERE account_id = $1",
+            "DELETE FROM uploads WHERE account_id = $1",
             "DELETE FROM webhook_deliveries WHERE account_id = $1",
             "DELETE FROM mail_events WHERE account_id = $1",
             "DELETE FROM webhook_filter_rules WHERE account_id = $1",

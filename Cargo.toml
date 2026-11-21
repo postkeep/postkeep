@@ -23,6 +23,8 @@ clap = { version = "4.6", features = ["derive", "env", "string"] }
 encoding_rs = "0.8"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
+hex = "0.4"
+hmac = "0.13"
 http-body-util = "0.1"
 hyper = { version = "1", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1", default-features = false, features = ["http1", "server", "server-graceful", "service", "tokio"] }

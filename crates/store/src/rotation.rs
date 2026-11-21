@@ -8,7 +8,9 @@ use sqlx::{AssertSqlSafe, Row};
 use crate::accounts::AccountId;
 use crate::crypto::{FORMAT_V1, FORMAT_V2, PASSWORD_SLOT, Slot, Stored, password_context};
 use crate::envelope::Sealer;
-use crate::{DEFAULT_TENANT, Result, Store, StoreError, events, filters, upstream, webhooks};
+use crate::{
+    DEFAULT_TENANT, Result, Store, StoreError, events, filters, uploads, upstream, webhooks,
+};
 
 /// How many rows [`Store::reencrypt`] reads at a time. A page is all that is
 /// held in memory. An event payload describes one message, the newest of at
@@ -86,6 +88,8 @@ const EVENT_TENANT: &str = "(SELECT a.tenant FROM accounts a WHERE a.id = mail_e
 /// The tenant of the account that owns a filter rule, as the readers join it.
 const FILTER_TENANT: &str =
     "(SELECT a.tenant FROM accounts a WHERE a.id = webhook_filter_rules.account_id)";
+/// The tenant of the account that owns an upload, as the readers join it.
+const UPLOAD_TENANT: &str = "(SELECT a.tenant FROM accounts a WHERE a.id = uploads.account_id)";
 
 const COLUMNS: &[Encrypted] = &[
     Encrypted {
@@ -195,6 +199,27 @@ const COLUMNS: &[Encrypted] = &[
         // No earlier version stored a pattern, so no value is under the master key.
         context: |id, _| Ok(filters::pattern_context(id)),
     },
+    Encrypted {
+        slot: uploads::KEY_SLOT,
+        key: "id_hash",
+        row_key: "id_hash",
+        tenant: UPLOAD_TENANT,
+        unowned_is_default: false,
+        extra: "",
+        filter: "",
+        // No earlier version stored an upload, so no value is under the master key.
+        context: |id_hash, _| Ok(uploads::key_context(id_hash)),
+    },
+    Encrypted {
+        slot: uploads::DIGEST_SLOT,
+        key: "id_hash",
+        row_key: "id_hash",
+        tenant: UPLOAD_TENANT,
+        unowned_is_default: false,
+        extra: "",
+        filter: "",
+        context: |id_hash, _| Ok(uploads::digest_context(id_hash)),
+    },
 ];
 
 impl Store {
@@ -206,7 +231,8 @@ impl Store {
 
     /// The sweep: moves every stored secret that is still under the master key
     /// (IMAP passwords, webhook secrets, Microsoft and Google tokens, sign-ins
-    /// in progress and stored events) to the data key of its row's tenant, as
+    /// in progress, stored events, and the keys and digests of uploads, which no
+    /// earlier version stored) to the data key of its row's tenant, as
     /// the writer of that column would have stored it. The master key that
     /// opens a value is the current one or a previous one, so this also ends a
     /// master-key rotation for those values. Safe to run repeatedly, in several
@@ -411,12 +437,12 @@ impl Store {
 mod tests {
     use super::COLUMNS;
     use crate::crypto::{PASSWORD_SLOT, v2_context};
-    use crate::{events, filters, upstream, webhooks};
+    use crate::{events, filters, uploads, upstream, webhooks};
 
-    /// The associated data of a v2 value is stored data: these ten strings
+    /// The associated data of a v2 value is stored data: these twelve strings
     /// must never change. The sweep visits the columns that the readers name.
     #[test]
-    fn the_associated_data_of_all_ten_columns_is_pinned() {
+    fn the_associated_data_of_all_twelve_columns_is_pinned() {
         let slots = [
             PASSWORD_SLOT,
             webhooks::AUTH_SLOT,
@@ -428,6 +454,8 @@ mod tests {
             upstream::CONTINUATION_SLOT,
             events::PAYLOAD_SLOT,
             filters::PATTERN_SLOT,
+            uploads::KEY_SLOT,
+            uploads::DIGEST_SLOT,
         ];
         let actual: Vec<String> = slots
             .iter()
@@ -446,6 +474,8 @@ mod tests {
                 "postkeep/v2/tenant-a/upstream_requests.continuation_ciphertext/row-1",
                 "postkeep/v2/tenant-a/mail_events.payload_ciphertext/row-1",
                 "postkeep/v2/tenant-a/webhook_filter_rules.pattern_ciphertext/row-1",
+                "postkeep/v2/tenant-a/uploads.key_ciphertext/row-1",
+                "postkeep/v2/tenant-a/uploads.digest_ciphertext/row-1",
             ]
         );
         // In the tenant `%` and `/` are escaped; the row key is as it is.
@@ -480,6 +510,8 @@ mod tests {
             ("state_hash", "tenant".to_owned(), true),
             ("id", account("mail_events"), false),
             ("id", account("webhook_filter_rules"), false),
+            ("id_hash", account("uploads"), false),
+            ("id_hash", account("uploads"), false),
         ];
         let actual: Vec<_> = COLUMNS
             .iter()
@@ -503,6 +535,8 @@ mod tests {
                 "state_hash",
                 "id",
                 "id",
+                "id_hash",
+                "id_hash",
             ]
         );
     }

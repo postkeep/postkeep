@@ -437,6 +437,7 @@ async fn call(app: &Router, tool: &str, arguments: Value) -> Result<Value, Strin
 
 fn config() -> AppConfig {
     AppConfig {
+        bucket: None,
         auth: AuthConfig::new(&format!("https://{HOST}"), app::MCP_PATH).unwrap(),
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),
@@ -812,7 +813,7 @@ async fn every_builder_addition_reaches_the_server_it_runs() {
             Some((400, CALLBACK_PAGE.to_owned()))
         );
         let listed = mcp_at(addr, "tools/list", json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 18);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
         let get_plan = json!({ "name": "get_plan", "arguments": {} });
         let called = mcp_at(addr, "tools/call", get_plan).await;
         assert_eq!(
@@ -865,7 +866,7 @@ async fn the_principal_resolver_decides_mcp_access() {
     let (status, body) = mcp(&app, "embedding-key", "tools/list").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let listed: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 17);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 18);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
     let (status, _) = mcp(&app, "some-token", "tools/list").await;
@@ -1079,7 +1080,7 @@ async fn the_tool_extension_lists_checks_and_runs_its_tools() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let listed: Value = serde_json::from_str(&body).unwrap();
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!((tools.len(), &tools[17]["name"]), (18, &json!("get_plan")));
+    assert_eq!((tools.len(), &tools[18]["name"]), (19, &json!("get_plan")));
     assert_eq!(h.embedding.take(), ["tools tenant-a"]);
 
     let initialize = json!({

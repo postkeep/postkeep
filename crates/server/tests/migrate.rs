@@ -31,7 +31,7 @@ fn migrate_applies_pending_migrations_once() {
     assert!(first.status.success(), "{}", text(&first.stderr));
     assert_eq!(
         text(&first.stdout),
-        "applied migrations 0001, 0002, 0003, 0004, 0005, 0006, 0007, 0008, 0009, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0018\n"
+        "applied migrations 0001, 0002, 0003, 0004, 0005, 0006, 0007, 0008, 0009, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0018, 0019\n"
     );
     let again = postkeep(&["migrate"], &env);
     assert!(again.status.success(), "{}", text(&again.stderr));

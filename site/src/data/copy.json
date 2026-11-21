@@ -482,7 +482,7 @@
     },
     "home.tools.title": {
       "n": "H69",
-      "text": "Seventeen tools, for your mail"
+      "text": "Eighteen tools, for your mail"
     },
     "home.tools.lead": {
       "n": "H70",
@@ -657,6 +657,15 @@
       "n": "H206",
       "text": "Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it. Not available for Outlook or for Gmail with Sign in with Google."
     },
+    "home.tools[17].name": {
+      "n": "H207",
+      "kind": "code",
+      "text": "upload_attachment"
+    },
+    "home.tools[17].desc": {
+      "n": "H208",
+      "text": "Gives a one-time upload for one file’s bytes, sent with a command, to attach to one message. Off unless the server has a bucket."
+    },
     "home.tools.after": {
       "n": "H99",
       "text": "You set the webhook address and its secrets yourself, on your server’s account page."
@@ -701,7 +710,7 @@
     },
     "home.selfhost.points[2].text": {
       "n": "H109",
-      "text": "Saved app passwords, Microsoft and Google sign-ins, webhook secrets, webhook filter patterns and stored events are encrypted with AES-256-GCM under data keys wrapped by a master key you generate."
+      "text": "Saved app passwords, Microsoft and Google sign-ins, webhook secrets and filter patterns, stored events and uploaded files, in your bucket, are encrypted with AES-256-GCM under data keys wrapped by a master key you generate."
     },
     "home.selfhost.points[3].title": {
       "n": "H110",

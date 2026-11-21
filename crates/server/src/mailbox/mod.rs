@@ -436,6 +436,19 @@ fn too_large_to_forward() -> MailboxError {
     MailboxError::Message(TOO_LARGE_TO_FORWARD.to_owned())
 }
 
+/// A forward whose original and uploads together are over the memory budget.
+fn beyond_budget(original: usize, uploads: usize) -> MailboxError {
+    use crate::limits::megabytes;
+    format!(
+        "Not sent: the forwarded message ({}) and the uploaded files ({}), with the room an \
+         original needs, are {}. Forward it with fewer files, and send the rest in another message.",
+        megabytes(original),
+        megabytes(uploads),
+        crate::limits::beyond_budget()
+    )
+    .into()
+}
+
 fn forward_size_error(reserved: usize) -> MailboxError {
     if reserved < postkeep_upstream::http::MESSAGE_LIMIT {
         "The message to forward was larger than the provider reported; nothing was sent."
@@ -831,25 +844,24 @@ impl Mailbox {
         }
     }
 
-    /// Reads a Gmail or IMAP original, reserving memory until its forward finishes.
+    /// Reads a Gmail or IMAP original, reserving memory until its forward
+    /// finishes, in one reservation with the `uploads` bytes it sends beside.
     pub(crate) async fn original(
         &self,
         selector: &Selector,
+        uploads: usize,
     ) -> MailboxResult<(Vec<u8>, tokio::sync::SemaphorePermit<'static>)> {
         use postkeep_upstream::http::MESSAGE_LIMIT;
         let size = match self {
-            Self::Gmail(gmail) => gmail
-                .original_size(selector)
-                .await?
-                .unwrap_or(MESSAGE_LIMIT),
+            Self::Gmail(gmail) => gmail.original_size(selector).await?,
             Self::Imap(imap) => {
                 let target = selector.imap()?;
-                imap.session(async |session| {
+                let size = imap.session(async |session| {
                     session
                         .message_size(&target.folder, target.uid, target.uid_validity)
                         .await
-                })
-                .await? as usize
+                });
+                Some(size.await? as usize)
             }
             Self::Graph(_) => {
                 return Err(MailboxError::Message(
@@ -857,12 +869,23 @@ impl Mailbox {
                 ));
             }
         };
-        if size > MESSAGE_LIMIT {
+        if size.is_some_and(|size| size > MESSAGE_LIMIT) {
             return Err(too_large_to_forward());
         }
-        // Some providers only estimate size. Reserve a margin before fetching.
-        let reserved = (size + size / 8 + 1024).min(MESSAGE_LIMIT);
-        let permit = crate::limits::large_message(reserved).await?;
+        // Some providers only estimate size. Reserve a margin before fetching;
+        // with no size, the whole budget, and the uploads are checked once read.
+        let reserved = size.map_or(MESSAGE_LIMIT, |size| {
+            (size + size / 8 + 1024).min(MESSAGE_LIMIT)
+        });
+        let room = if size.is_some() {
+            reserved + uploads
+        } else {
+            reserved
+        };
+        if room > MESSAGE_LIMIT {
+            return Err(beyond_budget(size.unwrap_or(reserved), uploads));
+        }
+        let permit = crate::limits::large_message(room).await?;
         let raw = match self {
             Self::Gmail(gmail) => gmail.original(selector, reserved).await?,
             Self::Imap(imap) => {
@@ -886,6 +909,9 @@ impl Mailbox {
                 ));
             }
         };
+        if size.is_none() && raw.len() + uploads > MESSAGE_LIMIT {
+            return Err(beyond_budget(raw.len(), uploads));
+        }
         Ok((raw, permit))
     }
 
@@ -1021,15 +1047,19 @@ impl Mailbox {
         }
     }
 
+    /// The mailbox that saves drafts: IMAP. Outlook and Gmail are refused.
+    pub(crate) fn drafts(&self) -> MailboxResult<&ImapMailbox> {
+        match self {
+            Self::Imap(imap) => Ok(imap),
+            Self::Graph(_) | Self::Gmail(_) => Err(MailboxError::Message(NO_DRAFTS.to_owned())),
+        }
+    }
+
     /// Saves a new draft.
     pub async fn create_draft(&self, message: &OutgoingMessage) -> MailboxResult<SavedDraft> {
-        match self {
-            Self::Graph(_) | Self::Gmail(_) => Err(MailboxError::Message(NO_DRAFTS.to_owned())),
-            Self::Imap(imap) => {
-                imap.session(async |session| imap.client.save_draft(session, message).await)
-                    .await
-            }
-        }
+        let imap = self.drafts()?;
+        imap.session(async |session| imap.client.save_draft(session, message).await)
+            .await
     }
 
     /// Saves a reply to a message as a draft.
@@ -1038,24 +1068,20 @@ impl Mailbox {
         selector: &Selector,
         reply: &Reply,
     ) -> MailboxResult<SavedDraft> {
-        match self {
-            Self::Graph(_) | Self::Gmail(_) => Err(MailboxError::Message(NO_DRAFTS.to_owned())),
-            Self::Imap(imap) => {
-                let target = selector.imap()?;
-                imap.session(async |session| {
-                    imap.client
-                        .save_draft_reply(
-                            session,
-                            &target.folder,
-                            target.uid,
-                            target.uid_validity,
-                            reply,
-                        )
-                        .await
-                })
+        let imap = self.drafts()?;
+        let target = selector.imap()?;
+        imap.session(async |session| {
+            imap.client
+                .save_draft_reply(
+                    session,
+                    &target.folder,
+                    target.uid,
+                    target.uid_validity,
+                    reply,
+                )
                 .await
-            }
-        }
+        })
+        .await
     }
 }
 

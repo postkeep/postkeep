@@ -18,6 +18,17 @@ pub(crate) const ACCOUNT_WAIT: Duration = Duration::from_secs(10);
 const LARGE_MESSAGE_LIMIT: usize = postkeep_upstream::http::MESSAGE_LIMIT;
 static LARGE_MESSAGES: Semaphore = Semaphore::const_new(LARGE_MESSAGE_LIMIT);
 
+/// The memory budget in words: "more than postkeep sends at once (48 MiB)".
+pub(crate) fn beyond_budget() -> String {
+    let mib = LARGE_MESSAGE_LIMIT / (1024 * 1024);
+    format!("more than postkeep sends at once ({mib} MiB)")
+}
+
+/// A size in megabytes with one decimal, as a refusal over the budget gives it.
+pub(crate) fn megabytes(size: usize) -> String {
+    format!("{}.{} MB", size / 1_000_000, size % 1_000_000 / 100_000)
+}
+
 pub(crate) async fn large_message(
     size: usize,
 ) -> Result<tokio::sync::SemaphorePermit<'static>, String> {
@@ -30,7 +41,14 @@ async fn large_message_in(
 ) -> Result<tokio::sync::SemaphorePermit<'_>, String> {
     const BUSY: &str =
         "Not sent: postkeep is busy with other large messages; try again in a minute.";
-    let permits = u32::try_from(size.clamp(1, LARGE_MESSAGE_LIMIT)).map_err(|_| BUSY)?;
+    if size > LARGE_MESSAGE_LIMIT {
+        let size = megabytes(size);
+        return Err(format!(
+            "Not sent: this message ({size}) is {}.",
+            beyond_budget()
+        ));
+    }
+    let permits = u32::try_from(size.max(1)).map_err(|_| BUSY)?;
     tokio::time::timeout(ACCOUNT_WAIT, budget.acquire_many(permits))
         .await
         .map_err(|_| BUSY)?
@@ -153,10 +171,12 @@ mod tests {
         assert!(busy.contains("busy with other large messages"));
         assert_eq!(start.elapsed(), ACCOUNT_WAIT);
         drop(second);
-        let whole = large_message_in(&budget, LARGE_MESSAGE_LIMIT + 1)
+        let start = tokio::time::Instant::now();
+        let over = large_message_in(&budget, LARGE_MESSAGE_LIMIT + 1)
             .await
-            .unwrap();
-        assert_eq!(whole.num_permits(), LARGE_MESSAGE_LIMIT);
+            .unwrap_err();
+        assert!(over.contains("more than postkeep sends at once"));
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
     }
 
     #[tokio::test]

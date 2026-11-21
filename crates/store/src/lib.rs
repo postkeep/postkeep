@@ -12,8 +12,8 @@
 //! Security properties:
 //!
 //! * App passwords, Microsoft and Google tokens, webhook secrets, the patterns of
-//!   webhook filter rules, stored events, and the secrets of a provider sign-in
-//!   in progress are encrypted
+//!   webhook filter rules, stored events, the keys and digests of uploads, and
+//!   the secrets of a provider sign-in in progress are encrypted
 //!   with AES-256-GCM under a [`MasterKey`] or a tenant's data key (below),
 //!   with a fresh random nonce per value and associated data naming the value
 //!   and its row (the email address for passwords; the hash of the OAuth
@@ -80,6 +80,7 @@ mod oauth;
 mod push;
 mod rotation;
 mod sessions;
+mod uploads;
 mod upstream;
 mod webhooks;
 
@@ -110,6 +111,10 @@ pub use oauth::{
 pub use push::PushSubscription;
 pub use rotation::Reencrypted;
 pub use sessions::{AccountClient, AccountOverview, SessionTtl};
+pub use uploads::{
+    ClaimRefused, Claimed, PIECE_TAG, UploadBounds, UploadLookup, UploadOwner, Used, open_piece,
+    seal_piece,
+};
 pub use upstream::{StoredUpstreamTokens, UpstreamPurpose, UpstreamRequest, UpstreamTokens};
 pub use webhooks::{
     DeliveryEffect, DeliveryRecord, KEPT_DELIVERIES, LoadedWebhook, MAX_CONSECUTIVE_FAILURES,

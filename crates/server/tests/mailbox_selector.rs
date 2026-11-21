@@ -1,5 +1,5 @@
 //! The mailbox selector: with a principal resolver whose callers hold
-//! several mailboxes, each of the 17 tools takes a `mailbox` argument,
+//! several mailboxes, each of the 18 tools takes a `mailbox` argument,
 //! acts on the mailbox it names, and refuses any other mailbox with the
 //! same unknown-mailbox error. Runs in process on SQLite, without network
 //! access: the two mailboxes fail in different, recognisable ways before
@@ -31,6 +31,8 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+
+mod bucket;
 
 const HOST: &str = "mail.example.com";
 const TENANT: &str = "tenant-a";
@@ -102,6 +104,7 @@ struct Harness {
     c: AccountId,
     d: AccountId,
     _dir: tempfile::TempDir,
+    _bucket: wiremock::MockServer,
 }
 
 fn password() -> SecretString {
@@ -167,8 +170,12 @@ async fn harness() -> Harness {
         .await
         .unwrap();
 
+    let bucket_server = wiremock::MockServer::start().await;
+    let bucket: Arc<dyn postkeep::bucket::Bucket> =
+        Arc::new(bucket::stand_in(&bucket_server).await.1);
     let build = |selects: bool| {
         let config = AppConfig {
+            bucket: Some(bucket.clone()),
             auth: AuthConfig::new(&format!("https://{HOST}"), app::MCP_PATH).unwrap(),
             extra_allowed_hosts: Vec::new(),
             extra_allowed_origins: Vec::new(),
@@ -201,6 +208,7 @@ async fn harness() -> Harness {
         c,
         d,
         _dir: dir,
+        _bucket: bucket_server,
     }
 }
 
@@ -282,6 +290,7 @@ fn tools() -> Vec<(&'static str, Value)> {
             json!({ "action": "allow", "field": "subject", "kind": "contains", "pattern": "x" }),
         ),
         ("remove_webhook_filter", json!({ "all": true })),
+        ("upload_attachment", json!({})),
     ]
 }
 
@@ -321,8 +330,8 @@ async fn every_schema_takes_mailbox_only_when_the_resolver_selects() {
     let h = harness().await;
     let selecting = listed_tools(&h.selecting).await;
     let plain = listed_tools(&h.plain).await;
-    assert_eq!(selecting.len(), 17);
-    assert_eq!(plain.len(), 17);
+    assert_eq!(selecting.len(), 18);
+    assert_eq!(plain.len(), 18);
     for (selecting, plain) in selecting.iter().zip(&plain) {
         let name = selecting["name"].as_str().unwrap();
         assert_eq!(name, plain["name"]);
@@ -460,7 +469,8 @@ async fn every_tool_acts_on_the_selected_mailbox() {
     assert_eq!(status["enabled"], true);
 
     let missing = "No webhook is saved for this account. Set it up on the account page (/account).";
-    for (tool, arguments) in &all[MAIL_TOOLS + 1..] {
+    // The webhook tools after the status; the upload, last, opens no mailbox.
+    for (tool, arguments) in &all[MAIL_TOOLS + 1..all.len() - 1] {
         let error = call(&h.selecting, token, tool, arguments.clone())
             .await
             .unwrap_err();

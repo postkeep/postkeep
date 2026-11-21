@@ -229,6 +229,7 @@ async fn setup(extensions: Extensions) -> Setup {
     auth.refresh_reuse_grace = std::time::Duration::ZERO;
     auth.requests_per_minute = 10_000;
     let config = AppConfig {
+        bucket: None,
         auth,
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),

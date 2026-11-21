@@ -14,9 +14,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+use postkeep_auth::Authenticated;
+use postkeep_store::{AccountId, DataKey, PIECE_TAG, UploadLookup, UploadOwner, open_piece};
+
 use super::{AttachmentInfo, DEFAULT_MAX_CHARS, MAX_MAX_CHARS, MailTools, mailbox_error};
+use crate::bucket::Bucket;
 use crate::mailbox::Selector;
 use crate::text;
+use crate::upload::{
+    MAX_UPLOAD_BYTES, MAX_UPLOAD_MIB, UPLOAD_PIECE, UPLOAD_TIME, UPLOADS_OFF, delete_pieces,
+    piece_name, pieces,
+};
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -25,16 +33,45 @@ pub(super) struct NewAttachmentWire {
     filename: String,
     /// MIME type, e.g. `application/pdf`. Defaults to `application/octet-stream`, or `text/plain; charset=utf-8` for `text`.
     content_type: Option<String>,
-    /// File bytes as standard padded base64, with no line breaks. Give `content` or `text`, not both.
+    /// File bytes as standard padded base64, with no line breaks. Give one of `content`, `text` and `upload_id`.
     content: Option<String>,
-    /// A UTF-8 file. Give `text` or `content`, not both.
+    /// A UTF-8 file. Give one of `text`, `content` and `upload_id`.
     text: Option<String>,
+    /// The `upload_id` from `upload_attachment`, once its file is sent. Give one of `upload_id`, `content` and `text`.
+    upload_id: Option<String>,
 }
 
-/// An outgoing file with its name, type and decoded bytes checked.
+/// An outgoing file with its name and type checked, and its decoded bytes
+/// checked or its upload looked up.
 #[derive(Deserialize)]
 #[serde(try_from = "NewAttachmentWire")]
-pub struct NewAttachment(OutgoingAttachment);
+pub struct NewAttachment(File);
+
+enum File {
+    /// Its bytes came in the call.
+    Typed(OutgoingAttachment),
+    /// Its bytes wait in the bucket, looked up by `resolve` and read by `load`.
+    Uploaded(Uploaded),
+}
+
+pub(super) struct Uploaded {
+    id: String,
+    filename: String,
+    content_type: String,
+    stored: Option<Stored>,
+}
+
+struct Stored {
+    object: String,
+    key: DataKey,
+    digest: [u8; 32],
+    size: usize,
+    expires_at: i64,
+}
+
+/// The uploaded files of a message, each with its place among the message's
+/// files.
+pub(super) struct Uploads(Vec<(usize, Uploaded)>);
 
 pub(super) const MAX_ATTACHMENTS: usize = 1_000;
 
@@ -72,6 +109,7 @@ impl TryFrom<NewAttachmentWire> for NewAttachment {
             content_type,
             content,
             text,
+            upload_id,
         } = wire;
         let invalid = |reason: &str| format!("attachment {filename:?}: {reason}");
         if filename.is_empty()
@@ -129,12 +167,20 @@ impl TryFrom<NewAttachmentWire> for NewAttachment {
                 content_type.trim_end_matches([' ', ';'])
             );
         }
-        let content = match (content, text) {
-            (Some(encoded), None) => STANDARD
+        let content = match (content, text, upload_id) {
+            (Some(encoded), None, None) => STANDARD
                 .decode(encoded)
                 .map_err(|_| invalid("content is not base64"))?,
-            (None, Some(text)) => text.into_bytes(),
-            _ => return Err(invalid("give exactly one of content and text")),
+            (None, Some(text), None) => text.into_bytes(),
+            (None, None, Some(id)) => {
+                return Ok(Self(File::Uploaded(Uploaded {
+                    id,
+                    filename,
+                    content_type,
+                    stored: None,
+                })));
+            }
+            _ => return Err(invalid("give exactly one of content, text and upload_id")),
         };
         let file = OutgoingAttachment {
             filename,
@@ -143,19 +189,27 @@ impl TryFrom<NewAttachmentWire> for NewAttachment {
             content_id: None,
             inline: false,
         };
-        file.validate_content().map_err(|error| match error {
-            postkeep_mail::Error::InvalidInput(message) => message,
-            other => other.to_string(),
-        })?;
-        Ok(Self(file))
+        checked(&file)?;
+        Ok(Self(File::Typed(file)))
+    }
+}
+
+impl NewAttachment {
+    /// The file's name, and its size, which is 0 for an upload not looked up.
+    fn named(&self) -> (&str, usize) {
+        match &self.0 {
+            File::Typed(file) => (&file.filename, file.content.len()),
+            File::Uploaded(file) => (&file.filename, file.stored.as_ref().map_or(0, |s| s.size)),
+        }
     }
 }
 
 impl fmt::Debug for NewAttachment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (filename, size) = self.named();
         f.debug_struct("NewAttachment")
-            .field("filename", &self.0.filename)
-            .field("size", &self.0.content.len())
+            .field("filename", &filename)
+            .field("size", &size)
             .finish()
     }
 }
@@ -178,18 +232,53 @@ impl<'a> FileDigest<'a> {
             sha256: hex::encode(Sha256::digest(&file.content)),
         }
     }
+
+    /// An uploaded file's, by the size and digest taken as its bytes arrived.
+    fn uploaded(file: &'a Uploaded, stored: &Stored) -> Self {
+        Self {
+            filename: &file.filename,
+            content_type: &file.content_type,
+            size: stored.size,
+            sha256: hex::encode(stored.digest),
+        }
+    }
 }
 
 impl Serialize for NewAttachment {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        FileDigest::new(&self.0).serialize(serializer)
+        match &self.0 {
+            File::Typed(file) => FileDigest::new(file),
+            File::Uploaded(file) => {
+                let stored = file.stored.as_ref();
+                let stored =
+                    stored.ok_or_else(|| serde::ser::Error::custom("an upload not looked up"))?;
+                FileDigest::uploaded(file, stored)
+            }
+        }
+        .serialize(serializer)
     }
 }
 
-impl From<NewAttachment> for OutgoingAttachment {
-    fn from(file: NewAttachment) -> Self {
-        file.0
+/// The typed files of a message, for it now, and its uploads with their
+/// places among its files, to read at the send.
+pub(super) fn split(files: Vec<NewAttachment>) -> (Vec<OutgoingAttachment>, Uploads) {
+    let (mut typed, mut uploads) = (Vec::new(), Vec::new());
+    for (place, file) in files.into_iter().enumerate() {
+        match file.0 {
+            File::Typed(file) => typed.push(file),
+            File::Uploaded(file) => uploads.push((place, file)),
+        }
     }
+    (typed, Uploads(uploads))
+}
+
+/// When the first of the looked-up uploads among `files` ends (Unix seconds).
+pub(super) fn uploads_end(files: &[NewAttachment]) -> Option<i64> {
+    let stored = files.iter().filter_map(|file| match &file.0 {
+        File::Uploaded(file) => file.stored.as_ref(),
+        File::Typed(_) => None,
+    });
+    stored.map(|stored| stored.expires_at).min()
 }
 
 fn grouped(n: usize) -> String {
@@ -212,12 +301,227 @@ pub(super) fn files_line(files: &[NewAttachment]) -> String {
     if files.is_empty() {
         return String::new();
     }
-    let names = files_named(
-        files
-            .iter()
-            .map(|file| (file.0.filename.as_str(), file.0.content.len())),
-    );
+    let names = files_named(files.iter().map(NewAttachment::named));
     format!("\nAttachments in this message: {names}.")
+}
+
+/// `error` with `files` (the message's files line, or a hold's sentence),
+/// kept ahead of the line that says its uploads went with the try, so that
+/// line stays last.
+pub(super) fn with_files(error: &str, files: &str) -> String {
+    error.strip_suffix(WENT).map_or_else(
+        || format!("{error}{files}"),
+        |words| format!("{}{files}\n{WENT}", words.trim_end()),
+    )
+}
+
+/// MR 1's check of a file's bytes: a `message/*` file's lines.
+fn checked(file: &OutgoingAttachment) -> Result<(), String> {
+    file.validate_content().map_err(|error| match error {
+        postkeep_mail::Error::InvalidInput(message) => message,
+        other => other.to_string(),
+    })
+}
+
+const NO_UPLOAD: &str = "no upload has this id here. It may have been used on a message \
+    already, have ended, or belong to another mailbox or app. Ask for a new one with \
+    upload_attachment.";
+const NOT_ARRIVED: &str = "the file for this upload hasn't arrived. Send it with its token, or \
+    let its upload finish, then call again.";
+const NOT_USED: &str =
+    "Not sent: postkeep couldn't use the uploaded files just now. Try again in a minute.";
+const WENT: &str = "Its uploaded files went with this try: upload them again to send them.";
+
+/// The mailbox and the caller of a call, whose uploads it makes and attaches.
+pub(super) fn caller(parts: &Parts) -> Result<(AccountId, &Authenticated), String> {
+    let account = MailTools::require_account(parts)?;
+    let caller = parts.extensions.get::<Authenticated>();
+    Ok((account, caller.ok_or("not authenticated")?))
+}
+
+/// Only this mailbox, principal and app attach an upload.
+pub(super) fn owner<'a>(account: &'a AccountId, caller: &'a Authenticated) -> UploadOwner<'a> {
+    UploadOwner {
+        account,
+        principal: &caller.principal,
+        app: &caller.client_id,
+    }
+}
+
+impl Uploads {
+    /// The bytes the uploads hold together.
+    pub(super) fn total(&self) -> usize {
+        let stored = self.0.iter().filter_map(|(_, file)| file.stored.as_ref());
+        stored.map(|stored| stored.size).sum()
+    }
+
+    /// The send's one memory reservation for them, when there are any.
+    pub(super) async fn reserve(
+        &self,
+    ) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, String> {
+        if self.0.is_empty() {
+            return Ok(None);
+        }
+        crate::limits::large_message(self.total()).await.map(Some)
+    }
+
+    /// Reads each upload from `bucket` into its place among `files`, in list
+    /// order, and checks it as a typed file is checked.
+    pub(super) async fn load(
+        &self,
+        bucket: Option<&dyn Bucket>,
+        files: &mut Vec<OutgoingAttachment>,
+    ) -> Result<(), String> {
+        for (place, upload) in &self.0 {
+            let unreadable = || {
+                format!(
+                    "attachment {:?}: the uploaded file could not be read; nothing was sent. \
+                     Try again in a minute, or upload it again.",
+                    upload.filename
+                )
+            };
+            let (Some(bucket), Some(stored)) = (bucket, &upload.stored) else {
+                return Err(unreadable());
+            };
+            let file = OutgoingAttachment {
+                filename: upload.filename.clone(),
+                content_type: upload.content_type.clone(),
+                content: read(bucket, stored).await.ok_or_else(unreadable)?,
+                content_id: None,
+                inline: false,
+            };
+            checked(&file)?;
+            files.insert((*place).min(files.len()), file);
+        }
+        Ok(())
+    }
+}
+
+/// An upload's bytes: each piece got at its exact length with its tag and
+/// opened under its number, then the whole file checked against its digest. A
+/// piece swapped, dropped, cut short, added or taken from another upload fails.
+async fn read(bucket: &dyn Bucket, stored: &Stored) -> Option<Vec<u8>> {
+    let mut content = Vec::with_capacity(stored.size);
+    for number in 0..pieces(i64::try_from(stored.size).ok()?) {
+        let start = usize::try_from(number).ok()?.checked_mul(UPLOAD_PIECE)?;
+        let length = stored.size.saturating_sub(start).min(UPLOAD_PIECE) + PIECE_TAG;
+        let name = piece_name(&stored.object, number);
+        let piece = bucket.get(&name, length).await.ok()?;
+        if piece.len() != length {
+            return None;
+        }
+        let mut piece = Vec::from(piece);
+        open_piece(&stored.key, number, &mut piece).ok()?;
+        content.extend_from_slice(&piece);
+    }
+    (Sha256::digest(&content)[..] == stored.digest).then_some(content)
+}
+
+impl MailTools {
+    /// Looks up each upload among `files` for the caller before the arguments
+    /// are fingerprinted, so a hold pins its stored size and digest: only its
+    /// row is read, never the bucket. Without a bucket nothing is looked up.
+    pub(super) async fn resolve(
+        &self,
+        parts: &Parts,
+        files: &mut [NewAttachment],
+    ) -> Result<(), String> {
+        let mut total = 0_usize;
+        for (number, file) in files.iter_mut().enumerate() {
+            let File::Uploaded(upload) = &mut file.0 else {
+                continue;
+            };
+            let place = format!("attachment {} ({:?})", number + 1, upload.filename);
+            if self.context.bucket.is_none() {
+                return Err(format!("{place}: {UPLOADS_OFF}"));
+            }
+            let (account, caller) = caller(parts)?;
+            let found =
+                self.context
+                    .store
+                    .upload_for(owner(&account, caller), &upload.id, UPLOAD_TIME);
+            let (object, key, digest, size, expires_at) = match found.await {
+                Ok(UploadLookup::Stored {
+                    object,
+                    key,
+                    digest,
+                    size,
+                    expires_at,
+                }) => (object, key, digest, size, expires_at),
+                Ok(UploadLookup::Arriving) => return Err(format!("{place}: {NOT_ARRIVED}")),
+                Ok(UploadLookup::Missing) => return Err(format!("{place}: {NO_UPLOAD}")),
+                Err(err) => {
+                    tracing::error!(error = %err, "could not look up an upload");
+                    return Err(NOT_USED.to_owned());
+                }
+            };
+            let size = usize::try_from(size).unwrap_or(usize::MAX);
+            total = total.saturating_add(size);
+            upload.stored = Some(Stored {
+                object,
+                key,
+                digest,
+                size,
+                expires_at,
+            });
+        }
+        if total > MAX_UPLOAD_BYTES {
+            let uploaded = files
+                .iter()
+                .filter(|file| matches!(file.0, File::Uploaded(_)));
+            let names = files_named(uploaded.map(NewAttachment::named));
+            return Err(format!(
+                "The uploaded files of one message may total {MAX_UPLOAD_MIB} MiB; these total {} \
+                 bytes: {names}.",
+                grouped(total)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Runs `call`, the provider call of a message with `uploads`, once they
+    /// are all used up, all or none: one used or ended meanwhile refuses the
+    /// message by name before the call. Whatever the call answers, they are
+    /// used; their pieces' deletes start at once, and a failure says so.
+    pub(super) async fn using_uploads<T>(
+        &self,
+        parts: &Parts,
+        uploads: &Uploads,
+        call: impl Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        if uploads.0.is_empty() {
+            return call.await;
+        }
+        let (account, caller) = caller(parts)?;
+        // The same upload twice in a message is one upload, used once.
+        let mut named: Vec<(usize, &Uploaded)> = Vec::new();
+        for (place, upload) in &uploads.0 {
+            if !named.iter().any(|(_, seen)| seen.id == upload.id) {
+                named.push((*place, upload));
+            }
+        }
+        let ids: Vec<&str> = named.iter().map(|(_, upload)| upload.id.as_str()).collect();
+        let used = match self
+            .context
+            .store
+            .use_uploads(owner(&account, caller), &ids)
+            .await
+        {
+            Ok(Ok(used)) => used,
+            Ok(Err(gone)) => {
+                let (place, upload) = named.get(gone).copied().ok_or(NOT_USED)?;
+                let name = &upload.filename;
+                return Err(format!("attachment {} ({name:?}): {NO_UPLOAD}", place + 1));
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "could not use the uploaded files");
+                return Err(NOT_USED.to_owned());
+            }
+        };
+        let (store, bucket) = (self.context.store.clone(), self.context.bucket.clone());
+        tokio::spawn(async move { delete_pieces(&store, bucket.as_deref(), &used).await });
+        call.await.map_err(|error| format!("{error} {WENT}"))
+    }
 }
 
 /// Largest decoded attachment returned, for every kind: its base64 (4 MiB)
@@ -407,6 +711,18 @@ mod tests {
     }
 
     #[test]
+    fn the_line_that_uploads_went_stays_last() {
+        let held = with_files(&format!("Not sent.\n{WENT}"), " Hold used.");
+        let error = with_files(&held, "\nAttachments in this message: a.pdf.");
+        let lines = "Not sent. Hold used.\nAttachments in this message: a.pdf.\n";
+        assert_eq!(error, format!("{lines}{WENT}"));
+        assert_eq!(
+            with_files("Not sent.", " Hold used."),
+            "Not sent. Hold used."
+        );
+    }
+
+    #[test]
     fn outgoing_files_decode_without_guessing_a_type_from_the_name() {
         for (value, name, kind, bytes) in [
             (
@@ -440,7 +756,7 @@ mod tests {
                 &b"x"[..],
             ),
         ] {
-            let file: OutgoingAttachment = file(value).into();
+            let file = split(vec![file(value)]).0.remove(0);
             assert_eq!(
                 (
                     file.filename.as_str(),
@@ -548,6 +864,34 @@ mod tests {
             .to_string();
             assert!(err.starts_with("attachment 2:"), "{err}");
             assert!(!err.contains("placeholder-value"), "{err}");
+        }
+    }
+
+    #[test]
+    fn upload_items_follow_the_rules_of_every_item() {
+        for (item, why) in [
+            (
+                json!({"filename":"a", "upload_id":"u", "content":""}),
+                "exactly one",
+            ),
+            (
+                json!({"filename":"a", "upload_id":"u", "text":""}),
+                "exactly one",
+            ),
+            (
+                json!({"filename":"a", "upload_id":"u", "content_type":"text/"}),
+                "invalid content_type",
+            ),
+            (
+                json!({"filename":"a/b", "upload_id":"u"}),
+                "attachment \"a/b\":",
+            ),
+            (json!({"upload_id":"u"}), "filename"),
+        ] {
+            let err = serde_json::from_value::<NewAttachment>(item)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(why), "{err}");
         }
     }
 

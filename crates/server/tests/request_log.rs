@@ -160,6 +160,7 @@ async fn harness_with(limits: RequestLimits, extension: bool, mail: Option<MailC
         auth.imap_servers = ImapServers::custom_only("Silent", mail);
     }
     let config = AppConfig {
+        bucket: None,
         auth,
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: vec!["https://origin-marker.example".to_owned()],

@@ -271,8 +271,8 @@ keep the wrapper they had; `ServerBuilder` has no method for it.
 
 postkeep writes everything it encrypts with data keys: IMAP passwords, webhook
 secrets (the signing secret and the custom header value), the patterns of filter rules,
-the payloads of stored events, the tokens of Microsoft and Google accounts, and the secrets of sign-ins
-in progress (the PKCE verifier, the pending request ID and your continuation). A
+the payloads of stored events, the tokens of Microsoft and Google accounts, the keys and digests
+of uploaded files, and the secrets of sign-ins in progress (the PKCE verifier, the pending request ID and your continuation). A
 password, and the tokens that a sign-in creates, are written in the tenant of the
 store that saves them. Webhook secrets, filter patterns, events and token refreshes are written
 in the tenant of their account, and a sign-in in progress in the tenant it was
@@ -282,7 +282,7 @@ directly only a value that an earlier version wrote and that has not been saved
 again or moved by the sweep; an event is never saved again, so one stored before
 stays until the sweep moves it or the outbox removes it, and a sign-in in
 progress is removed when it is used or expires.
-postkeep reads the data-key format in all ten encrypted columns:
+postkeep reads the data-key format in all twelve encrypted columns:
 `v2.<version>.<base64url of nonce and ciphertext>`,
 AES-256-GCM under that version of the key of the value's tenant, with
 `postkeep/v2/<tenant>/<table>.<column>/<row key>` as associated data. In
@@ -293,7 +293,8 @@ reads, and a copy in another tenant, column or row doesn't decrypt. The
 row key is the email address for an IMAP password, the account ID for
 webhook and token
 columns, the hash of the OAuth `state` for a sign-in, the event ID for an event,
-and the rule ID for a filter pattern. Don't change the `tenant` of an account: its values stop
+the rule ID for a filter pattern, and the upload's `id_hash` for an upload's key
+and file digest. Don't change the `tenant` of an account: its values stop
 opening. Only `StoreError::Decrypt`, which also covers a key version that
 doesn't exist, makes a value unreadable. Any other error, such as your
 wrapper not answering, goes to the caller, so it never makes an event be
@@ -364,6 +365,14 @@ For `holds`, outgoing attachments are names, MIME types, sizes and SHA-256
 digests, not the bytes. A forward adds a `forwarded` digest of the original.
 The extension check, `before_call` and `after_call`
 get attachment arguments as sent, including their bytes as base64 or text.
+An uploaded file is there as its `upload_id`, name and type, and for `holds`
+as the stored upload's size and digest, like a typed file of the same bytes.
+No hook sees its bytes, and the token that writes it is only in the answer of
+`upload_attachment`, which an agent then puts in a command.
+Uploads are on when `ServeArgs` gets the bucket settings of
+[Uploads](configuration.md#uploads); a router built with `app::router_with`
+takes the bucket as `AppConfig::bucket`, and its cleanup is
+`app::purge_on_schedule` with the same bucket.
 
 A holding call sends nothing. It answers `status: "held"`, with `hold_id`,
 `expires_at` and `next`: show the user exactly the message, its recipients
