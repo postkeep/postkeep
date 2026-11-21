@@ -38,6 +38,7 @@ async fn app(extensions: Extensions) -> (Router, tempfile::TempDir) {
     let key = MasterKey::parse(&MasterKey::generate_encoded().unwrap()).unwrap();
     let store = Store::connect(&url, &key).await.unwrap();
     let config = AppConfig {
+        bucket: None,
         auth: AuthConfig::new(&format!("https://{HOST}"), app::MCP_PATH).unwrap(),
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),

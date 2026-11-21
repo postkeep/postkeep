@@ -42,7 +42,8 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
 | App-specific passwords | `accounts` table, AES-256-GCM | Full IMAP/SMTP access to the mailbox (read, send, delete) until the app password is revoked at that provider (for iCloud Mail, account.apple.com; for Gmail, myaccount.google.com/apppasswords) |
 | Master key | Environment / secret file, process memory | Wraps the data keys. Decrypts directly only app passwords, webhook secrets, provider tokens, events and sign-ins in progress that an earlier version stored and that have been neither saved again nor moved by the sweep (a sign-in is gone once used or expired). Everything this version writes, the sweep included, is under data keys, which it unwraps |
 | MCP access and refresh tokens, codes | Client, SHA-256 hashes in the database | Act as the user through the MCP tools |
-| Mail content | Bodies and outgoing attachments pass through memory and postkeep does not store them. Held sends keep one fingerprint, which covers attachment names, types, sizes and digests, never the message or file bytes. If the user turns on sender and subject, those two fields are stored inside the encrypted webhook event | Private correspondence; returned to the MCP client, never logged |
+| Mail content | Bodies and attachments typed into a call pass through memory and postkeep does not store them; an uploaded file is kept until it is used or its hour ends, as the next row says. Held sends keep one fingerprint, which covers attachment names, types, sizes and digests, never the message or file bytes. If the user turns on sender and subject, those two fields are stored inside the encrypted webhook event | Private correspondence; returned to the MCP client, never logged |
+| Uploaded files | The operator's bucket: sealed pieces under random names, each upload under a key of its own that only the database holds, sealed under the tenant's data key; no name or type is stored. Once used or ended, its removal is asked and retried by the cleanup, and the bucket's expiry rule removes what is left, with no guaranteed deadline (see Uploads in the configuration guide) | Private files waiting for their message; the bucket's company sees only how many, how large and when |
 | Account page sessions | Cookie, hash in the database | Disconnect one app or all, replace the stored password (checked with the mail server first), delete data, configure webhooks |
 | Webhook auth header and signing secret | Encrypted in the database | Authenticate deliveries to the user's own endpoint |
 | Webhook filter rules | `webhook_filter_rules`: each pattern encrypted under the data key of the mailbox's tenant; action, field and kind in the clear | Patterns can hold addresses and names; the rules decide which new mail calls the webhook |
@@ -112,7 +113,9 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
    secrets are then unreadable through the database and in logical dumps taken
    afterwards. Backups from before, and physical copies (database files,
    snapshots, WAL archives) until the space is reused and they expire, can still
-   hold the wrapped keys.
+   hold the wrapped keys. A backup taken while an uploaded file waits holds its
+   sealed key: after a restore, delete the restored copy's upload rows before it
+   serves.
 9. **Build and supply chain**. Crates, CI jobs and their images, base images.
 10. **Metrics listener** (`POSTKEEP_METRICS_BIND`), off by default.
     `GET /metrics` only, without authentication, on its own address with a
@@ -120,6 +123,10 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
     routes as written, statuses, tool names, outcomes, mail server ids and
     providers, so they carry no address, tenant, principal, account id,
     token or request path. The operator keeps the address private.
+11. **Uploads** (`PUT /upload`). No sign-in: a one-time token in the
+    `Authorization` header, never in the URL, counted against the auth routes'
+    per-IP limit. Whoever holds a token can put one file in, once, within the
+    hour, and only the mailbox, caller and app that asked can attach it.
 
 ## Threats and mitigations
 
@@ -334,8 +341,9 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
   attachment comes as its text in UTF-8.
 - SQL: static, parameterised queries only.
 - Logs: secrets, tokens and message content are never logged. Crates that
-  would log IMAP traffic, SMTP commands or MCP tool results stay capped
-  even when `POSTKEEP_LOG` asks for trace. The request log line holds
+  would log IMAP traffic, SMTP commands, MCP tool results or the hosts the
+  HTTPS client connects to, the upload bucket's included, stay capped even
+  when `POSTKEEP_LOG` asks for trace. The request log line holds
   only ids, routes as written, the status, the time, and a tool's name and
   outcome, and no line logs a client's IP address or a request's path.
 
@@ -376,6 +384,9 @@ abandoned ones, a cap on watchers, and watcher reconnect backoff (longer
 after an authentication failure).
 Limits are per process and in memory. Outgoing mail tools also check the
 attachment count against their schema before decoding any of the files.
+Uploads have their own bounds (per tenant and per server) and the per-IP
+limit; a bucket that is down makes uploads answer `503` and sends that name
+an upload refuse it, and nothing else waits on the bucket.
 
 At most 2,000 webhook filter rules count per mailbox. Patterns are at most
 512 bytes and are compiled by the `regex` crate, which matches in linear
@@ -409,8 +420,23 @@ distroless, runs as a non-root user, and holds only the binary.
 
 - **The operator is trusted.** Anyone with the master key and the database
   can read every stored app password, Microsoft and Google token, webhook
-  secret, stored webhook event and webhook filter pattern. Use a secret
-  store for the key.
+  secret, stored webhook event and webhook filter pattern, and, with the
+  bucket's pieces, an uploaded file still waiting. Use a secret store for the
+  key.
+- **An agent steered by mail can upload a local file and send it.** Uploads
+  raise what such an agent can attach from about 0.75 MB to 25 MiB. The guard
+  is the app's own prompt before a send.
+- **One tenant could fill uploads for all.** Each tenant's bounds are exact,
+  and the server's are the backstop. They bound what is reserved at once, not
+  the bucket's bill.
+- **A backup can open a file.** With the master key and the file's pieces still
+  in the bucket, a backup taken while it waited opens it.
+- **A proxy could save or log an upload.** The token is not in the request
+  line; the deployment guide says how a proxy streams `/upload`.
+- **The bucket's key is a secret.** Whoever holds it reads only sealed pieces,
+  which nothing in the bucket opens; can delete pieces, so the sends that name
+  them refuse, by name, and send nothing; or can add objects, which postkeep
+  never reads and the expiry rule removes.
 - **Destroyed data keys live on for a while.** Backups taken before a
   destruction still hold the wrapped keys, and so can physical copies taken
   after it, until the space is reused and they expire. A store with a cache of

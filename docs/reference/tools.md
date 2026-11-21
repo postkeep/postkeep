@@ -15,6 +15,7 @@ What each tool does, the parameters it takes, and how the providers differ.
 | `move_message` | Moves a message to another folder. |
 | `delete_message` | Moves a message to the trash, or deletes it for good when you ask. |
 | `create_folder` | Creates a new folder. |
+| `upload_attachment` | Gives a one-time upload for one file's bytes, sent with a command, to attach to one message. Off unless the server has a bucket. |
 | `get_webhook_status` | Shows whether this mailbox's new-mail webhook is active, paused, off, not set up, unreadable, waiting for a new password, or `rules_unreadable` (its filter rules can't be read or compiled), with its outbox limits and filter rule counts. |
 | `set_webhook_enabled` | Turns this mailbox's new-mail webhook on or off. |
 | `set_webhook_outbox_limits` | Sets how long new-mail events are kept, and how many. |
@@ -200,7 +201,7 @@ PNG, JPEG, GIF and WebP images come as image content. Text comes without the cha
 | `subject` | Subject line. |
 | `body` | Plain-text body. |
 | `forward` | Message id from `search_messages` to forward with its files. Requires `to`; use `Fwd: ` and the original subject. |
-| `attachments` | Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content or UTF-8 text. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file. |
+| `attachments` | Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content, UTF-8 text, or the upload_id from upload_attachment for a file you send yourself. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file. |
 | `save_to_sent` | Save a copy in the Sent folder (default true). Ignored where the mail server saves sent mail itself (Gmail and Outlook). |
 
 ## `reply_to_message`
@@ -212,7 +213,7 @@ PNG, JPEG, GIF and WebP images come as image content. Text comes without the cha
 | `folder` | Deprecated: folder of the message, with `uid` (IMAP accounts only). Use `id` instead. |
 | `uid` | Deprecated: IMAP UID of the message, with `folder`. Use `id` instead. |
 | `body` | Plain-text reply body. The original is not quoted automatically. |
-| `attachments` | Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content or UTF-8 text. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file. |
+| `attachments` | Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content, UTF-8 text, or the upload_id from upload_attachment for a file you send yourself. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file. |
 | `to` | Recipients to reply to instead of the sender (or the Reply-To addresses), as `alice@example.com` or `Alice <alice@example.com>`. Needed when `get_message` marks the sender `from_unclear`, and when the Reply-To (or, for your own message, the To) does not read as addresses, each alone or after a name. |
 | `reply_all` | Reply to all recipients instead of only the sender. Refused when the message's To or Cc does not read as addresses, each alone or after a name: name the recipients in `to` instead. |
 | `save_to_sent` | Save a copy in the Sent folder (default true). Ignored where the mail server saves sent mail itself (Gmail and Outlook). |
@@ -232,7 +233,7 @@ Holds expire and are capped per caller and mailbox. A missing, used, expired or 
 | `bcc` | Blind carbon-copy recipients. |
 | `subject` | Subject line. |
 | `body` | Plain-text body. |
-| `attachments` | Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content or UTF-8 text. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file. |
+| `attachments` | Files to attach. Give each file a name, a MIME type (e.g. application/pdf) and either base64 content, UTF-8 text, or the upload_id from upload_attachment for a file you send yourself. By default a 1 MiB call fits about 0.75 MB of file data in base64, before other arguments; base64 adds a third. Sent means the provider took the message; a recipient's server can still bounce a large or blocked file. |
 
 With `id`, the draft is a reply that keeps the thread: the recipients, the
 `Re:` subject and the `In-Reply-To` / `References` headers are derived from
@@ -253,6 +254,8 @@ invisible characters or encoded words (`=?`)), an optional `content_type`, and e
   `application/octet-stream`.
 - `text`: UTF-8 text. The default type is `text/plain; charset=utf-8`; a type
   you give gets `charset=utf-8` if it has no charset and cannot name another.
+- `upload_id`: a file sent on its own with `upload_attachment` (see
+  [Uploads](#uploads)). The default type is `application/octet-stream`.
 
 Give the MIME type if you know it. `content_type` may carry only a `charset`
 parameter. `multipart/*` is not a single file. postkeep never opens local
@@ -288,6 +291,35 @@ and checks that the draft carries all of the original's files.
 
 If the confirming call ends before its answer, check Sent before trying
 again. If it used up the hold, a retry needs a new hold.
+
+### Uploads
+
+An agent that can run commands where the file is can attach a file of up to
+25 MiB, too large or too binary to write into a call. `upload_attachment`
+answers an `upload_id`, a `url`, a one-time `token` and its `expires_at`, an
+hour away, and `next` says what to do, as a command such as:
+
+```sh
+curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token>' '<url>'
+```
+
+(`curl.exe` on Windows). Then pass `{"upload_id": "<upload_id>", "filename":
+"report.pdf"}` in `attachments`, with `content_type` if you know it.
+
+- The token takes one file. If the `PUT` fails once the file has started, get
+  a new upload.
+- An upload goes on one message. The first try to send it or save it as a
+  draft uses it up, even one that fails: for several files, a retry, or the
+  same file on another message, get one upload each. If the send failed after
+  that point, its answer says so: upload the file again.
+- An upload not used ends with its hour. A used or ended upload's pieces are
+  then deleted in the background, with no deadline.
+- A `201` means postkeep stored the file, not that a provider will take it.
+  If the `PUT`'s answer was lost, try the send: it says whether the file
+  arrived.
+- Uploads are off unless the server has a bucket
+  ([Uploads](../configuration.md#uploads)); the tool and a send that names an
+  upload then say so.
 
 ## `update_flags`
 

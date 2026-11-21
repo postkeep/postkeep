@@ -34,8 +34,8 @@ authorization codes and tokens.
   password to its account's email address), so a row copied onto another
   account fails to decrypt; a data key's values are also bound to the tenant
   of their row. Every encrypted column is read in both formats. App-specific
-  passwords, webhook secrets, filter rule patterns, stored events, provider tokens and
-  sign-ins in progress are all written under a data key, and a value that an earlier
+  passwords, webhook secrets, filter rule patterns, stored events, provider tokens,
+  sign-ins in progress and upload keys and digests are all written under a data key, and a value that an earlier
   version wrote stays under the master key until it is saved again or the sweep
   (`Store::reencrypt`) moves it; an event is never saved again, so one stored
   before stays until the sweep moves it or the outbox removes it, and a sign-in

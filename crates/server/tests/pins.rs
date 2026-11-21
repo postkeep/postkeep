@@ -150,6 +150,7 @@ async fn harness(setup: Setup) -> Harness {
         }
     };
     let config = AppConfig {
+        bucket: None,
         auth,
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),
@@ -689,6 +690,7 @@ fn probe_paths() -> Vec<String> {
         "/push/microsoft",
         "/push/microsoft/lifecycle",
         "/push/google",
+        "/upload",
         "/favicon.ico",
         "/favicon.svg",
         "/apple-touch-icon.png",
@@ -776,7 +778,7 @@ async fn check_tools(harness: &Harness) {
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let listed: Value = serde_json::from_str(&reply.body).unwrap();
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 17);
+    assert_eq!(tools.len(), 18);
     for tool in tools {
         assert!(
             tool["title"]

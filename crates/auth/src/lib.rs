@@ -244,8 +244,9 @@ pub fn router_with(state: AuthState, options: RouterOptions) -> Router {
 }
 
 /// Rejects clients that exceed [`AuthConfig::requests_per_minute`] with
-/// `429 Too Many Requests`.
-async fn limit_requests(
+/// `429 Too Many Requests`: the auth routes' per-IP limit, which the server's
+/// `/upload` route counts against too, as a layer with this state.
+pub async fn limit_requests(
     State(state): State<AuthState>,
     ip: ClientIp,
     request: Request,

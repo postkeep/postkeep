@@ -91,6 +91,7 @@ async fn setup_with(extensions: Extensions) -> Setup {
     let mut auth = AuthConfig::new(ISSUER, app::MCP_PATH).unwrap();
     auth.requests_per_minute = 10_000;
     let config = AppConfig {
+        bucket: None,
         auth,
         extra_allowed_hosts: vec!["*.mcp.example.com".to_owned()],
         extra_allowed_origins: Vec::new(),

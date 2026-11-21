@@ -11,8 +11,10 @@
     reason = "test helpers should fail loudly"
 )]
 
+mod bucket;
 mod common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -30,6 +32,7 @@ use postkeep_store::{MasterKey, Store};
 use postkeep_upstream::{AppCredentials, Endpoints, Http, OAuthClient};
 use secrecy::SecretString;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use wiremock::matchers::{
@@ -64,6 +67,9 @@ impl CredentialVerifier for NoImap {
 struct Harness {
     app: Router,
     server: std::sync::Arc<MockServer>,
+    /// The stand-in bucket on `server`, which `app` puts uploads in.
+    uploads: bucket::StandIn,
+    bucket: Arc<dyn postkeep::bucket::Bucket>,
     store: Store,
     upstream: OAuthClient,
     watchers: postkeep::watch::Watchers,
@@ -100,6 +106,10 @@ async fn harness() -> Harness {
 }
 
 async fn harness_with_limits(limits: app::RequestLimits) -> Harness {
+    harness_with(limits, AuthConfig::new(ORIGIN, app::MCP_PATH).unwrap()).await
+}
+
+async fn harness_with(limits: app::RequestLimits, auth: AuthConfig) -> Harness {
     let server = MockServer::start().await;
     // Both provider mocks must reject an unframed write even if a success mock matches it.
     Mock::given(|req: &wiremock::Request| {
@@ -116,7 +126,7 @@ async fn harness_with_limits(limits: app::RequestLimits) -> Harness {
     let url = format!("sqlite://{}", dir.path().join("server.db").display());
     let key = MasterKey::parse(&MasterKey::generate_encoded().unwrap()).unwrap();
     let store = Store::connect(&url, &key).await.unwrap();
-    let auth = AuthConfig::new(ORIGIN, app::MCP_PATH).unwrap();
+    let (uploads, bucket) = bucket::stand_in(&server).await;
     let app_credentials = |id: &str| AppCredentials {
         client_id: id.to_owned(),
         client_secret: SecretString::from("shh".to_owned()),
@@ -140,7 +150,30 @@ async fn harness_with_limits(limits: app::RequestLimits) -> Harness {
         },
         CancellationToken::new(),
     );
-    let config = AppConfig {
+    let bucket: Arc<dyn postkeep::bucket::Bucket> = Arc::new(bucket);
+    let config = config(auth, limits, &watchers, &upstream, Some(bucket.clone()));
+    Harness {
+        app: app::router(config, store.clone(), NoImap, CancellationToken::new()),
+        server: std::sync::Arc::new(server),
+        uploads,
+        bucket,
+        store,
+        upstream,
+        watchers,
+        receiver,
+        _dir: dir,
+    }
+}
+
+fn config(
+    auth: AuthConfig,
+    limits: app::RequestLimits,
+    watchers: &postkeep::watch::Watchers,
+    upstream: &OAuthClient,
+    bucket: Option<Arc<dyn postkeep::bucket::Bucket>>,
+) -> AppConfig {
+    AppConfig {
+        bucket,
         auth,
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),
@@ -155,15 +188,6 @@ async fn harness_with_limits(limits: app::RequestLimits) -> Harness {
                 service_account: PUSH_ACCOUNT.to_owned(),
             },
         )),
-    };
-    Harness {
-        app: app::router(config, store.clone(), NoImap, CancellationToken::new()),
-        server: std::sync::Arc::new(server),
-        store,
-        upstream,
-        watchers,
-        receiver,
-        _dir: dir,
     }
 }
 
@@ -340,6 +364,145 @@ impl Harness {
         assert_eq!(result["isError"], json!(true), "{tool}: {result}");
         result["content"][0]["text"].as_str().unwrap().to_owned()
     }
+
+    /// `PUT /upload` with `authorization` and `body`, declaring `length` when given.
+    async fn put(&self, authorization: Option<&str>, body: Body, length: Option<usize>) -> Reply {
+        let mut request = Request::put("/upload").header(header::HOST, HOST);
+        if let Some(value) = authorization {
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        if let Some(length) = length {
+            request = request.header(header::CONTENT_LENGTH, length);
+        }
+        self.send(request.body(body).unwrap()).await
+    }
+
+    /// A `PUT` of the upload `bearer` whose body waits for what the test
+    /// sends: closing the sender ends the file.
+    fn arriving(
+        &self,
+        bearer: &str,
+    ) -> (
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        tokio::task::JoinHandle<StatusCode>,
+    ) {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let frames = futures::stream::unfold(receiver, |mut receiver| async move {
+            let frame = receiver.recv().await?;
+            Some((Ok::<_, std::io::Error>(frame), receiver))
+        });
+        let request = Request::put("/upload")
+            .header(header::HOST, HOST)
+            .header(header::AUTHORIZATION, bearer)
+            .body(Body::from_stream(frames))
+            .unwrap();
+        let app = self.app.clone();
+        let put = tokio::spawn(async move { app.oneshot(request).await.unwrap().status() });
+        (sender, put)
+    }
+
+    /// Waits until `count` uploads have claimed their tokens.
+    async fn until_claimed(&self, count: i64) {
+        let claimed = "SELECT COUNT(*) FROM uploads WHERE claimed_at IS NOT NULL";
+        for _ in 0..200 {
+            let rows: i64 = sqlx::query_scalar(claimed)
+                .fetch_one(self.store.pool())
+                .await
+                .unwrap();
+            if rows == count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{count} uploads were not claimed");
+    }
+
+    /// The same server started again on the same database, with no bucket.
+    fn without_bucket(mut self) -> Self {
+        let auth = AuthConfig::new(ORIGIN, app::MCP_PATH).unwrap();
+        let limits = app::RequestLimits::default();
+        let config = config(auth, limits, &self.watchers, &self.upstream, None);
+        self.app = app::router(config, self.store.clone(), NoImap, CancellationToken::new());
+        self
+    }
+
+    /// The cleanup, hourly with the stand-in bucket, until `cancel` fires.
+    fn cleanup(&self, cancel: &CancellationToken) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(postkeep::app::purge_on_schedule(
+            self.store.clone(),
+            postkeep_store::PurgePolicy::default(),
+            Duration::from_secs(3600),
+            None,
+            Some(self.bucket.clone()),
+            cancel.clone(),
+        ))
+    }
+
+    /// One run of the cleanup, with the stand-in bucket.
+    async fn clean_up(&self) {
+        let cancel = CancellationToken::new();
+        let run = self.cleanup(&cancel);
+        self.until_uploads_gone().await;
+        cancel.cancel();
+        run.await.unwrap();
+    }
+
+    /// A new upload: its id, and its token as an `Authorization` value.
+    async fn new_upload(&self, token: &str) -> (String, String) {
+        let made = self.call_ok(token, "upload_attachment", json!({})).await;
+        let bearer = format!("Bearer {}", made["token"].as_str().unwrap());
+        (made["upload_id"].as_str().unwrap().to_owned(), bearer)
+    }
+
+    /// A new upload holding `file`, put with no declared length in frames of
+    /// at most `frame` bytes: its id.
+    async fn upload(&self, token: &str, file: &[u8], frame: usize) -> String {
+        let (id, bearer) = self.new_upload(token).await;
+        let frames = file.chunks(frame).map(<[u8]>::to_vec).collect();
+        let put = self.put(Some(&bearer), frames_body(frames), None).await;
+        assert_eq!(put.status, StatusCode::CREATED, "{}", put.body);
+        assert_eq!(put.json(), json!({"size": file.len()}));
+        id
+    }
+
+    async fn upload_rows(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM uploads")
+            .fetch_one(self.store.pool())
+            .await
+            .unwrap()
+    }
+
+    /// Waits until the bucket holds no piece and the database no upload.
+    async fn until_uploads_gone(&self) {
+        for _ in 0..200 {
+            if self.uploads.names().is_empty() && self.upload_rows().await == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!(
+            "left: {:?}, {} rows",
+            self.uploads.names(),
+            self.upload_rows().await
+        );
+    }
+}
+
+/// A body of `frames`, with no length declared.
+fn frames_body(frames: Vec<Vec<u8>>) -> Body {
+    let frames = frames.into_iter().map(Ok::<_, std::io::Error>);
+    Body::from_stream(futures::stream::iter(frames))
+}
+
+/// `size` bytes whose pattern differs from piece to piece.
+fn file_of(size: usize) -> Vec<u8> {
+    let byte = |i: usize| u8::try_from((i % 251 + i / (4 << 20)) % 256).unwrap();
+    (0..size).map(byte).collect()
+}
+
+/// An attachment item for the upload `id`.
+fn uploaded(id: &str, filename: &str) -> Value {
+    json!({"upload_id": id, "filename": filename})
 }
 
 /// Matches a `sendMail` body: base64 MIME containing every needle.
@@ -2234,37 +2397,58 @@ fn gmail_send() -> wiremock::MockBuilder {
 /// Matches Gmail upload metadata and checks the raw MIME part for every needle.
 struct RawContains(Vec<&'static str>, Option<&'static str>);
 
+/// A Gmail upload's metadata and raw MIME, when its framing is exact and the
+/// boundary is not in the MIME.
+fn gmail_parts(request: &wiremock::Request) -> Option<(String, String)> {
+    let boundary = request
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("multipart/related; boundary="))?;
+    let body = String::from_utf8_lossy(&request.body);
+    let (metadata, raw) = body
+        .strip_prefix(&format!(
+            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+        ))
+        .and_then(|parts| parts.strip_suffix(&format!("\r\n--{boundary}--\r\n")))
+        .and_then(|parts| {
+            parts.split_once(&format!(
+                "\r\n--{boundary}\r\nContent-Type: message/rfc822\r\n\r\n"
+            ))
+        })?;
+    (!raw.contains(boundary)).then(|| (metadata.to_owned(), raw.to_owned()))
+}
+
 impl Match for RawContains {
     fn matches(&self, request: &wiremock::Request) -> bool {
-        let Some(boundary) = request
-            .headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("multipart/related; boundary="))
-        else {
-            return false;
-        };
-        let body = String::from_utf8_lossy(&request.body);
-        let Some((metadata, raw)) = body
-            .strip_prefix(&format!(
-                "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
-            ))
-            .and_then(|parts| parts.strip_suffix(&format!("\r\n--{boundary}--\r\n")))
-            .and_then(|parts| {
-                parts.split_once(&format!(
-                    "\r\n--{boundary}\r\nContent-Type: message/rfc822\r\n\r\n"
-                ))
-            })
-        else {
+        let Some((metadata, raw)) = gmail_parts(request) else {
             return false;
         };
         let expected = self
             .1
             .map_or_else(|| json!({}), |id| json!({"threadId": id}));
-        serde_json::from_str::<Value>(metadata).is_ok_and(|metadata| metadata == expected)
-            && !raw.contains(boundary)
+        serde_json::from_str::<Value>(&metadata).is_ok_and(|metadata| metadata == expected)
             && self.0.iter().all(|needle| raw.contains(needle))
     }
+}
+
+/// The files of each message sent through Gmail so far, by name, with their bytes.
+async fn gmail_sent_files(server: &MockServer) -> Vec<Vec<(String, Vec<u8>)>> {
+    let requests = server.received_requests().await.unwrap();
+    let sends = requests
+        .iter()
+        .filter(|request| request.url.path() == "/gmail/upload/gmail/v1/users/me/messages/send");
+    sends
+        .map(|request| {
+            let (_, raw) = gmail_parts(request).unwrap();
+            let files = postkeep_mail::mime::files(raw.as_bytes())
+                .unwrap()
+                .into_iter();
+            files
+                .map(|file| (file.attachment.filename.unwrap(), file.content.unwrap()))
+                .collect()
+        })
+        .collect()
 }
 
 fn gmail_labels(id: &str) -> wiremock::MockBuilder {
@@ -4137,8 +4321,66 @@ async fn gmail_forwards_the_original_and_its_files() {
         .expect(1)
         .mount(server)
         .await;
-    let sent = harness.call_ok(&token, "send_message", args("18c2")).await;
+    let file = file_of(100_000);
+    let id = harness.upload(&token, &file, 40_000).await;
+    let mut forward = args("18c2");
+    forward["attachments"] = json!([
+        {"filename": "note.txt", "text": "see below"},
+        uploaded(&id, "big.bin"),
+    ]);
+    let sent = harness.call_ok(&token, "send_message", forward).await;
     assert_eq!(sent["status"], "sent");
+    let files = gmail_sent_files(server).await.remove(0);
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    // The inline logo sits in the related part, ahead of the files; the new
+    // files come before the original's, in list order.
+    let order = [
+        "logo.png",
+        "note.txt",
+        "big.bin",
+        "prices.csv",
+        "invoice.pdf",
+        "fake.png",
+    ];
+    assert_eq!(names, order);
+    assert!(files[2].1 == file, "the upload arrives byte for byte");
+    harness.until_uploads_gone().await;
+    let requests: Vec<_> = harness
+        .uploads
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, r)| r.clone())
+        .collect();
+    let methods: Vec<&str> = requests.iter().map(|r| r.method.as_str()).collect();
+    assert_eq!(methods, ["PUT", "GET", "DELETE"]);
+    let address = url::Url::parse(&server.uri()).unwrap();
+    let host = format!(
+        "{}:{}",
+        address.host_str().unwrap(),
+        address.port().unwrap()
+    );
+    for request in &requests {
+        let value = |name: &str| request.headers[name].to_str().unwrap().to_owned();
+        assert_eq!(value("host"), host);
+        let piece = format!("{}/uploads/", bucket::PATH);
+        assert!(request.url.path().starts_with(&piece), "{}", request.url);
+        assert_eq!(
+            value("x-amz-content-sha256"),
+            hex::encode(sha2::Sha256::digest(&request.body))
+        );
+        let signed = value("authorization");
+        assert!(signed.starts_with(&format!("AWS4-HMAC-SHA256 Credential={}/", bucket::KEY_ID)));
+        assert!(signed.contains(",SignedHeaders=host;x-amz-content-sha256;x-amz-date,"));
+    }
+    let mut again = json!({"to": ["someone@example.org"], "subject": "s", "body": "b"});
+    again["attachments"] = json!([uploaded(&id, "big.bin")]);
+    let error = harness.call_err(&token, "send_message", again).await;
+    assert!(
+        error.starts_with("attachment 1 (\"big.bin\"): no upload has this id here."),
+        "{error}"
+    );
     let error = harness
         .call_err(&token, "send_message", args("oversized"))
         .await;
@@ -4388,11 +4630,53 @@ async fn outlook_warns_about_a_draft_when_create_forward_returns_504() {
     harness.server.verify().await;
 }
 
+/// [`outlook_forward`] with an upload after its new file, added to the draft.
+async fn outlook_forward_uploading(case: OutlookForward) -> (Harness, String, Value) {
+    let disconnected = matches!(case, OutlookForward::Disconnect { .. });
+    let (harness, token, mut args) = outlook_forward(case).await;
+    let id = harness.upload(&token, b"uploaded bytes", 5).await;
+    args["attachments"]
+        .as_array_mut()
+        .unwrap()
+        .push(uploaded(&id, "up.bin"));
+    let file = json!({
+        "@odata.type": "#microsoft.graph.fileAttachment", "name": "up.bin",
+        "contentType": "application/octet-stream",
+        "contentBytes": base64::engine::general_purpose::STANDARD.encode(b"uploaded bytes"),
+    });
+    let mut echoed = file.clone();
+    echoed["id"] = json!("up-file");
+    (echoed["size"], echoed["isInline"]) = (json!(14), json!(false));
+    Mock::given(method("POST"))
+        .and(path(format!("{OUTLOOK_DRAFT}/attachments")))
+        .and(body_json(file))
+        .respond_with(ResponseTemplate::new(201).set_body_json(echoed))
+        .expect(u64::from(!disconnected))
+        .mount(&harness.server)
+        .await;
+    (harness, token, args)
+}
+
 #[tokio::test]
 async fn outlook_keeps_the_draft_when_forward_send_returns_504() {
-    let (harness, token, args) = outlook_forward(OutlookForward::SendUncertain).await;
-    let error = harness.call_err(&token, "send_message", args).await;
+    let (harness, token, args) = outlook_forward_uploading(OutlookForward::SendUncertain).await;
+    let error = harness.call_err(&token, "send_message", args.clone()).await;
     assert!(error.contains("may have been sent"), "{error}");
+    assert!(
+        error.ends_with("Its uploaded files went with this try: upload them again to send them.")
+    );
+    let before = harness.server.received_requests().await.unwrap().len();
+    let again = harness.call_err(&token, "send_message", args).await;
+    assert!(
+        again.starts_with("attachment 2 (\"up.bin\"): no upload has this id here."),
+        "{again}"
+    );
+    let after = harness.server.received_requests().await.unwrap();
+    assert!(
+        after[before..]
+            .iter()
+            .all(|request| !request.url.path().starts_with("/graph/"))
+    );
     harness.server.verify().await;
 }
 
@@ -4407,7 +4691,7 @@ async fn outlook_accepts_large_success_responses_for_draft_writes() {
 async fn outlook_deletes_the_draft_when_the_mcp_request_disconnects_during_patch() {
     let patched = CancellationToken::new();
     let deleted = CancellationToken::new();
-    let (harness, token, args) = outlook_forward(OutlookForward::Disconnect {
+    let (harness, token, args) = outlook_forward_uploading(OutlookForward::Disconnect {
         patched: patched.clone(),
         deleted: deleted.clone(),
     })
@@ -4419,6 +4703,8 @@ async fn outlook_deletes_the_draft_when_the_mcp_request_disconnects_during_patch
         "PATCH",
     )
     .await;
+    // The caller went away after the mark: the upload is used all the same.
+    harness.until_uploads_gone().await;
     harness.server.verify().await;
 }
 
@@ -4846,15 +5132,21 @@ async fn outlook_refuses_an_upload_url_on_another_host() {
     server.verify().await;
 }
 
-#[tokio::test]
-async fn outlook_keeps_the_upload_token_out_of_errors_and_logs() {
-    use std::io::{Read as _, Seek as _};
-
-    // As in request_log.rs, don't cache interest from a different test's dispatcher.
+/// As in `request_log.rs`, don't cache interest from a different test's
+/// dispatcher: two idle ones alive for the whole process make tracing ask
+/// every dispatcher, so no test's capture loses lines.
+fn ask_every_dispatcher() {
     static OTHERS: std::sync::OnceLock<[tracing::Dispatch; 2]> = std::sync::OnceLock::new();
     OTHERS.get_or_init(|| {
         [(); 2].map(|()| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()))
     });
+}
+
+#[tokio::test]
+async fn outlook_keeps_the_upload_token_out_of_errors_and_logs() {
+    use std::io::{Read as _, Seek as _};
+
+    ask_every_dispatcher();
     let (harness, token, args) = outlook_new_mail().await;
     let server = &harness.server;
     let url = outlook_upload_url(server);
@@ -4903,4 +5195,600 @@ async fn outlook_checks_the_headers_of_large_mail_before_writing_a_draft() {
         "{error}"
     );
     assert_eq!(server.received_requests().await.unwrap().len(), before);
+}
+
+/// A Gmail harness, signed in, whose sends succeed: its MCP token.
+async fn gmail_uploads() -> (Harness, String) {
+    let harness = harness().await;
+    mock_google_sign_in(&harness.server).await;
+    gmail_send()
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "18d1"})))
+        .mount(&harness.server)
+        .await;
+    let token = harness.sign_in("google").await;
+    (harness, token)
+}
+
+fn message_with(files: &Value) -> Value {
+    json!({"to": ["someone@example.org"], "subject": "Files", "body": "Here", "attachments": files})
+}
+
+const NO_UPLOAD: &str = "no upload has this id here.";
+
+async fn sends(server: &MockServer) -> usize {
+    gmail_sent_files(server).await.len()
+}
+
+#[tokio::test]
+async fn the_upload_route_refuses_before_reading_the_body() {
+    let (harness, token) = gmail_uploads().await;
+    let read = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watched = || {
+        let read = read.clone();
+        Body::from_stream(futures::stream::once(async move {
+            read.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::io::Error>(vec![1_u8])
+        }))
+    };
+    let (_, bearer) = harness.new_upload(&token).await;
+    let no_token = "This upload can't take a file: its token was used, has ended or never existed.";
+    for authorization in [None, Some("Bearer short"), Some(&bearer[1..])] {
+        let refused = harness.put(authorization, watched(), None).await;
+        assert_eq!(refused.status, StatusCode::UNAUTHORIZED, "{}", refused.body);
+        assert!(
+            refused.json()["error"]
+                .as_str()
+                .unwrap()
+                .starts_with(no_token)
+        );
+        assert_eq!(refused.headers[header::WWW_AUTHENTICATE], "Bearer");
+    }
+    let declared = harness.put(Some(&bearer), watched(), Some(26 << 20)).await;
+    assert_eq!(declared.status, StatusCode::PAYLOAD_TOO_LARGE);
+    let too_large = json!({"error": "The file is larger than 25 MiB, the most an upload takes."});
+    assert_eq!(declared.json(), too_large);
+    assert!(
+        !read.load(std::sync::atomic::Ordering::SeqCst),
+        "no body read yet"
+    );
+    // Undeclared, the same token is stopped by the loop and used up.
+    let frames = file_of((25 << 20) + 1)
+        .chunks(1 << 20)
+        .map(<[u8]>::to_vec)
+        .collect();
+    let stopped = harness.put(Some(&bearer), frames_body(frames), None).await;
+    assert_eq!(
+        (stopped.status, stopped.json()),
+        (StatusCode::PAYLOAD_TOO_LARGE, too_large)
+    );
+    harness.until_uploads_gone().await;
+    let used = harness.put(Some(&bearer), watched(), None).await;
+    assert_eq!(used.status, StatusCode::UNAUTHORIZED);
+    assert!(
+        !read.load(std::sync::atomic::Ordering::SeqCst),
+        "no body read"
+    );
+}
+
+#[tokio::test]
+async fn uploads_of_every_size_arrive_byte_for_byte() {
+    const PIECE: usize = 4 << 20;
+    let (harness, token) = gmail_uploads().await;
+    // 2 MiB is over /mcp's body limit, which uploads don't have.
+    let groups: [&[usize]; 3] = [
+        &[0, 1, PIECE - 1, PIECE, PIECE + 1, 2 << 20],
+        &[2 * PIECE - 1, 2 * PIECE, 2 * PIECE + 1],
+        &[25 << 20],
+    ];
+    for (group, sizes) in groups.into_iter().enumerate() {
+        let (mut items, mut files) = (Vec::new(), Vec::new());
+        for (n, &size) in sizes.iter().enumerate() {
+            let file = file_of(size);
+            let id = harness
+                .upload(&token, &file, [1_000_003, 65_536, 3 << 20][n % 3])
+                .await;
+            items.push(uploaded(&id, &format!("f{n}.bin")));
+            files.push(file);
+        }
+        let sent = harness
+            .call_ok(&token, "send_message", message_with(&json!(items)))
+            .await;
+        assert_eq!(sent["status"], "sent");
+        let arrived = gmail_sent_files(&harness.server).await.remove(group);
+        assert_eq!(arrived.len(), files.len());
+        for (n, ((name, bytes), file)) in arrived.iter().zip(&files).enumerate() {
+            assert_eq!(name, &format!("f{n}.bin"));
+            assert!(bytes == file, "{name} of {} bytes", file.len());
+        }
+        harness.until_uploads_gone().await;
+    }
+}
+
+#[tokio::test]
+async fn upload_bounds_refuse_a_claim_and_keep_its_token() {
+    let (harness, token) = gmail_uploads().await;
+    let (_, first) = harness.new_upload(&token).await;
+    let (_, second) = harness.new_upload(&token).await;
+    let (third_id, third) = harness.new_upload(&token).await;
+    let arriving = [harness.arriving(&first), harness.arriving(&second)];
+    harness.until_claimed(2).await;
+    let busy = harness
+        .put(Some(&third), frames_body(vec![b"x".to_vec()]), None)
+        .await;
+    assert_eq!(busy.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        busy.json()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Too many files are arriving")
+    );
+    assert_eq!(busy.headers[header::RETRY_AFTER], "60");
+    for (sender, put) in arriving {
+        drop(sender);
+        assert_eq!(put.await.unwrap(), StatusCode::CREATED);
+    }
+    // The tenant's stored total, here one reservation of 250 MiB.
+    let account: String = sqlx::query_scalar("SELECT id FROM accounts")
+        .fetch_one(harness.store.pool())
+        .await
+        .unwrap();
+    let account = postkeep_store::AccountId(account);
+    let generous = postkeep_store::UploadBounds {
+        tenant_arriving: 100,
+        tenant_stored: 1 << 40,
+        server_arriving: 100,
+        server_stored: 1 << 40,
+        least: 1,
+        window: Duration::from_mins(10),
+    };
+    let owner = postkeep_store::UploadOwner {
+        account: &account,
+        principal: "p",
+        app: "a",
+    };
+    let big_token = format!("{:0>43}", 1);
+    let hour = Duration::from_hours(1);
+    harness
+        .store
+        .create_upload(owner, "id-1", &big_token, hour, 100)
+        .await
+        .unwrap();
+    let big = harness
+        .store
+        .claim_upload(&big_token, "o-1", 250 << 20, generous)
+        .await;
+    let big = big.unwrap().unwrap();
+    let full = harness
+        .put(Some(&third), frames_body(vec![b"x".to_vec()]), None)
+        .await;
+    assert_eq!(full.status, StatusCode::TOO_MANY_REQUESTS, "{}", full.body);
+    let used = harness.store.use_attempt(&big).await.unwrap();
+    harness.store.forget_upload(&used).await.unwrap();
+    let stored = harness
+        .put(Some(&third), frames_body(vec![b"x".to_vec()]), None)
+        .await;
+    assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
+    // The server's eight arriving, from another tenant.
+    let other = harness.store.for_tenant("another-tenant");
+    let secret = SecretString::from("pw".to_owned());
+    let account = other
+        .upsert_account("other@example.com", &secret)
+        .await
+        .unwrap()
+        .id;
+    let owner = postkeep_store::UploadOwner {
+        account: &account,
+        principal: "p",
+        app: "a",
+    };
+    for n in 2..10 {
+        let token = format!("{n:0>43}");
+        other
+            .create_upload(owner, &format!("id-{n}"), &token, hour, 100)
+            .await
+            .unwrap();
+        other
+            .claim_upload(&token, &format!("o-{n}"), 1, generous)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let (_, last) = harness.new_upload(&token).await;
+    let server_full = harness
+        .put(Some(&last), frames_body(vec![b"x".to_vec()]), None)
+        .await;
+    assert_eq!(server_full.status, StatusCode::SERVICE_UNAVAILABLE);
+    let words = server_full.json()["error"].as_str().unwrap().to_owned();
+    assert!(
+        words.starts_with("postkeep is holding too many uploads right now."),
+        "{words}"
+    );
+    let sent = harness.call_ok(
+        &token,
+        "send_message",
+        message_with(&json!([uploaded(&third_id, "x.txt")])),
+    );
+    assert_eq!(sent.await["status"], "sent");
+}
+
+#[tokio::test]
+async fn a_stalled_upload_ends_at_its_idle_time_and_is_used() {
+    let (harness, token) = gmail_uploads().await;
+    let (id, bearer) = harness.new_upload(&token).await;
+    let (sender, put) = harness.arriving(&bearer);
+    harness.until_claimed(1).await;
+    // Only the idle wait is skipped: the paused clock would also end the
+    // database's waits, so it runs again before the upload is used up.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    let status = put.await.unwrap();
+    drop(sender);
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+    let used = harness
+        .put(Some(&bearer), frames_body(Vec::new()), None)
+        .await;
+    assert_eq!(used.status, StatusCode::UNAUTHORIZED);
+    let error = harness.call_err(
+        &token,
+        "send_message",
+        message_with(&json!([uploaded(&id, "a.pdf")])),
+    );
+    let error = error.await;
+    assert!(error.contains(NO_UPLOAD), "{error}");
+}
+
+#[tokio::test]
+async fn uploads_count_against_the_per_ip_limit() {
+    let mut auth = AuthConfig::new(ORIGIN, app::MCP_PATH).unwrap();
+    auth.requests_per_minute = 12;
+    let harness = harness_with(app::RequestLimits::default(), auth).await;
+    mock_google_sign_in(&harness.server).await;
+    let token = harness.sign_in("google").await;
+    let (_, bearer) = harness.new_upload(&token).await;
+    let mut limited = None;
+    for _ in 0..12 {
+        let reply = harness.put(None, Body::empty(), None).await;
+        if reply.status == StatusCode::TOO_MANY_REQUESTS {
+            limited = Some(reply);
+            break;
+        }
+    }
+    assert!(limited.unwrap().headers.contains_key(header::RETRY_AFTER));
+    let refused = harness
+        .put(Some(&bearer), frames_body(vec![b"x".to_vec()]), None)
+        .await;
+    assert_eq!(refused.status, StatusCode::TOO_MANY_REQUESTS);
+    harness.call_ok(&token, "list_folders", json!({})).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::time::resume();
+    let stored = harness
+        .put(Some(&bearer), frames_body(vec![b"x".to_vec()]), None)
+        .await;
+    assert_eq!(stored.status, StatusCode::CREATED, "{}", stored.body);
+}
+
+#[tokio::test]
+async fn only_its_own_app_attaches_an_upload_once_its_file_is_in() {
+    let (harness, token) = gmail_uploads().await;
+    let other_app = harness.sign_in("google").await;
+    let id = harness.upload(&token, b"%PDF-1.4", 8).await;
+    let attach = |id: &str, name: &str| {
+        message_with(&json!([{"filename": "n.txt", "text": "n"}, uploaded(id, name)]))
+    };
+    let error = harness
+        .call_err(&other_app, "send_message", attach(&id, "a.pdf"))
+        .await;
+    assert!(
+        error.starts_with(&format!("attachment 2 (\"a.pdf\"): {NO_UPLOAD}")),
+        "{error}"
+    );
+    let (waiting, bearer) = harness.new_upload(&token).await;
+    let error = harness
+        .call_err(&token, "send_message", attach(&waiting, "b.pdf"))
+        .await;
+    assert!(
+        error.starts_with("attachment 2 (\"b.pdf\"): the file for this upload hasn't arrived."),
+        "{error}"
+    );
+    let (sender, put) = harness.arriving(&bearer);
+    harness.until_claimed(2).await;
+    let stale = "UPDATE uploads SET claimed_at = claimed_at - 601 WHERE key_ciphertext IS NULL";
+    sqlx::query(stale)
+        .execute(harness.store.pool())
+        .await
+        .unwrap();
+    let error = harness
+        .call_err(&token, "send_message", attach(&waiting, "b.pdf"))
+        .await;
+    assert!(error.contains(NO_UPLOAD), "{error}");
+    put.abort();
+    drop(sender);
+    let (a, b) = (
+        harness.upload(&token, b"a", 1).await,
+        harness.upload(&token, b"b", 1).await,
+    );
+    let large = "UPDATE uploads SET size = 13631488 WHERE size = 1";
+    sqlx::query(large)
+        .execute(harness.store.pool())
+        .await
+        .unwrap();
+    let both = message_with(&json!([uploaded(&a, "a.bin"), uploaded(&b, "b.bin")]));
+    let error = harness.call_err(&token, "send_message", both).await;
+    assert!(
+        error.starts_with(
+            "The uploaded files of one message may total 25 MiB; these total 27,262,976 \
+            bytes: a.bin (13,631,488 bytes), b.bin (13,631,488 bytes)."
+        ),
+        "{error}"
+    );
+    // Gmail saves no draft here, so the upload stays for a send.
+    let draft = harness
+        .call_err(&token, "create_draft", attach(&id, "a.pdf"))
+        .await;
+    assert!(draft.contains("Gmail"), "{draft}");
+    assert_eq!(sends(&harness.server).await, 0);
+    let sent = harness
+        .call_ok(&token, "send_message", attach(&id, "a.pdf"))
+        .await;
+    assert_eq!(sent["status"], "sent");
+    assert_eq!(
+        gmail_sent_files(&harness.server).await[0][1],
+        ("a.pdf".to_owned(), b"%PDF-1.4".to_vec())
+    );
+}
+
+#[tokio::test]
+async fn with_no_bucket_uploads_are_turned_off() {
+    let (harness, token) = gmail_uploads().await;
+    let id = harness.upload(&token, b"kept", 4).await;
+    let (_, bearer) = harness.new_upload(&token).await;
+    let harness = harness.without_bucket();
+    let off = "Uploads are turned off on this server (POSTKEEP_UPLOAD_BUCKET_URL is not set).";
+    let error = harness
+        .call_err(&token, "upload_attachment", json!({}))
+        .await;
+    assert!(error.starts_with(off), "{error}");
+    let put = harness
+        .put(Some(&bearer), frames_body(vec![b"x".to_vec()]), None)
+        .await;
+    assert_eq!(put.status, StatusCode::UNAUTHORIZED);
+    let error = harness.call_err(
+        &token,
+        "send_message",
+        message_with(&json!([uploaded(&id, "a.pdf")])),
+    );
+    let error = error.await;
+    assert!(
+        error.starts_with(&format!("attachment 1 (\"a.pdf\"): {off}")),
+        "{error}"
+    );
+    assert_eq!(sends(&harness.server).await, 0);
+}
+
+#[tokio::test]
+async fn a_bucket_that_fails_a_piece_ends_the_upload_and_logs_fixed_reasons_only() {
+    use std::io::{Read as _, Seek as _};
+    ask_every_dispatcher();
+    let (harness, token) = gmail_uploads().await;
+    let mut log = tempfile::tempfile().unwrap();
+    let writer = log.try_clone().unwrap();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_env_filter("off,postkeep=trace,postkeep_store=trace,postkeep_upstream=trace")
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish(),
+    );
+    let mut answers = Vec::new();
+    let mut tokens = Vec::new();
+    for hold in [false, true] {
+        let (_, bearer) = harness.new_upload(&token).await;
+        if hold {
+            harness.uploads.hold("PUT");
+        } else {
+            harness.uploads.fail("PUT");
+        }
+        let put = harness
+            .put(Some(&bearer), frames_body(vec![file_of(10)]), None)
+            .await;
+        assert_eq!(put.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(put.headers[header::RETRY_AFTER], "60");
+        assert!(
+            put.json()["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("postkeep couldn't store the file just now")
+        );
+        harness.uploads.answer();
+        harness.until_uploads_gone().await;
+        let used = harness
+            .put(Some(&bearer), frames_body(Vec::new()), None)
+            .await;
+        assert_eq!(used.status, StatusCode::UNAUTHORIZED);
+        answers.extend([put.body, used.body]);
+        tokens.push(bearer);
+    }
+    // Stored, refused and broken bodies, and a send of what was stored.
+    let id = harness.upload(&token, &file_of(123_457), 50_000).await;
+    let (_, bearer) = harness.new_upload(&token).await;
+    let broken = futures::stream::iter([
+        Ok(b"first".to_vec()),
+        Err(std::io::Error::other("made-up-body-error")),
+    ]);
+    let stopped = harness
+        .put(Some(&bearer), Body::from_stream(broken), None)
+        .await;
+    assert_eq!(stopped.status, StatusCode::REQUEST_TIMEOUT);
+    answers.push(stopped.body);
+    let sent = harness.call_ok(
+        &token,
+        "send_message",
+        message_with(&json!([uploaded(&id, "secret-name.bin")])),
+    );
+    assert_eq!(sent.await["status"], "sent");
+    harness.until_uploads_gone().await;
+    tokens.push(bearer);
+    log.rewind().unwrap();
+    let mut lines = String::new();
+    log.read_to_string(&mut lines).unwrap();
+    assert!(lines.contains("upload piece not stored") && lines.contains("the bucket answered 500"));
+    assert!(lines.contains("the bucket answered 503") && lines.contains("upload stored"));
+    // The stand-in's host can't carry a marker, so its address is one.
+    let host = harness.server.address().to_string();
+    for text in answers.iter().chain([&lines]) {
+        let secrets = ["made-up", "Signature=", "secret-name", "123457", "123,457"];
+        for secret in secrets
+            .iter()
+            .copied()
+            .chain(tokens.iter().map(|t| &t[7..]))
+            .chain([host.as_str()])
+        {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_send_refused_after_the_mark_uses_its_uploads() {
+    let harness = harness().await;
+    mock_google_sign_in(&harness.server).await;
+    gmail_send()
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"error": {"message": "Invalid To header"}})),
+        )
+        .mount(&harness.server)
+        .await;
+    let token = harness.sign_in("google").await;
+    let id = harness.upload(&token, b"data", 4).await;
+    let message = message_with(&json!([uploaded(&id, "a.bin")]));
+    let error = harness
+        .call_err(&token, "send_message", message.clone())
+        .await;
+    let went = "\nIts uploaded files went with this try: upload them again to send them.";
+    assert!(
+        error.ends_with(&format!(
+            "\nAttachments in this message: a.bin (4 bytes).{went}"
+        )),
+        "{error}"
+    );
+    harness.until_uploads_gone().await;
+    let again = harness.call_err(&token, "send_message", message).await;
+    assert!(again.contains(NO_UPLOAD), "{again}");
+    assert_eq!(sends(&harness.server).await, 1);
+}
+
+#[tokio::test]
+async fn two_sends_of_one_upload_at_once_send_one_message() {
+    let (harness, token) = gmail_uploads().await;
+    let id = harness.upload(&token, b"once", 4).await;
+    let message = message_with(&json!([uploaded(&id, "a.bin")]));
+    let (first, second) = futures::join!(
+        harness.call(&token, "send_message", message.clone()),
+        harness.call(&token, "send_message", message),
+    );
+    let mut errors: Vec<bool> = [&first, &second]
+        .iter()
+        .map(|result| result["isError"] == json!(true))
+        .collect();
+    errors.sort_unstable();
+    assert_eq!(errors, [false, true], "{first} {second}");
+    let refused = if first["isError"] == json!(true) {
+        &first
+    } else {
+        &second
+    };
+    assert!(
+        refused["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(NO_UPLOAD),
+        "{refused}"
+    );
+    assert_eq!(sends(&harness.server).await, 1);
+}
+
+#[tokio::test]
+async fn sends_never_wait_on_deletes_and_the_cleanup_finishes_them() {
+    let (harness, token) = gmail_uploads().await;
+    let id = harness.upload(&token, &file_of(25 << 20), 1 << 20).await;
+    let expired = harness.upload(&token, b"never sent", 10).await;
+    harness.uploads.hold("DELETE");
+    let sent = harness.call_ok(
+        &token,
+        "send_message",
+        message_with(&json!([uploaded(&id, "a.bin")])),
+    );
+    assert_eq!(sent.await["status"], "sent");
+    // The deletes started before the provider call; none was answered yet.
+    let deleting = harness.uploads.first("DELETE").unwrap();
+    assert!(
+        deleting.elapsed() < bucket::HELD,
+        "the send waited on its deletes"
+    );
+    tokio::time::sleep(bucket::HELD + Duration::from_secs(1)).await;
+    assert_eq!(
+        (harness.uploads.names().len(), harness.upload_rows().await),
+        (8, 2)
+    );
+    // A shutdown during a cleanup's deletes doesn't wait on them either.
+    let asked = harness.uploads.requests.lock().unwrap().len();
+    let cancel = CancellationToken::new();
+    let run = harness.cleanup(&cancel);
+    while harness.uploads.requests.lock().unwrap().len() == asked {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let stopping = std::time::Instant::now();
+    cancel.cancel();
+    run.await.unwrap();
+    assert!(
+        stopping.elapsed() < bucket::HELD,
+        "shutdown waited on the deletes"
+    );
+    assert_eq!(harness.upload_rows().await, 2);
+    harness.uploads.answer();
+    let past = "UPDATE uploads SET expires_at = expires_at - 3601 WHERE used_at IS NULL";
+    sqlx::query(past)
+        .execute(harness.store.pool())
+        .await
+        .unwrap();
+    harness.clean_up().await;
+    let error = harness.call_err(
+        &token,
+        "send_message",
+        message_with(&json!([uploaded(&expired, "b.bin")])),
+    );
+    assert!(error.await.contains(NO_UPLOAD));
+}
+
+#[tokio::test]
+async fn a_forward_and_its_uploads_over_the_budget_are_refused_at_once() {
+    let (harness, token) = gmail_uploads().await;
+    let id = harness.upload(&token, &file_of(5 << 20), 1 << 20).await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/gmail/v1/users/me/messages/big"))
+        .and(query_param("fields", "id,sizeEstimate"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id": "big", "sizeEstimate": 40 << 20})),
+        )
+        .expect(1)
+        .mount(&harness.server)
+        .await;
+    let mut forward = message_with(&json!([uploaded(&id, "a.bin")]));
+    forward["forward"] = json!("gmail.big");
+    let start = std::time::Instant::now();
+    let error = harness.call_err(&token, "send_message", forward).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "refused without waiting for room"
+    );
+    assert!(
+        error.starts_with("Not sent: the forwarded message (41.9 MB) and the uploaded files (5.2 MB), \
+            with the room an original needs, are more than postkeep sends at once (48 MiB). Forward \
+            it with fewer files, and send the rest in another message."),
+        "{error}"
+    );
+    harness.server.verify().await;
 }

@@ -15,6 +15,7 @@
     reason = "test helpers should fail loudly"
 )]
 
+mod bucket;
 mod imap;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -311,6 +312,9 @@ struct Harness {
     store: Store,
     a: AccountId,
     b: AccountId,
+    /// The stand-in bucket the routers put uploads in, and its server.
+    uploads: bucket::StandIn,
+    _bucket: wiremock::MockServer,
     _dir: tempfile::TempDir,
 }
 
@@ -340,6 +344,9 @@ async fn harness_with_smtp(smtp: Option<u16>) -> Harness {
     if let Some(port) = smtp {
         mail.smtp.port = port;
     }
+    let bucket_server = wiremock::MockServer::start().await;
+    let (uploads, bucket) = bucket::stand_in(&bucket_server).await;
+    let bucket: Arc<dyn postkeep::bucket::Bucket> = Arc::new(bucket);
     let tools = Arc::new(AccountTools::default());
     let usage = Arc::new(Usage {
         log: tools.clone(),
@@ -353,6 +360,7 @@ async fn harness_with_smtp(smtp: Option<u16>) -> Harness {
         let mut auth = AuthConfig::new(&format!("https://{HOST}"), app::MCP_PATH).unwrap();
         auth.imap_servers = ImapServers::custom_only("Scripted", mail.clone());
         let config = AppConfig {
+            bucket: Some(bucket.clone()),
             auth,
             extra_allowed_hosts: Vec::new(),
             extra_allowed_origins: Vec::new(),
@@ -392,8 +400,28 @@ async fn harness_with_smtp(smtp: Option<u16>) -> Harness {
         store,
         a,
         b,
+        uploads,
+        _bucket: bucket_server,
         _dir: dir,
     }
+}
+
+/// A new upload of `token`'s caller holding `file`: its id.
+async fn upload(app: &Router, token: &str, file: &[u8]) -> String {
+    let made = call(app, token, "upload_attachment", json!({}))
+        .await
+        .unwrap();
+    let request = Request::put("/upload")
+        .header(header::HOST, HOST)
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", made["token"].as_str().unwrap()),
+        )
+        .body(Body::from(file.to_vec()))
+        .unwrap();
+    let put = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(put.status(), StatusCode::CREATED);
+    made["upload_id"].as_str().unwrap().to_owned()
 }
 
 fn rpc_request(token: &str, method: &str, params: &Value, protocol: &str) -> Request<Body> {
@@ -472,25 +500,25 @@ async fn instructions(app: &Router) -> String {
 async fn the_extension_lists_its_tools_to_the_callers_it_picks() {
     let h = harness().await;
     let plain = listed(&h.plain, "workspace-key").await;
-    assert_eq!(plain.len(), 17);
+    assert_eq!(plain.len(), 18);
     let extended = listed(&h.extended, "workspace-key").await;
-    assert_eq!(extended.len(), 19, "list_folders stays the server's");
-    assert_eq!(&extended[..17], &plain[..]);
-    assert_eq!(extended[17]["name"], "get_account");
+    assert_eq!(extended.len(), 20, "list_folders stays the server's");
+    assert_eq!(&extended[..18], &plain[..]);
+    assert_eq!(extended[18]["name"], "get_account");
     assert_eq!(
-        extended[17]["inputSchema"]["properties"]["mailbox"],
+        extended[18]["inputSchema"]["properties"]["mailbox"],
         json!({
             "description": "Mailbox to use: its id or email address. Omit it to use the default mailbox.",
             "type": "string"
         })
     );
-    assert_eq!(extended[17]["annotations"]["readOnlyHint"], true);
-    assert_eq!(extended[18]["name"], "disconnect_mailbox");
+    assert_eq!(extended[18]["annotations"]["readOnlyHint"], true);
+    assert_eq!(extended[19]["name"], "disconnect_mailbox");
     assert_eq!(
-        extended[18]["inputSchema"]["properties"]["mailbox"],
+        extended[19]["inputSchema"]["properties"]["mailbox"],
         json!({ "type": "string", "description": "The mailbox to disconnect." })
     );
-    assert_eq!(extended[18]["inputSchema"]["required"], json!(["mailbox"]));
+    assert_eq!(extended[19]["inputSchema"]["required"], json!(["mailbox"]));
     assert_eq!(listed(&h.extended, "other-key").await, plain);
 
     assert_eq!(cache_scope(&h.plain).await, "public");
@@ -785,6 +813,79 @@ async fn receive_smtp(listener: TcpListener) -> String {
         write.write_all(answer).await.unwrap();
     }
     raw
+}
+
+#[tokio::test]
+async fn a_held_send_pins_the_bytes_of_its_uploads() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let h = harness_with_smtp(Some(listener.local_addr().unwrap().port())).await;
+    let smtp = tokio::spawn(receive_smtp(listener));
+    h.usage.holds.store(true, Ordering::SeqCst);
+    let key = "search-key";
+    let message = |id: &str| {
+        json!({"to": ["x@example.com"], "subject": "s", "body": "b", "save_to_sent": false,
+            "attachments": [{"upload_id": id, "filename": "data.csv", "content_type": "text/csv"}]})
+    };
+    let id = upload(&h.limited, key, b"abc").await;
+    let held = call(&h.limited, key, "send_message", message(&id))
+        .await
+        .unwrap();
+    assert_eq!(held["status"], "held");
+    assert!(
+        held["next"]
+            .as_str()
+            .unwrap()
+            .contains("data.csv (3 bytes)"),
+        "{held}"
+    );
+    // The same digest a typed file of these bytes pins.
+    let digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    assert_eq!(
+        h.usage.held_files.lock().unwrap().as_ref().unwrap()[0]["sha256"],
+        digest
+    );
+    let other = upload(&h.limited, key, b"abd").await;
+    let mut swapped = message(&other);
+    swapped["hold_id"] = held["hold_id"].clone();
+    let error = call(&h.limited, key, "send_message", swapped)
+        .await
+        .unwrap_err();
+    assert!(error.contains("these arguments differ"), "{error}");
+    let mut confirm = message(&id);
+    confirm["hold_id"] = held["hold_id"].clone();
+    let sent = call(&h.limited, key, "send_message", confirm)
+        .await
+        .unwrap();
+    assert_eq!(sent["status"], "sent");
+    let raw = tokio::time::timeout(Duration::from_secs(5), smtp)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(raw.contains("filename=\"data.csv\"") && raw.contains("\r\n\r\nYWJj\r\n"));
+    // A piece changed in the bucket after the hold refuses the whole send.
+    let before = h.uploads.names();
+    let changed = upload(&h.limited, key, b"abc").await;
+    let held = call(&h.limited, key, "send_message", message(&changed))
+        .await
+        .unwrap();
+    let piece = h
+        .uploads
+        .names()
+        .into_iter()
+        .find(|name| !before.contains(name))
+        .unwrap();
+    h.uploads.objects.lock().unwrap().get_mut(&piece).unwrap()[0] ^= 1;
+    let mut confirm = message(&changed);
+    confirm["hold_id"] = held["hold_id"].clone();
+    let error = call(&h.limited, key, "send_message", confirm)
+        .await
+        .unwrap_err();
+    assert!(
+        error.starts_with(
+            "attachment \"data.csv\": the uploaded file could not be read; nothing was sent."
+        ),
+        "{error}"
+    );
 }
 
 #[tokio::test]

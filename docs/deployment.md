@@ -179,7 +179,10 @@ have been added since.
   `postkeep serve` with `set -a; . ./.env; set +a`, or use the systemd unit.
 - **Fly.io:** for a secret, put its line in such a `.env`, without quotes,
   and run `fly secrets import -c deploy/fly/fly.toml < .env`; for the rest,
-  `[env]` in `fly.toml`, then `fly deploy -c deploy/fly/fly.toml`.
+  `[env]` in `fly.toml`, then `fly deploy -c deploy/fly/fly.toml`. The upload
+  bucket's three settings are secrets. Make a Tigris bucket with Tigris's CLI
+  and its key in Tigris's console, not with `fly storage create`, which makes a
+  key of its own and prints it, or sets `AWS_*` secrets postkeep doesn't read.
 
 ## Reverse proxy notes
 
@@ -191,6 +194,10 @@ have been added since.
   (see [configuration.md](configuration.md#abuse-limits)).
 - Allow long requests. A tool call waits for the mail provider and can take
   tens of seconds (for example `proxy_read_timeout 120s;` in nginx).
+- With [uploads](configuration.md#uploads) on, let a 25 MiB `PUT` through on
+  `/upload`, pass its body on as it arrives rather than save it to disk first,
+  and don't log the `Authorization` header. Caddy does all three by default, so
+  the Compose file's Caddyfile needs nothing.
 - nginx example (with `POSTKEEP_CLIENT_IP_HEADER=X-Real-IP`):
 
   ```nginx
@@ -200,6 +207,9 @@ have been added since.
       proxy_set_header X-Real-IP $remote_addr;
       proxy_http_version 1.1;
       proxy_read_timeout 120s;
+      # Uploads: up to 25 MiB, passed on as they arrive.
+      client_max_body_size 25m;
+      proxy_request_buffering off;
   }
   ```
 
@@ -286,6 +296,11 @@ migrations at start (0.3.2 always does, later versions by default) it stops at
 the first one it does not know, "migration N was previously applied but is
 missing in the resolved migrations". With
 `POSTKEEP_DATABASE_MIGRATE_ON_START=false` it starts. Do not go back to one.
+
+Going back to a version from before uploads, or restoring a backup, delete
+the uploads' rows before it serves (`DELETE FROM uploads;`): a restored copy
+can't tell which uploads are still unused. The bucket's expiry rule removes
+their pieces.
 
 ### New-mail webhooks
 

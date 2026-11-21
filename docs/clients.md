@@ -60,6 +60,21 @@ Copilot agent mode.
 - An app that only runs local (stdio) servers can use a bridge such as
   `mcp-remote`: `npx mcp-remote https://mail.example.com/mcp`.
 
+### Attaching large files
+
+A file too large to write into a call goes by
+[`upload_attachment`](reference/tools.md#uploads), which works where the agent
+can see the file and run a command that reaches your server:
+
+| Where the agent runs | A file too large for the call |
+| -------------------- | ----------------------------- |
+| A coding agent on your computer (Claude Code, Codex, Cursor, VS Code agent mode, Gemini CLI) | uploaded by a command; a sandbox may need your server's host allowed, or your yes |
+| ChatGPT desktop or Codex with a local folder open, where its network is on | uploaded, untried |
+| Claude desktop with a connected folder | uploaded from its own environment, where its network settings allow your server, untried |
+| Claude chat | a file in the chat, from its code sandbox, where your server's host is allowed, untried |
+| ChatGPT chat, the Gemini app | not attachable: small files go in the call |
+| Agent frameworks, scripts, your own code | uploaded |
+
 ## Disconnect
 
 Remove the server in the agent app. To also stop its tokens at once, revoke

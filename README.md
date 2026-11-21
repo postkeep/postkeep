@@ -29,8 +29,9 @@ the server to your agent app once for each mailbox you want.
 - **SQLite or PostgreSQL.** SQLite by default. Point it at PostgreSQL and set
   `POSTKEEP_WEBHOOKS=false` to run several replicas.
 - **You hold the key.** Saved app passwords, Microsoft and Google sign-ins,
-  webhook secrets, webhook filter patterns and stored events are encrypted
-  with AES-256-GCM under data keys wrapped by a master key you generate.
+  webhook secrets and filter patterns, stored events and uploaded files, in
+  your bucket, are encrypted with AES-256-GCM under data keys wrapped by a
+  master key you generate.
 - **You choose who connects.** List the addresses allowed to use your server
   in `POSTKEEP_ALLOWED_EMAILS`. postkeep checks it at sign-in and on every
   request.
@@ -107,6 +108,7 @@ doesn't ask.
 | `move_message` | Moves a message to another folder. |
 | `delete_message` | Moves a message to the trash, or deletes it for good when you ask. |
 | `create_folder` | Creates a new folder. |
+| `upload_attachment` | Gives a one-time upload for one file's bytes, sent with a command, to attach to one message. Off unless the server has a bucket. |
 | `get_webhook_status` | Shows whether this mailbox's new-mail webhook is active, paused, off, not set up, unreadable, waiting for a new password, or `rules_unreadable` (its filter rules can't be read or compiled), with its outbox limits and filter rule counts. |
 | `set_webhook_enabled` | Turns this mailbox's new-mail webhook on or off. |
 | `set_webhook_outbox_limits` | Sets how long new-mail events are kept, and how many. |

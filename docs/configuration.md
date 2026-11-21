@@ -36,9 +36,10 @@ shows how to change one.
 `POSTKEEP_LOG` uses `tracing` filter syntax. Directives for postkeep's own
 crates are kept as written, including span directives such as
 `[serve_inner]=trace`. These crates stay capped no matter what the filter
-says, because their trace or debug logs can include credentials or message
-bodies: `async_imap` and `imap_proto` at `warn`, `rmcp` at `info`, and
-`lettre` at `warn`. The cap is a separate filter on the event's own target,
+says, because their trace or debug logs can include credentials, message
+bodies or the upload bucket's address: `async_imap` and `imap_proto` at
+`warn`, `rmcp` at `info`, `lettre` at `warn`, and `hyper_util` and `rustls`
+at `info`. The cap is a separate filter on the event's own target,
 so a directive with no target (`trace`, `[serve_inner]=trace`) cannot raise
 those crates. A directive that names one of them, such as
 `async_imap::imap_stream=trace` or `rmcp::service=debug`, is also dropped.
@@ -276,6 +277,52 @@ postkeep accepts a push only with a Google-signed OIDC token whose
 audience and service account match these settings, and renews each
 account's Gmail watch daily (a watch lapses after seven days).
 
+## Uploads
+
+[`upload_attachment`](reference/tools.md#uploads) lets an agent attach a file
+of up to 25 MiB that it sends with a command. Its bytes wait in an
+S3-compatible bucket, sealed by postkeep; uploads are off until it is set.
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `POSTKEEP_UPLOAD_BUCKET_URL` | | The bucket's `https://` address, which turns uploads on; files go under `uploads/` in it. For example `https://<bucket>.t3.storage.dev` (Tigris), `https://<account>.r2.cloudflarestorage.com/<bucket>` (Cloudflare R2), `https://<bucket>.s3.<region>.amazonaws.com` (AWS) |
+| `POSTKEEP_UPLOAD_BUCKET_REGION` | `auto` | The region its requests are signed for: `auto` for Tigris and R2, the bucket's region for AWS |
+| `POSTKEEP_UPLOAD_BUCKET_KEY_ID` | | The ID of an access key for that bucket |
+| `POSTKEEP_UPLOAD_BUCKET_SECRET` | | Its secret |
+
+The address, the key's ID and its secret are set together or not at all,
+else `serve` doesn't start. The address must be `https://`, with no user,
+password, query or fragment, and a path of letters, digits, `-`, `.`, `_`
+and `/` only. All three are hidden from `--help` and never logged. A store
+on plain HTTP needs TLS in front of it.
+
+The bucket:
+
+- is postkeep's own and private, with no versioning, snapshots or soft
+  delete, so a deleted object is gone;
+- has one expiry rule on the whole bucket, making each object due for
+  deletion a day after it was written, with any provider's S3 API:
+
+  ```sh
+  aws s3api put-bucket-lifecycle-configuration --endpoint-url <endpoint> --bucket <bucket> \
+    --lifecycle-configuration '{"Rules":[{"ID":"postkeep-uploads","Status":"Enabled","Filter":{},"Expiration":{"Days":1}}]}'
+  ```
+
+  or, on Tigris, `tigris buckets lifecycle create <bucket> --expire-days 1`;
+
+- takes a key that can only read, write and delete objects in that bucket.
+
+An upload stops working at once, when it is used or its hour ends.
+postkeep then clears its key and asks the bucket to remove its pieces, and
+retries outstanding removals in batches, at most 100 uploads and 2 minutes a
+cleanup; the expiry rule removes what they leave. Removal has no guaranteed
+deadline.
+
+postkeep bounds what it reserves at once (per tenant 2 files arriving and
+250 MiB kept, per server 8 and 1 GiB), not the bucket's bill: the provider's
+console shows its use. Unsetting the three settings turns uploads off; sends
+that name an upload then refuse it, and the expiry rule removes its pieces.
+
 ## OAuth tokens and clients
 
 | Variable | Default | Purpose |
@@ -296,7 +343,7 @@ are removed every 10 minutes.
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
 | `POSTKEEP_CLIENT_IP_HEADER` | (peer address) | Header with the real client IP, set by your reverse proxy |
-| `POSTKEEP_RATE_LIMIT` | `120` | Requests per minute per client IP on `/register`, `/authorize`, `/token`, `/revoke`, `/account` and `/account/*`, and `/oauth/{provider}/start` and `/oauth/{provider}/callback` |
+| `POSTKEEP_RATE_LIMIT` | `120` | Requests per minute per client IP on `/register`, `/authorize`, `/token`, `/revoke`, `/account` and `/account/*`, `/oauth/{provider}/start` and `/oauth/{provider}/callback`, and `/upload` |
 | `POSTKEEP_ACCOUNT_BACKOFF_MAX` | `60` | Longest sign-in backoff for one address (seconds) |
 | `POSTKEEP_IP_BACKOFF_MAX` | `900` | Longest sign-in backoff for one client IP (seconds) |
 
@@ -352,6 +399,9 @@ readiness check. Mail operations use `POSTKEEP_MAIL_TIMEOUT` (30 seconds).
 An IMAP search has a separate timeout for listing candidates and for each
 batch it fetches. A search with header filters starts no more fetches after
 one mail timeout, but a fetch already in progress can finish.
+
+`/upload` keeps its own limits instead of the body limit and timeout: a file
+of up to 25 MiB, 10 minutes in all and 30 seconds without a byte.
 
 ## IMAP connection reuse
 

@@ -5,9 +5,12 @@ How postkeep protects what it stores, and how to report a problem.
 ## Security model
 
 - App passwords, Microsoft and Google tokens, webhook secrets, webhook
-  filter patterns and stored events are encrypted with AES-256-GCM under
-  data keys wrapped by a master key you supply. Each value has a random
-  nonce and is bound to the tenant, column and row it is stored in.
+  filter patterns, stored events and the keys of uploaded files are
+  encrypted with AES-256-GCM under data keys wrapped by a master key you
+  supply. Each value has a random nonce and is bound to the tenant, column and
+  row it is stored in. Uploaded files wait in the operator's bucket, sealed
+  piece by piece under a key of their own, with the piece's number as the
+  nonce and fixed associated data.
 - MCP access tokens, MCP refresh tokens, authorization codes and client
   secrets are stored only as SHA-256 hashes. Codes are single use, refresh
   tokens rotate on every use, and PKCE (`S256`) is mandatory. Presenting a

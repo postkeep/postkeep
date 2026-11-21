@@ -11,6 +11,7 @@
     reason = "test helpers should fail loudly"
 )]
 
+mod bucket;
 mod common;
 mod imap;
 
@@ -87,6 +88,15 @@ impl Reply {
 }
 
 async fn harness(mail: MailConfig, verifier: impl CredentialVerifier) -> Harness {
+    harness_with(mail, verifier, None).await
+}
+
+/// [`harness`] putting uploads in `bucket`.
+async fn harness_with(
+    mail: MailConfig,
+    verifier: impl CredentialVerifier,
+    bucket: Option<Arc<dyn postkeep::bucket::Bucket>>,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}", dir.path().join("server.db").display());
     let key = MasterKey::parse(&MasterKey::generate_encoded().unwrap()).unwrap();
@@ -94,6 +104,7 @@ async fn harness(mail: MailConfig, verifier: impl CredentialVerifier) -> Harness
     let mut auth = AuthConfig::new(&format!("https://{HOST}"), app::MCP_PATH).unwrap();
     auth.imap_servers = ImapServers::custom_only("Test mail", mail);
     let config = AppConfig {
+        bucket,
         auth,
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: vec![BROWSER_CLIENT.to_owned()],
@@ -150,6 +161,7 @@ async fn webhook_harness_for(
         CancellationToken::new(),
     );
     let config = AppConfig {
+        bucket: None,
         auth,
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),
@@ -556,6 +568,7 @@ async fn mcp_endpoint_lists_tools_and_reports_mail_errors() {
             "set_webhook_enabled",
             "set_webhook_outbox_limits",
             "update_flags",
+            "upload_attachment",
         ]
     );
     let listed = tools["tools"].as_array().unwrap();
@@ -674,7 +687,7 @@ async fn tools_refuse_arguments_they_do_not_take() {
     let token = harness
         .sign_in("me@icloud.com", "abcd-efgh-ijkl-mnop")
         .await;
-    // Arguments each tool takes, for all seventeen.
+    // Arguments each tool takes, for all eighteen.
     let calls = json!({
         "list_folders": {},
         "search_messages": { "text": "budget" },
@@ -693,9 +706,10 @@ async fn tools_refuse_arguments_they_do_not_take() {
         "list_webhook_filters": { "limit": 5 },
         "add_webhook_filter": { "action": "block", "field": "from", "kind": "equals", "pattern": "x" },
         "remove_webhook_filter": { "all": true },
+        "upload_attachment": {},
     });
     let calls = calls.as_object().unwrap();
-    assert_eq!(calls.len(), 17);
+    assert_eq!(calls.len(), 18);
     for (tool, arguments) in calls {
         let mut arguments = arguments.clone();
         arguments["importance"] = json!("high");
@@ -1294,7 +1308,9 @@ async fn imap_refuses_to_forward_more_bytes_than_it_reserved() {
 #[ignore = "requires GreenMail"]
 async fn greenmail_end_to_end() {
     let mail = greenmail_config();
-    let harness = harness(mail, MailVerifier).await;
+    let bucket_server = wiremock::MockServer::start().await;
+    let (uploads, bucket) = bucket::stand_in(&bucket_server).await;
+    let harness = harness_with(mail, MailVerifier, Some(Arc::new(bucket))).await;
     let user = new_mailbox("welcome").await;
     let token = harness.sign_in(&user, &user).await;
 
@@ -1772,14 +1788,39 @@ async fn greenmail_end_to_end() {
     harness
         .call_ok(&token, "create_folder", json!({ "name": "Drafts" }))
         .await;
+    let made = harness
+        .call_ok(&token, "upload_attachment", json!({}))
+        .await;
+    let put = Request::put("/upload")
+        .header(header::HOST, HOST)
+        .header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", made["token"].as_str().unwrap()),
+        )
+        .body(Body::from("drafted bytes"))
+        .unwrap();
+    assert_eq!(harness.send(put).await.status, StatusCode::CREATED);
+    let file = json!({"upload_id": made["upload_id"], "filename": "notes.txt"});
     let draft = harness
         .call_ok(
             &token,
             "create_draft",
-            json!({ "id": id, "body": "A second thought." }),
+            json!({ "id": id, "body": "A second thought.", "attachments": [file] }),
         )
         .await;
     assert_eq!(draft["folder"], "Drafts", "{draft}");
+    // The saved draft used the upload: its row and pieces go.
+    let rows = || async {
+        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM uploads");
+        count.fetch_one(harness.store.pool()).await.unwrap()
+    };
+    for _ in 0..100 {
+        if uploads.names().is_empty() && rows().await == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!((uploads.names(), rows().await), (Vec::<String>::new(), 0));
     let drafts = harness
         .call_ok(
             &token,
@@ -2907,6 +2948,7 @@ async fn unreadable_webhook_status_refuses_enable_and_allows_disable() {
         CancellationToken::new(),
     );
     let config = AppConfig {
+        bucket: None,
         auth: auth_config,
         extra_allowed_hosts: Vec::new(),
         extra_allowed_origins: Vec::new(),

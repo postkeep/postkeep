@@ -28,8 +28,8 @@ use postkeep_store::{
     AccountId, AddedFilterRule, AppendOutcome, ChangedFilterRule, DEFAULT_TENANT, DataKey,
     FilterRule, Kek, KeyWrapper, LoadedWebhook, LocalKeyWrapper, MailEvent, MasterKey, Migrations,
     NewFilterRule, OAuthAccount, PoolSettings, Provider, Reencrypted, Rewrapped, Store, StoreError,
-    UpstreamPurpose, UpstreamRequest, UpstreamTokens, WatchAdvance, WebhookSettings, WrapFuture,
-    Wrapped, now,
+    UploadBounds, UploadOwner, UpstreamPurpose, UpstreamRequest, UpstreamTokens, WatchAdvance,
+    WebhookSettings, WrapFuture, Wrapped, now,
 };
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
@@ -920,6 +920,9 @@ const CONTINUATION: Column = ("upstream_requests", "continuation_ciphertext", "s
 const PAYLOAD: Column = ("mail_events", "payload_ciphertext", "id");
 /// Not in `COLUMNS`: no earlier version wrote it, so no fixture has it as a v1 value.
 const PATTERN: Column = ("webhook_filter_rules", "pattern_ciphertext", "id");
+/// Not in `COLUMNS` either, for the same reason.
+const UPLOAD_KEY: Column = ("uploads", "key_ciphertext", "id_hash");
+const UPLOAD_DIGEST: Column = ("uploads", "digest_ciphertext", "id_hash");
 
 fn secret(value: &str) -> SecretString {
     SecretString::from(value.to_owned())
@@ -1006,10 +1009,20 @@ async fn seal(
 async fn unseal(
     store: &Store,
     tenant: &str,
-    (table, column, _): Column,
+    column: Column,
     row_key: &str,
     stored: &str,
 ) -> String {
+    String::from_utf8(unseal_bytes(store, tenant, column, row_key, stored).await).unwrap()
+}
+
+async fn unseal_bytes(
+    store: &Store,
+    tenant: &str,
+    (table, column, _): Column,
+    row_key: &str,
+    stored: &str,
+) -> Vec<u8> {
     let rest = stored.strip_prefix("v2.").unwrap();
     let (version, blob) = rest.split_once('.').unwrap();
     let scoped = store.for_tenant(tenant);
@@ -1021,10 +1034,9 @@ async fn unseal(
         msg: sealed,
         aad: context.as_bytes(),
     };
-    let opened = Aes256Gcm::new(key.unwrap().expose().into())
+    Aes256Gcm::new(key.unwrap().expose().into())
         .decrypt(&Nonce::try_from(nonce).unwrap(), payload)
-        .unwrap();
-    String::from_utf8(opened).unwrap()
+        .unwrap()
 }
 
 /// The texts stored for the password and the webhook secrets of `account`.
@@ -1931,6 +1943,83 @@ async fn exercise_filter_patterns_are_written_as_v2(db: &Db) {
     assert_decrypt(store.webhook_filter_rules(&id, 9).await);
 }
 
+/// An upload's key and digest are written as v2 values of the tenant of its
+/// account, with the hash of its id as row key. Moved to another upload's row,
+/// neither opens; a used upload holds neither.
+async fn exercise_upload_keys_are_written_as_v2(db: &Db) {
+    let store = db.open(&master()).await;
+    let tenant = unique_tenant();
+    let email = format!("{}@example.com", unique("upload"));
+    let scoped = store.for_tenant(&tenant);
+    let id = scoped
+        .upsert_account(&email, &secret("pw"))
+        .await
+        .unwrap()
+        .id;
+    let owner = UploadOwner {
+        account: &id,
+        principal: "caller",
+        app: "app",
+    };
+    let bounds = UploadBounds {
+        tenant_arriving: 9,
+        tenant_stored: i64::MAX / 4,
+        server_arriving: i64::MAX,
+        server_stored: i64::MAX / 4,
+        least: 1,
+        window: Duration::from_secs(60),
+    };
+    let mut uploads = Vec::new();
+    for byte in [1, 2] {
+        let (upload, token, object) = (unique("upload"), unique("token"), unique("object"));
+        let made = store.create_upload(owner, &upload, &token, Duration::from_secs(60), 9);
+        made.await.unwrap().unwrap();
+        let claimed = store.claim_upload(&token, &object, 1, bounds).await;
+        let claimed = claimed.unwrap().unwrap();
+        assert!(store.finish_upload(&claimed, 1, &[byte; 32]).await.unwrap());
+        let row: String = sqlx::query_scalar("SELECT id_hash FROM uploads WHERE object = $1")
+            .bind(&object)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let key = claimed.key().expose().to_vec();
+        for (column, plain) in [(UPLOAD_KEY, key), (UPLOAD_DIGEST, vec![byte; 32])] {
+            let stored = text(&store, column, &row).await;
+            assert!(stored.starts_with("v2.1."), "{stored}");
+            assert_eq!(
+                unseal_bytes(&store, &tenant, column, &row, &stored).await,
+                plain
+            );
+        }
+        uploads.push((upload, row));
+    }
+    let window = Duration::from_secs(60);
+    for column in [UPLOAD_KEY, UPLOAD_DIGEST] {
+        let (first, second) = (&uploads[0].1, &uploads[1].1);
+        let own = text(&store, column, second).await;
+        set_text(&store, column, second, &text(&store, column, first).await).await;
+        assert_decrypt(store.upload_for(owner, &uploads[1].0, window).await);
+        set_text(&store, column, second, &own).await;
+    }
+    assert!(
+        store
+            .use_uploads(owner, &[&uploads[0].0])
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    for (_, column, _) in [UPLOAD_KEY, UPLOAD_DIGEST] {
+        let sql = format!("SELECT {column} FROM uploads WHERE id_hash = $1");
+        let left: Option<String> = sqlx::query_scalar(AssertSqlSafe(sql))
+            .bind(&uploads[0].1)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(left, None);
+    }
+    store.delete_account(&id).await.unwrap();
+}
+
 /// A wrapper that fails for now stops an append with `KeyWrap`: the event is
 /// not stored or taken for unreadable, no sequence number is used and the
 /// position stays where the batch was read from, so the same call stores the
@@ -2348,6 +2437,7 @@ async fn exercise_values(db: &Db) {
     exercise_events_are_written_as_v2(db).await;
     exercise_an_event_is_not_stored_while_the_wrapper_fails(db).await;
     exercise_filter_patterns_are_written_as_v2(db).await;
+    exercise_upload_keys_are_written_as_v2(db).await;
 }
 
 /// A local wrapper that holds each `unwrap` until `parties` callers are in it and

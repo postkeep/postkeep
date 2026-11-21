@@ -26,6 +26,7 @@ use postkeep_upstream::http::{HttpError, JSON_LIMIT, MESSAGE_LIMIT, join_segment
 use postkeep_upstream::{ApiClient, ApiError, UpstreamProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::SemaphorePermit;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -1213,6 +1214,7 @@ impl GraphMailbox {
         files: Vec<(String, usize)>,
         options: SendOptions,
         request: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
     ) -> MailboxResult<SentMessage> {
         let original = Self::message_id(selector)?.to_owned();
         self.send_draft(
@@ -1220,25 +1222,32 @@ impl GraphMailbox {
             message,
             options,
             request,
+            room,
         )
         .await
     }
 
     /// Keep draft cleanup alive if the MCP call goes away while a request is in flight.
+    /// The send's memory reservation, `room`, lasts as long as the task.
     async fn send_draft(
         &self,
         start: DraftStart,
         message: OutgoingMessage,
         options: SendOptions,
         request: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
     ) -> MailboxResult<SentMessage> {
         let mailbox = self.clone();
         let cancel = request.child_token();
         // Also cancel if the server drops the tool future rather than signalling rmcp.
         let _on_drop = cancel.clone().drop_guard();
-        tokio::spawn(async move { mailbox.draft_task(start, message, options, &cancel).await })
-            .await
-            .map_err(|_| MailboxError::Message(MAY_HAVE_BEEN_SENT.to_owned()))?
+        tokio::spawn(async move {
+            let sent = mailbox.draft_task(start, message, options, &cancel).await;
+            drop(room);
+            sent
+        })
+        .await
+        .map_err(|_| MailboxError::Message(MAY_HAVE_BEEN_SENT.to_owned()))?
     }
 
     async fn draft_write(
@@ -1562,8 +1571,13 @@ impl GraphMailbox {
         message: &OutgoingMessage,
         options: SendOptions,
     ) -> MailboxResult<SentMessage> {
-        self.send_with_cancel(Cow::Borrowed(message), options, CancellationToken::new())
-            .await
+        self.send_with_cancel(
+            Cow::Borrowed(message),
+            options,
+            CancellationToken::new(),
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn send_with_cancel(
@@ -1571,6 +1585,7 @@ impl GraphMailbox {
         mut message: Cow<'_, OutgoingMessage>,
         options: SendOptions,
         cancel: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
     ) -> MailboxResult<SentMessage> {
         if needs_draft(
             &message.text_body,
@@ -1587,7 +1602,7 @@ impl GraphMailbox {
         {
             return Ok(sent);
         }
-        self.send_draft(DraftStart::New, message.into_owned(), options, cancel)
+        self.send_draft(DraftStart::New, message.into_owned(), options, cancel, room)
             .await
     }
 
@@ -1603,6 +1618,7 @@ impl GraphMailbox {
             Cow::Borrowed(reply),
             options,
             CancellationToken::new(),
+            None,
         )
         .await
     }
@@ -1613,6 +1629,7 @@ impl GraphMailbox {
         reply: Cow<'_, Reply>,
         options: SendOptions,
         cancel: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
     ) -> MailboxResult<SentMessage> {
         let id = Self::message_id(selector)?;
         let raw = self.raw(id).await?;
@@ -1643,8 +1660,14 @@ impl GraphMailbox {
             drop(mime::compose(&self.from(), &message)?);
         }
         message.attachments = files;
-        self.send_draft(DraftStart::Reply(id.to_owned()), message, options, cancel)
-            .await
+        self.send_draft(
+            DraftStart::Reply(id.to_owned()),
+            message,
+            options,
+            cancel,
+            room,
+        )
+        .await
     }
 }
 

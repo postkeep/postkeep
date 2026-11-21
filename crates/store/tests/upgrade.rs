@@ -744,7 +744,7 @@ async fn exercise_filled_0_3_2(backend: Backend) {
             .iter()
             .map(|(version, _)| *version)
             .collect::<Vec<_>>(),
-        (1..=18).collect::<Vec<_>>()
+        (1..=19).collect::<Vec<_>>()
     );
     let imap = store
         .upsert_account("filled@example.com", &secret("abcdabcdabcdabcd"))
@@ -914,17 +914,17 @@ async fn exercise_migrate(backend: Backend) {
     behind.migrate_through(&FIRST_FIVE).await;
     let err = connect(behind.url.clone()).await.unwrap_err();
     assert!(
-        matches!(&err, StoreError::PendingMigrations(pending) if pending.as_slice() == [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]),
+        matches!(&err, StoreError::PendingMigrations(pending) if pending.as_slice() == [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]),
         "{err}"
     );
     assert_eq!(
         err.to_string(),
-        "the database is missing migrations 0006, 0007, 0008, 0009, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0018"
+        "the database is missing migrations 0006, 0007, 0008, 0009, 0010, 0011, 0012, 0013, 0014, 0015, 0016, 0017, 0018, 0019"
     );
     assert_eq!(behind.applied().await.len(), 5, "nothing was applied");
     assert_eq!(
         Store::migrate(&behind.url).await.unwrap(),
-        [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     );
     assert_eq!(
         Store::migrate(&behind.url).await.unwrap(),
@@ -950,12 +950,12 @@ async fn exercise_migrate(backend: Backend) {
     let empty = Database::fresh(backend).await;
     let err = connect(empty.url.clone()).await.unwrap_err();
     assert!(
-        matches!(&err, StoreError::PendingMigrations(pending) if pending.len() == 18),
+        matches!(&err, StoreError::PendingMigrations(pending) if pending.len() == 19),
         "{err}"
     );
     assert_eq!(
         Store::migrate(&empty.url).await.unwrap(),
-        (1..=18).collect::<Vec<_>>()
+        (1..=19).collect::<Vec<_>>()
     );
     let applied = empty.applied().await;
     assert_eq!(
@@ -1403,7 +1403,7 @@ async fn exercise_external_principals(backend: Backend) {
     )
     .await
     .unwrap();
-    assert_eq!(db.applied().await.len(), 18);
+    assert_eq!(db.applied().await.len(), 19);
     assert_eq!(oauth_rows(store.pool()).await, [2, 2, 2, 2]);
     let created = sqlx::query("SELECT created_at FROM grants ORDER BY id")
         .fetch_all(store.pool())
@@ -1594,7 +1594,7 @@ async fn sqlite_0010_rolls_back_on_a_broken_foreign_key_and_runs_again_safely() 
     pool.close().await;
 
     Store::connect(&db.url, &key).await.unwrap().close().await;
-    assert_eq!(db.applied().await.len(), 18);
+    assert_eq!(db.applied().await.len(), 19);
     let pool = db.pool().await;
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 10")
         .execute(&pool)
@@ -1602,7 +1602,7 @@ async fn sqlite_0010_rolls_back_on_a_broken_foreign_key_and_runs_again_safely() 
         .unwrap();
     pool.close().await;
     let store = Store::connect(&db.url, &key).await.unwrap();
-    assert_eq!(db.applied().await.len(), 18, "0010 ran again");
+    assert_eq!(db.applied().await.len(), 19, "0010 ran again");
     assert_eq!(oauth_rows(store.pool()).await, [2, 2, 2, 2]);
     assert_eq!(
         store

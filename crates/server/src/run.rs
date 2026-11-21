@@ -359,7 +359,9 @@ async fn run_server(
             ..PoolConfig::default()
         },
         watchers: watchers.clone(),
+        bucket: args.uploads.bucket()?,
     };
+    let bucket = config.bucket.clone();
     let resource = config.auth.resource();
     let draining = CancellationToken::new();
     let ownership = extensions.ownership();
@@ -381,7 +383,7 @@ async fn run_server(
     if let Some(watchers) = &watchers {
         watchers.start_all().await;
     }
-    let jobs = spawn_jobs(&store, purge_policy, ownership, &cancel);
+    let jobs = spawn_jobs(&store, purge_policy, ownership, bucket, &cancel);
     let shutdown = cancel.clone();
     let drain = Duration::from_secs(args.shutdown_drain);
     let mut signals = ShutdownSignals::listen();
@@ -470,11 +472,13 @@ async fn serve_metrics(
 }
 
 /// Starts the jobs that run beside the server, for the whole database: the
-/// purge, and the pass that moves stored values to data keys.
+/// purge with the uploads' cleanup, and the pass that moves stored values to
+/// data keys.
 fn spawn_jobs(
     store: &Store,
     purge_policy: PurgePolicy,
     ownership: Option<std::sync::Arc<dyn crate::watch::WatchOwnership>>,
+    bucket: Option<std::sync::Arc<dyn crate::bucket::Bucket>>,
     cancel: &CancellationToken,
 ) -> [tokio::task::JoinHandle<()>; 2] {
     let purge = app::purge_on_schedule(
@@ -482,6 +486,7 @@ fn spawn_jobs(
         purge_policy,
         PURGE_PERIOD,
         ownership.clone(),
+        bucket,
         cancel.clone(),
     );
     let reencrypt = app::reencrypt_on_schedule(store.clone(), ownership, cancel.clone());
@@ -489,8 +494,8 @@ fn spawn_jobs(
 }
 
 /// Waits until both jobs have ended, which they do once the token they were
-/// given has fired: the purge when its statement is done, the pass that moves
-/// stored values at its next await.
+/// given has fired: the purge when its statement is done, the uploads' cleanup
+/// and the pass that moves stored values at their next await.
 async fn finish_jobs(jobs: [tokio::task::JoinHandle<()>; 2]) {
     for job in jobs {
         job.await.ok();
@@ -640,19 +645,24 @@ async fn pin_legacy_imap_server(store: &Store, servers: &ImapServers) -> Result<
     Ok(())
 }
 
-/// Crates whose trace or debug logs include credentials or message bodies.
-/// `(target prefix, highest level that stays enabled)`.
+/// Crates whose trace or debug logs include credentials, message bodies or
+/// the upload bucket's address. `(target prefix, highest level that stays
+/// enabled)`.
 ///
 /// `async_imap` logs raw IMAP at trace, including `LOGIN` and `FETCH`
 /// bodies. `imap_proto` is the parser beside it. `rmcp` logs MCP requests
 /// and tool results at debug and whole JSON-RPC messages at trace.
 /// `lettre` logs SMTP commands and message data at debug when its
-/// `tracing` feature is compiled.
+/// `tracing` feature is compiled. `hyper_util` and `rustls`, under the HTTPS
+/// client, name the host of each connection at debug and trace, the bucket's
+/// included.
 const SENSITIVE_LOG_CAPS: &[(&str, &str)] = &[
     ("async_imap", "warn"),
     ("imap_proto", "warn"),
     ("rmcp", "info"),
     ("lettre", "warn"),
+    ("hyper_util", "info"),
+    ("rustls", "info"),
 ];
 
 /// Builds the process log filter from `user_filter`.
@@ -1164,6 +1174,44 @@ mod tests {
     }
 
     #[test]
+    fn the_bucket_address_is_in_no_line_at_debug_or_trace() {
+        use crate::bucket::{Bucket as _, S3Bucket};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let server = runtime.block_on(wiremock::MockServer::start());
+        runtime.block_on(
+            wiremock::Mock::given(wiremock::matchers::any())
+                .respond_with(wiremock::ResponseTemplate::new(200))
+                .mount(&server),
+        );
+        let address = server.address().to_string();
+        let bucket = S3Bucket::new(
+            url::Url::parse(&server.uri()).expect("url"),
+            "auto".to_owned(),
+            secrecy::SecretString::from("id".to_owned()),
+            secrecy::SecretString::from("secret".to_owned()),
+            postkeep_upstream::Http::for_tests(),
+        );
+        for user in ["debug", "trace"] {
+            let output = captured(user, || {
+                runtime.block_on(async {
+                    for name in ["uploads/a/0", "uploads/a/1"] {
+                        let piece = axum::body::Bytes::from_static(b"piece");
+                        assert!(bucket.put(name, piece).await.is_ok());
+                    }
+                });
+                // What rustls says of a server it has no session for.
+                tracing::debug!(target: "rustls::client::hs", "No cached session for {address}");
+                tracing::debug!(target: "postkeep::run", "postkeep-debug-marker");
+            });
+            assert!(output.contains("postkeep-debug-marker"), "{output}");
+            assert!(!output.contains(&address), "{user}: {output}");
+        }
+    }
+
+    #[test]
     fn postkeep_directives_are_kept() {
         let built = log_filter("postkeep=debug,info");
         assert!(built.starts_with("postkeep=debug,info,"));
@@ -1580,7 +1628,7 @@ mod tests {
             .expect("connects")
             .with_key_wrapper(Arc::new(service));
         let cancel = CancellationToken::new();
-        let jobs = spawn_jobs(&store, PurgePolicy::default(), None, &cancel);
+        let jobs = spawn_jobs(&store, PurgePolicy::default(), None, None, &cancel);
 
         asked.notified().await;
         cancel.cancel();

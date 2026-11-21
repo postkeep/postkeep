@@ -133,6 +133,8 @@ GET /site.webmanifest -> 200 application/manifest+json
 POST /site.webmanifest -> 405 - allow=GET,HEAD
 GET /token -> 405 - allow=POST
 POST /token -> 400 application/json
+GET /upload -> 405 - allow=PUT
+POST /upload -> 405 - allow=PUT
 
 # Microsoft and Google sign-in, webhooks and Gmail push
 GET / -> 200 text/plain; charset=utf-8
@@ -269,3 +271,5 @@ GET /site.webmanifest -> 200 application/manifest+json
 POST /site.webmanifest -> 405 - allow=GET,HEAD
 GET /token -> 405 - allow=POST
 POST /token -> 400 application/json
+GET /upload -> 405 - allow=PUT
+POST /upload -> 405 - allow=PUT

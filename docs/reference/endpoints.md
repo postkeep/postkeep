@@ -4,6 +4,7 @@ The server serves these paths:
 
 - `/` (the landing page)
 - `/mcp` (MCP)
+- `/upload` (`PUT`: a file for [`upload_attachment`](tools.md#uploads), with its token in `Authorization`)
 - `/healthz` (health)
 - `/readyz` (readiness: `503` while the server drains on shutdown or its database is unavailable or behind)
 - `/.well-known/*`
