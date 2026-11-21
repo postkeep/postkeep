@@ -1,0 +1,19 @@
+{#- The provider picker: one radio card per offered mail server, only when there is a choice.
+    Each logo is its own file under static/providers/, so it can be swapped or removed alone.
+    data-domains and data-override-hint come from the preset, for the script that
+    selects that preset as the address is typed. #}
+{% if mail.servers.len() > 1 %}
+<fieldset class="picker">
+  <legend class="picker__legend">Mail provider</legend>
+  <div class="picker__opts">
+    {% for server in mail.servers %}
+    <label class="picker__opt"{% if !server.domains.is_empty() %} data-domains="{{ server.domains }}" data-override-hint="{{ server.override_hint }}"{% endif %}>
+      <input class="picker__input" type="radio" name="imap_server" value="{{ server.id }}" id="provider-{{ server.id }}"{% if server.selected %} checked{% endif %}>
+      <span class="logo-tile logo-tile--sm"><img src="{{ server.logo }}" alt="" width="20" height="20"></span>
+      <span class="picker__label">{{ server.name }}</span>
+    </label>
+    {% endfor %}
+  </div>
+  <p class="field__hint picker__hint">{{ mail.hint }}</p>
+</fieldset>
+{% endif %}

@@ -1,0 +1,18 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('0b6e1b5c-63b1-4e3a-9c39-6f7d34b9c1d2')/mailFolders('inbox')/messages(id,receivedDateTime,subject,internetMessageId,from)",
+  "value": [
+    {
+      "@odata.etag": "W/\"CQAAABYAAAA3TfQq8EOcR6lB0Yh3nGoUAAAJb4Qo\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AN030KvBDnEepQdGId5xqFAAACW-GaAAA",
+      "receivedDateTime": "2026-10-08T09:03:59Z",
+      "subject": "Password reset requested",
+      "internetMessageId": "<reset-77a1@accounts.example.com>",
+      "from": {
+        "emailAddress": {
+          "name": "",
+          "address": "no-reply@accounts.example.com"
+        }
+      }
+    }
+  ]
+}

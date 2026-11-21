@@ -1,0 +1,45 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('0b6e1b5c-63b1-4e3a-9c39-6f7d34b9c1d2')/mailFolders('inbox')/messages(id,receivedDateTime,subject,internetMessageId,from)",
+  "value": [
+    {
+      "@odata.etag": "W/\"CQAAABYAAAA3TfQq8EOcR6lB0Yh3nGoUAAAJb4Ql\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AN030KvBDnEepQdGId5xqFAAACW-GZQAA",
+      "receivedDateTime": "2026-10-08T09:00:12Z",
+      "subject": "Your invoice for October",
+      "internetMessageId": "<20261008090011.4f2a@billing.example.com>",
+      "from": {
+        "emailAddress": {
+          "name": "Billing",
+          "address": "billing@example.com"
+        }
+      }
+    },
+    {
+      "@odata.etag": "W/\"CQAAABYAAAA3TfQq8EOcR6lB0Yh3nGoUAAAJb4Qm\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AN030KvBDnEepQdGId5xqFAAACW-GZgAA",
+      "receivedDateTime": "2026-10-08T09:01:40Z",
+      "subject": "Build 1182 passed",
+      "internetMessageId": "<build-1182@ci.example.net>",
+      "from": {
+        "emailAddress": {
+          "name": "CI",
+          "address": "ci@example.net"
+        }
+      }
+    },
+    {
+      "@odata.etag": "W/\"CQAAABYAAAA3TfQq8EOcR6lB0Yh3nGoUAAAJb4Qn\"",
+      "id": "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AN030KvBDnEepQdGId5xqFAAACW-GZwAA",
+      "receivedDateTime": "2026-10-08T09:02:05Z",
+      "subject": "Weekly report",
+      "internetMessageId": "<weekly-41@reports.example.org>",
+      "from": {
+        "emailAddress": {
+          "name": "Reports",
+          "address": "reports@example.org"
+        }
+      }
+    }
+  ],
+  "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?%24filter=receivedDateTime+ge+2026-10-08T09%3a00%3a00Z&%24orderby=receivedDateTime+asc&%24top=50&%24select=id%2creceivedDateTime%2csubject%2cinternetMessageId%2cfrom&%24skip=3"
+}

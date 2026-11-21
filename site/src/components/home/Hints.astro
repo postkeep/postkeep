@@ -1,0 +1,10 @@
+---
+// A tool's risk hints from the server's pinned tools list (readOnlyHint, destructiveHint, openWorldHint).
+import { hints } from "../../lib/tools";
+
+interface Props {
+  name: string;
+}
+const hs = hints(Astro.props.name);
+---
+{hs.length > 0 && <span class="hints">{hs.map((h) => <span class={`hint hint--${h.slice(0, -4)}`}>{h}</span>)}</span>}

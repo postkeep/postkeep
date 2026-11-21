@@ -1,0 +1,20 @@
+---
+// The loop line: it runs in from the page's left edge, loops once, and either ends in a dot before the call
+// to action (the 404's and the home's closing line) or, in the hero, turns down into the agent window. Below
+// 1180 px it is left out (site.css).
+interface Props {
+  hero?: boolean;
+}
+const { hero = false } = Astro.props;
+const n = (v: number) => +v.toFixed(3);
+// Where the line leaves its baseline for the knot; the knot is the same in both.
+const [x, y] = hero ? [409.456, 476] : [310.456, 372];
+const lead = `M -3000 ${y} H ${x} c 12.004 0 24.485 -3.506 34.144 -9.387`;
+const knot = `M ${n(x + 42.968)} ${n(y - 16.244)} c 5.234 -5.269 8.451 -11.55 8.451 -18.431 a 11.875 11.875 0 0 0 -23.75 0 c 0 19.831 23.275 34.675 46.55 34.675`;
+const box = hero ? { class: "loop loop--hero", width: 612, height: 99, viewBox: "-4 425.45 612 99" } : { class: "loop", width: 532, height: 54, viewBox: "0 323 532 54" };
+---
+<svg {...box} aria-hidden="true" focusable="false">
+  <path d={lead} />
+  <path d={hero ? `${knot} H 582 c 9.941 0 18 8.059 18 18 V 522` : `${knot} H 526`} />
+  {!hero && <circle cx="526" cy="372" r="3.75" />}
+</svg>

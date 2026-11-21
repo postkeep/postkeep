@@ -1,0 +1,238 @@
+/* The home page: the hero with the agent window and its call log, then the sections in order. Light and dark
+   values that tokens.css doesn't pair are light-dark() literals from the page design. */
+[data-page="home"] #app::before { width: 1700px; height: 1100px; margin-left: -850px; top: -380px;
+  background: radial-gradient(circle farthest-corner at 50% 0%, light-dark(#f4f5f7, rgb(225 230 240 / 0.1)), light-dark(rgb(244 245 247 / 0.6), rgb(225 230 240 / 0.06)) 35%, transparent 70%); }
+
+/* ---------------------------------------------------------------- shared parts */
+/* Each band: equal padding and a hairline across the page at its top (not after the hero: its picture's fade parts them). */
+.sec { padding-block: var(--space-32); border-top: 1px solid var(--border-subtle); }
+.sec--first { border-top: 0; }
+.sec__head { display: flex; align-items: end; justify-content: space-between; gap: 16px 48px; margin-bottom: 56px; }
+.sec__head > div { max-width: 765px; }
+.sec__h { margin-top: 18px; }
+.sec__lede { flex: none; width: 440px; }
+.sec__head--stack { flex-direction: column; align-items: start; }
+.sec__head--stack .sec__lede { width: auto; }
+/* A list's head: its name, the count of what it lists, a rule. */
+.sub { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 12px; box-shadow: inset 0 -1px 0 var(--border-subtle); font: var(--weight-semibold) var(--type-h4-size) / var(--type-h4-line) var(--font-sans); letter-spacing: calc(var(--type-h4-tracking) * 1em); }
+.sub span { color: var(--text-tertiary); font: var(--weight-regular) var(--type-caption-size) / 16px var(--font-sans); font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.icode { font-size: 12.5px; letter-spacing: -0.01em; }
+/* A logo on its tile, white and ringed in light, raised with a hairline in dark; the OpenAI file has more clear space, so it is drawn larger. */
+.tile { display: grid; flex: none; place-items: center; width: 28px; height: 28px; border-radius: 6px; background: var(--console-raise); box-shadow: inset 0 0 0 1px var(--tile-ring); }
+.tile .brand { width: 17px; height: 17px; }
+.tile [data-brand="openai"] { width: 32px; height: 32px; }
+.wk .tile, .facts .tile { grid-row: span 2; }
+.tile--own { background: light-dark(var(--console-hover), var(--console-raise)); box-shadow: inset 0 0 0 1px light-dark(transparent, var(--console-line)); color: var(--console-t2); }
+.tile--own .brand { width: 15px; height: 15px; }
+.tile--line { border-radius: var(--radius-control-sm); background: none; box-shadow: inset 0 0 0 1px var(--border-subtle); color: var(--action-primary); }
+
+/* ---------------------------------------------------------------- hero: the copy, then the picture */
+.hero { position: relative; padding: 60px 0 47px; overflow: clip; }
+.hero::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 47px; background: linear-gradient(180deg, transparent, var(--bg-canvas) 77.78%); pointer-events: none; }
+.hero__in { display: flex; align-items: start; justify-content: space-between; gap: 24px 48px; }
+.hero__copy { display: flex; flex-direction: column; gap: 22px; max-width: 700px; }
+.hero__h { max-width: 690px; font: var(--weight-display) var(--type-display-xl-size) / var(--type-display-xl-line) var(--font-sans); letter-spacing: calc(var(--type-display-xl-tracking) * 1em); text-wrap: balance; }
+.hero__h span { display: block; color: var(--text-tertiary); }
+.hero__side { flex: none; width: 440px; padding-top: 41px; }
+.hero__side .actions { padding-top: 23px; }
+/* Separated items ("iCloud · Gmail"): each item's dot hangs left, so the one that starts a line is clipped. */
+.seps { overflow: hidden; color: var(--text-secondary); font: var(--weight-regular) var(--type-eyebrow-size) / 17px var(--font-mono); letter-spacing: calc(var(--type-eyebrow-tracking) * 1em); }
+.seps > span { display: block; margin-left: -2ch; text-wrap: balance; }
+.seps__i { white-space: nowrap; }
+.seps__i::before { content: "\00b7\00a0"; }
+.hero__pic { position: relative; display: grid; grid-template-columns: minmax(0, 724fr) minmax(0, 580fr); gap: 24px; margin-top: 129px; }
+.loop--hero { top: -94.55px; right: auto; left: calc(var(--margin) - 60px); }
+
+/* The agent window: the app's bar, then the conversation on the window's sunk rows. */
+.aw { min-height: 623px; }
+.aw .win__bar > .brand { width: 22px; height: 22px; padding: 4px; border-radius: var(--radius-tile); background: var(--console-raise); box-shadow: inset 0 0 0 1px var(--tile-ring); }
+.aw .win__bar > b { font-weight: var(--weight-semibold); }
+.aw__dim { color: var(--console-t3); }
+.aw .win__bar .aw__dim { flex: 1; }
+.aw__pk { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 6px; border-radius: var(--radius-tile); background: var(--chat-sunk); color: var(--console-t2); font-size: var(--type-console-mono-size); font-weight: var(--weight-semibold); }
+.aw__pk svg { width: 7px; height: 12px; fill: light-dark(var(--logo-ink), var(--logo-reversed)); }
+.aw__body { display: flex; flex-direction: column; padding: 20px; }
+.aw__bub { align-self: end; padding: 8px 12px; border-radius: 12px; background: var(--chat-sunk); font-size: 13.5px; line-height: 20.25px; }
+.aw__used { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding-top: 14px; color: var(--console-t3); font-size: var(--type-label-size); line-height: 18px; }
+.aw__used .pk-icon { width: 14px; height: 14px; margin-right: 3px; }
+.aw__used b { color: var(--console-t2); font-weight: var(--weight-semibold); }
+.aw__used code::before { content: "·\00a0"; font-family: var(--font-sans); }
+.aw__used code, .aw__sent code { font-size: var(--type-console-mono-size); letter-spacing: -0.01em; }
+.aw__box { margin-top: 10px; overflow: hidden; border-radius: 12px; box-shadow: inset 0 0 0 1px var(--console-line); }
+.aw__lh { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; background: var(--chat-sunk); color: var(--console-t3); font-size: var(--type-console-mono-size); line-height: 17.25px; }
+.aw__lh .pk-icon { width: 14px; height: 14px; }
+.aw__lh b { flex: 1; color: var(--console-t1); font-weight: var(--weight-semibold); }
+.aw__rows { list-style: none; }
+.aw__row { display: grid; grid-template-columns: 22px 86px minmax(0, 1fr) auto 40px; grid-template-areas: "av from subj tag date"; align-items: center; gap: 9px; height: 36px; padding: 0 10px; border-top: 1px solid var(--console-line2); }
+.aw__row.is-pick { background: var(--console-pick); }
+.aw__from { grid-area: from; font-weight: var(--weight-semibold); white-space: nowrap; }
+.aw__subj { grid-area: subj; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aw__row .av { grid-area: av; }
+.aw__row .tag { grid-area: tag; }
+.aw__date { grid-area: date; color: var(--console-t3); font-size: var(--type-console-mono-size); text-align: end; }
+.aw__more { display: flex; align-items: center; height: 33px; padding-left: 41px; border-top: 1px solid var(--console-line2); color: var(--console-t3); font-size: var(--type-console-mono-size); font-weight: var(--weight-medium); }
+.aw__say { padding-top: 14px; font-size: 13.5px; line-height: 20.25px; }
+.aw__draft { margin-top: 13px; border-radius: 11px; }
+.aw__to { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; min-height: 34px; padding: 7px 12px; border-bottom: 1px solid var(--console-line2); font-size: var(--type-label-size); line-height: 18px; }
+.aw__to b { font-weight: var(--weight-semibold); }
+.aw__addr { flex: 1; }
+.aw__text { padding: 11px 12px 9px; font-size: var(--type-caption-size); line-height: 19.5px; }
+.aw__note { display: flex; align-items: center; height: 42px; padding: 0 12px; border-top: 1px solid var(--console-line2); background: var(--chat-sunk); color: var(--console-t3); font-size: var(--type-label-size); }
+.aw__draft + .aw__bub { margin-top: 13px; }
+.aw__sent { display: flex; align-items: center; gap: 10px; min-height: 42px; margin-top: 13px; padding: 10px 12px; border-radius: var(--radius-agent-row); background: var(--chat-sunk); }
+.aw__ic { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-tile); background: var(--console-canvas); }
+.aw__ic .pk-icon { width: 14px; height: 14px; }
+.aw__sentt { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 4px; }
+.aw__sent code { font-weight: 700; }
+.aw__sentt > span::before { content: "·\00a0"; }
+
+/* The MCP call log: the dark code surface in both themes, as tall as the window; the last call sits on its foot. */
+.calls { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-card); background: var(--code-bg); color: var(--code-text);
+  box-shadow: inset 0 2px 0 -1px light-dark(rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.05)), 0 0 0 1px light-dark(rgb(0 0 0 / 0.9), rgb(255 255 255 / 0.1)), 0 2px 4px light-dark(rgb(0 0 0 / 0.06), transparent), 0 24px 48px -16px light-dark(rgb(20 22 30 / 0.32), transparent), 0 24px 60px -12px light-dark(transparent, rgb(0 0 0 / 0.7)); }
+.calls__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 44px; padding: 0 24px; box-shadow: inset 0 -1px 0 rgb(255 255 255 / 0.08); }
+.calls__t { display: inline-flex; flex: none; align-items: center; gap: 10px; font: var(--weight-semibold) var(--type-caption-size) / 16px var(--font-sans); }
+.calls__t i { width: 8px; height: 8px; border-radius: 50%; background: var(--code-keyword); }
+.calls__url { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.calls__url, .call__n, .hint { color: var(--code-bar-text); font: var(--weight-regular) 12.5px / 17px var(--font-mono); letter-spacing: -0.01em; }
+.calls__list { display: flex; flex: 1; flex-direction: column; list-style: none; }
+.call:last-child { margin-top: auto; padding-bottom: 6px; }
+.call { display: flex; flex-direction: column; gap: 8px; padding: 18px 24px; }
+.call + .call { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06); }
+.call__h { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.call__n { color: var(--code-muted); font-size: 13px; }
+.call__name { flex: 1; color: var(--code-keyword); font-weight: var(--weight-medium); }
+.call__args, .call__res, .call__name { font-size: var(--type-code-size); line-height: 22.75px; letter-spacing: -0.01em; }
+.call__args { padding-left: 22px; white-space: pre-wrap; }
+.call__res { display: flex; align-items: start; gap: 10px; padding-left: 22px; color: var(--code-comment); }
+.call__res span { color: var(--code-muted); font-family: var(--font-mono); }
+.calls__ft { display: flex; align-items: center; height: 44px; padding: 0 24px; background: rgb(255 255 255 / 0.024); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08); color: var(--code-bar-text); font-size: var(--type-caption-size); }
+.calls .hint--readOnly, .calls .hint--openWorld { color: var(--code-bar-text); }
+
+/* ---------------------------------------------------------------- install: three cards, their frames on one line */
+.steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; list-style: none; }
+.step, .mit { background: var(--console-canvas); box-shadow: inset 0 2px 0 -1px light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.06)), 0 0 0 1px light-dark(rgb(0 0 0 / 0.1), rgb(255 255 255 / 0.1)); }
+.step { display: grid; grid-row: span 4; grid-template-rows: subgrid; row-gap: 0; padding: 24px 24px 12px; border-radius: var(--radius-card); }
+.step__h { margin-top: 12px; font: var(--weight-semibold) var(--type-h4-size) / var(--type-h4-line) var(--font-sans); letter-spacing: calc(var(--type-h4-tracking) * 1em); }
+.step__t { margin-top: 8px; color: var(--text-secondary); font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.step__end { min-height: 100px; margin: 24px -12px 0; }
+.cmd__br { display: none; }
+.tiles { display: flex; gap: 8px; padding: 12px 16px; }
+.tiles .tile { width: 24px; height: 24px; }
+.tiles .brand { width: 15px; height: 15px; }
+.tiles [data-brand="openai"] { width: 28px; height: 28px; }
+
+/* ---------------------------------------------------------------- tools: four families in two rows of two */
+.tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 48px 24px; }
+.tgrp__list { list-style: none; }
+.tool { display: flex; flex-direction: column; gap: 8px; padding: 16px 0; }
+.tool + .tool, .wk + .wk, .docs-list li + li { box-shadow: inset 0 1px 0 var(--border-subtle); }
+.tool__h { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 4px 12px; }
+.tool__h .tag { height: auto; padding: 3px 8px; font: var(--weight-regular) 12.5px / 17px var(--font-mono); letter-spacing: -0.01em; }
+.hints { display: flex; flex-wrap: wrap; justify-content: end; gap: 0 12px; }
+.tool__h .hints { flex: 1 0 0; margin-top: 3px; } /* beside the name while its widest hint fits, else under it */
+.hint--readOnly, .hint--openWorld { color: var(--text-tertiary); }
+.hint--destructive { color: var(--tag-coral-text); }
+.tool__t { max-width: 560px; color: var(--text-secondary); font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.sec__foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; margin-top: 32px; }
+.note { display: flex; align-items: start; gap: 10px; color: var(--text-secondary); font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.note .pk-icon { margin-top: 2.5px; color: var(--text-tertiary); }
+
+/* ---------------------------------------------------------------- works with: two lists of rows, logo then name over how */
+.works { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px 24px; align-items: start; }
+.works__list { list-style: none; }
+.wk, .facts li { display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: start; gap: 0 16px; padding: 16px 0; }
+.wk__h { margin-top: -2px; }
+.wk__n { font: var(--weight-semibold) var(--type-ui-size) / 17px var(--font-sans); }
+.wk__h, .works__note { color: var(--text-secondary); font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.works__note { max-width: 470px; margin-top: 16px; color: var(--text-tertiary); }
+
+/* ---------------------------------------------------------------- self-host: the head in columns 1-5, five facts as rows in 7-12 */
+.sh { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); align-items: start; column-gap: var(--grid-wide-gutter); }
+.sh .sec__head { grid-column: 1 / 6; margin-bottom: 0; }
+.facts { grid-column: 7 / -1; list-style: none; box-shadow: inset 0 1px 0 var(--border-subtle); }
+.facts li { box-shadow: inset 0 -1px 0 var(--border-subtle); }
+.facts__h { font: var(--weight-semibold) 17px / 22px var(--font-sans); letter-spacing: calc(var(--type-h4-tracking) * 1em); }
+.facts p { max-width: 600px; color: var(--text-secondary); }
+
+/* ---------------------------------------------------------------- open source: one panel; words and links beside the crates,
+   then the reviews and postkeep Cloud under a rule */
+.mit { padding: var(--space-16); border-radius: var(--radius-panel); }
+.mit__top { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 32px 64px; }
+.mit__foot { margin-top: 56px; padding-top: 48px; box-shadow: inset 0 1px 0 var(--border-subtle); }
+.mit__lede { margin-top: 16px; }
+/* Two link tiles side by side while the GitHub one keeps its name and address on one line (277 px), else stacked;
+   every row as tall as the tallest. Below 272 px both tiles put the text under the logo together. */
+.links { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(277px, 100%), 1fr)); grid-auto-rows: 1fr; gap: 12px; margin-top: 32px; list-style: none; container-type: inline-size; }
+.links li { display: grid; }
+.lk { position: relative; display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 12px; border-radius: var(--radius-panel-inner); background: var(--console-raise); box-shadow: inset 0 0 0 1px var(--console-line), 0 1px 2px light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.16)); }
+.lk:hover { box-shadow: inset 0 0 0 1px var(--border-strong), 0 1px 2px light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.16)); }
+.lk__logo { display: grid; flex: none; place-items: center; width: 36px; height: 36px; border-radius: var(--radius-agent-row); background: var(--console-sunk); box-shadow: inset 0 0 0 1px light-dark(transparent, var(--console-line)); }
+.lk__t { display: flex; flex-direction: column; gap: 2px; }
+.lk__t b { padding-right: 16px; color: var(--console-t1); font: var(--weight-semibold) var(--type-ui-size) / 18.2px var(--font-sans); letter-spacing: -0.01em; }
+.lk__t code { color: var(--console-t3); white-space: nowrap; font-size: 12px; line-height: 17px; letter-spacing: -0.01em; }
+.lk__ext { position: absolute; top: 12px; right: 12px; width: 15px; height: 15px; color: var(--console-t3); }
+@container (width < 272px) { .lk { flex-direction: column; align-items: flex-start; } }
+.docs-list { padding-top: 4px; list-style: none; }
+.dl { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 10px 0; font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.dl .pk-icon { width: 15px; height: 15px; color: var(--text-tertiary); }
+.dl:hover { color: var(--text-link); }
+.crates { margin-top: 35px; overflow: hidden; border-radius: var(--radius-card); background: var(--code-bg); color: var(--code-text);
+  box-shadow: inset 0 2px 0 -1px rgb(255 255 255 / 0.07), 0 0 0 1px light-dark(rgb(0 0 0 / 0.9), rgb(255 255 255 / 0.1)), 0 2px 4px light-dark(rgb(0 0 0 / 0.06), transparent), 0 24px 48px -16px light-dark(rgb(20 22 30 / 0.32), rgb(0 0 0 / 0.85)); }
+.crates__bar { display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 24px; box-shadow: inset 0 -1px 0 rgb(255 255 255 / 0.08); color: var(--code-bar-text); font-size: var(--type-caption-size); }
+.crates__bar code { color: var(--code-text); }
+.crates__list { padding: 16px 24px 20px; }
+.crates__list div { display: flex; align-items: center; gap: 12px; padding: 6px 0; line-height: 22.75px; }
+.crates__list dt { flex: none; width: 96px; color: var(--code-keyword); font-family: var(--font-mono); font-size: var(--type-code-size); letter-spacing: -0.01em; }
+.crates__list dd { font-size: var(--type-caption-size); }
+.crates__ft { display: flex; align-items: center; height: 44px; padding: 0 24px; background: rgb(255 255 255 / 0.024); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08); color: var(--code-bar-text); font-size: var(--type-caption-size); }
+
+.mit__cloud { padding: 16px 0 12px; color: var(--text-secondary); }
+
+/* ---------------------------------------------------------------- the closing line: each sentence a balanced block */
+.closing--home { padding: 160px var(--margin) 140px; border-top: 1px solid var(--border-subtle); }
+.closing--home .display span { display: block; }
+.closing--home .lede { margin-top: 18px; }
+
+/* ---------------------------------------------------------------- narrower screens */
+@media (max-width: 1279px) { .sec { padding-block: var(--space-24); } .sec__head { margin-bottom: 48px; } }
+@media (max-width: 1179px) {
+  .cmd__br { display: inline; }
+  .cmd__sp { display: none; }
+}
+@media (max-width: 1023px) {
+  .hero__in, .sec__head { flex-direction: column; align-items: start; }
+  .hero__side { width: auto; max-width: 560px; padding-top: 0; }
+  .hero__pic { grid-template-columns: minmax(0, 1fr); gap: 16px; margin-top: 48px; }
+  .aw { min-height: 0; }
+  .sec__lede { width: auto; max-width: 560px; }
+  .steps, .works, .mit__top { grid-template-columns: minmax(0, 1fr); }
+  .sh { display: block; }
+  .sh .sec__head { margin-bottom: 48px; }
+  .crates { margin-top: 0; }
+}
+@media (max-width: 599px) {
+  .hero { padding: 40px 0 0; }
+  .hero::after { display: none; }
+  .hero__copy { gap: 14px; }
+  .hero__eyebrow { font-size: 12px; }
+  .hero__eyebrow > span { max-width: 32ch; }
+  .hero__h { max-width: 300px; font-size: 40px; line-height: 42px; letter-spacing: -0.04em; }
+  .hero__in { row-gap: 16px; }
+  .hero__side .actions { padding-top: 20px; gap: 12px 20px; }
+  .hero__pic { margin-top: 36px; }
+  .calls__bar { gap: 8px; padding: 0 20px; }
+  .sec { padding-block: var(--space-16); }
+  .sec__head, .sh .sec__head { margin-bottom: 32px; }
+  .steps { gap: 12px; }
+  .tools { grid-template-columns: minmax(0, 1fr); row-gap: 40px; }
+  .aw__used code { flex-basis: 100%; padding-left: 21px; }
+  .aw__used code::before, .aw__sentt > span::before { content: none; }
+  .aw__sentt code { flex-basis: 100%; }
+  .aw__used, .aw__sentt { row-gap: 0; }
+  .aw__row { grid-template-columns: 22px minmax(0, 1fr) auto; grid-template-areas: "av from tag" "av subj date"; align-items: start; gap: 2px 9px; height: auto; padding: 8px 10px; }
+  .aw__row .av { align-self: start; }
+  .mit { padding: 24px; border-radius: 18px; }
+  .crates__list dt { width: 72px; }
+  .mit__foot { margin-top: 40px; padding-top: 32px; row-gap: 40px; }
+  .closing--home { padding: 96px var(--margin) 80px; }
+}

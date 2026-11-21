@@ -1,0 +1,73 @@
+[package]
+name = "postkeep"
+description = "Open-source MCP server that lets your agent read and answer your mail, from a server you run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+readme = "../../README.md"
+default-run = "postkeep"
+
+[lib]
+name = "postkeep"
+
+[[bin]]
+name = "postkeep"
+path = "src/main.rs"
+
+[features]
+default = ["sqlite", "postgres"]
+sqlite = ["postkeep-store/sqlite"]
+postgres = ["postkeep-store/postgres"]
+# Internal entry points for the cargo-fuzz targets in `fuzz/`.
+fuzzing = []
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+futures.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex = "0.4"
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+mime = "0.3"
+postkeep-auth.workspace = true
+postkeep-mail.workspace = true
+postkeep-store.workspace = true
+postkeep-upstream.workspace = true
+postkeep-webhook.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+postkeep-webhook = { workspace = true, features = ["testing"] }
+ring.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util.workspace = true
+tower.workspace = true
+tracing-log.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+---
+title: Quickstart
+description: Run postkeep with Docker, Docker Compose or the binary, then connect your agent app.
+---
+
+import CardGrid from '~/components/docs/CardGrid.astro';
+import LinkCard from '~/components/docs/LinkCard.astro';
+import RecipeTabs from '~/components/docs/RecipeTabs.astro';
+
+Read [What every deployment needs](/docs/deployment/#what-every-deployment-needs) first.
+
+## Run it
+
+<RecipeTabs />
+
+## Connect your agent app
+
+Add `https://mail.example.com/mcp` to your agent app and sign in with your
+mailbox: the [Agent apps](/docs/clients/) page has the steps for each app.
+
+<CardGrid>
+  <LinkCard title="Deploying postkeep" href="/docs/deployment/" description="What every deployment needs, reverse proxies, platforms and a checklist." />
+  <LinkCard title="Agent apps" href="/docs/clients/" description="The steps for each app." />
+  <LinkCard title="Configuration reference" href="/docs/configuration/" description="Every environment variable." />
+</CardGrid>

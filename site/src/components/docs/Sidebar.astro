@@ -1,0 +1,31 @@
+---
+// The docs sidebar: the search field (in the side column; the phone menu has it above the site links),
+// Getting started, then one group per docs index step and Reference, each page under its short label and
+// the current one marked. A group of one page is one row linking to it. Every group is open in the side
+// column; in the header's phone menu only the current page's group is.
+import Icon from "../Icon.astro";
+import Search from "./Search.astro";
+import { t } from "../../lib/copy";
+import { sidebar } from "../../lib/docs";
+
+interface Props {
+  /** This page's path from the site root ("docs/webhooks/"), or "docs/" on the index. */
+  here: string;
+  /** Which copy this is (the side column or the phone menu), for unique ids. */
+  where: "side" | "menu";
+}
+const { here, where } = Astro.props;
+const groups = await sidebar();
+---
+<nav class="side" aria-label={t("nav.links[2]")}>
+  {where === "side" && <Search id="search-side" />}
+  <a class="side__a side__top" href="/docs/" aria-current={here === "docs/" ? "page" : undefined}>{t("docs.index.title")}</a>
+  {groups.map((g) => g.items.length === 1 ? (
+    <a class="side__a side__lab side__grp" href={`/${g.items[0]!.path}`} aria-current={g.items[0]!.path === here ? "page" : undefined}>{g.title}</a>
+  ) : (
+    <details class="side__grp" open={where === "side" || g.items.some((it) => it.path === here)}>
+      <summary class="side__sum"><span>{g.title}</span><Icon name="chevron" class="side__ic side__ic--shut" /><Icon name="chevron-down" class="side__ic side__ic--open" /></summary>
+      <ul class="side__list">{g.items.map((it) => <li><a class="side__a" href={`/${it.path}`} aria-current={it.path === here ? "page" : undefined}>{it.mobile ?? it.label}</a></li>)}</ul>
+    </details>
+  ))}
+</nav>

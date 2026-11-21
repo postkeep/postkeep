@@ -1,0 +1,13 @@
+---
+// A copy slot's text with its code runs (tool fields, env vars, paths) set as inline code chips.
+import { t } from "../../lib/copy";
+
+interface Props {
+  id: string;
+  runs: string[];
+}
+const { id, runs } = Astro.props;
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const parts = runs.length ? t(id).split(new RegExp(`(${runs.map(esc).join("|")})`)) : [t(id)];
+---
+{parts.map((p) => (runs.includes(p) ? <code class="icode">{p}</code> : p))}

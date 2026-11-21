@@ -1,0 +1,17 @@
+---
+// The site footer: lockup, the site's links and the copyright, then the license line and the full
+// independence line.
+import Logo from "./Logo.astro";
+import SiteLink from "./SiteLink.astro";
+import { t } from "../lib/copy";
+
+const LINKS = ["footer.columns[0].links[0]", "footer.columns[0].links[1]", "nav.links[2]", "footer.columns[0].links[3]",
+  "footer.columns[2].links[0]", "footer.columns[2].links[1]", "footer.columns[2].links[2]", "footer.columns[2].links[5]"];
+---
+<footer class="ft"><div class="wrap ft__in">
+  <Logo class="logo ft__logo" />
+  <ul class="ft__links">{LINKS.map((id) => <li><SiteLink id={id} class="ft__a" ext={false} /></li>)}</ul>
+  <p class="ft__copy">{t("footer.copyright")}</p>
+  <p class="ft__small ft__lic">{t("footer.license")}</p>
+  <p class="ft__small ft__line">{t("footer.trademark")}</p>
+</div></footer>

@@ -1,0 +1,40 @@
+---
+// Install in three steps, each card ending in one frame on the code surface: the key command with Copy (README.md's
+// line, which below 1180 px breaks before its last word with a shell continuation), the variables the server needs,
+// and the /mcp address with Copy over the agent apps that take it.
+import Brand from "../Brand.astro";
+import CopyButton from "../CopyButton.astro";
+import Head from "./Head.astro";
+import SiteLink from "../SiteLink.astro";
+import Text from "../Text.astro";
+import { APPS } from "../../lib/logos.js";
+import { pair, snippet, t } from "../../lib/copy";
+import { highlight } from "../../lib/highlight";
+
+const sh = snippet("home.install.snippet");
+const key = highlight(sh.text.split("\n").find((l) => l.includes("generate-key"))!, sh.lang).replace(/ (\S+)$/, '<span class="cmd__br"> \\\n  </span><span class="cmd__sp"> </span>$1');
+const VARS = [...sh.text.matchAll(/-e (POSTKEEP_\w+)=/g)].map((m) => m[1]!);
+const apps = pair("home.works.apps", APPS);
+// What each step ends with: the key command, the variables, the address and the apps.
+const ENDS = pair("home.install.steps", ["key", "env", "connect"] as const);
+---
+<section class="sec sec--first" id="install" aria-labelledby="install-h">
+  <div class="wrap">
+    <Head id="install-h" kicker="home.install.kicker" title="home.install.title" lede="home.install.needs" />
+    <ol class="steps">
+      {ENDS.map((end, i) => (
+        <li class="step">
+          <p class="kicker">{String(i + 1).padStart(2, "0")}</p>
+          <h3 class="step__h">{t(`home.install.steps[${i}].title`)}</h3>
+          <p class="step__t"><Text id={`home.install.steps[${i}].text`} /></p>
+          <div class="code code--frame step__end">
+            {end === "key" && <Fragment><div class="code__bar"><span class="code__lang">{sh.lang}</span><CopyButton of="install-key" /></div><pre class="code__pre" id="install-key" tabindex="0"><code set:html={key} /></pre></Fragment>}
+            {end === "env" && <pre class="code__pre"><code>{VARS.map((v, j) => <Fragment>{j ? "\n" : ""}<span class="tk-v">{v}</span></Fragment>)}</code></pre>}
+            {end === "connect" && <Fragment><div class="code__bar"><pre class="code__pre" id="install-url" tabindex="0"><code>{t("home.install.connect.url")}</code></pre><CopyButton of="install-url" /></div><p class="tiles">{apps.map((a) => <span class="tile"><Brand id={a} /></span>)}</p></Fragment>}
+          </div>
+        </li>
+      ))}
+    </ol>
+    <div class="sec__foot"><SiteLink id="home.install.link" class="tlink" after="arrow" ext={false} /></div>
+  </div>
+</section>

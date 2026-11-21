@@ -1,0 +1,53 @@
+---
+// One docs page per Markdown file: the sidebar label as the title, the page's own
+// content, and the pager in sidebar order. Quickstart opens with the step's lead.
+import { render } from "astro:content";
+import Docs from "../../layouts/Docs.astro";
+import Icon from "../../components/Icon.astro";
+import CardGrid from "../../components/docs/CardGrid.astro";
+import LinkCard from "../../components/docs/LinkCard.astro";
+import ProviderTable from "../../components/docs/ProviderTable.astro";
+import RecipeTabs from "../../components/docs/RecipeTabs.astro";
+import Steps from "../../components/docs/Steps.astro";
+import { pageTitle, t } from "../../lib/copy";
+import { pages, type SideItem } from "../../lib/docs";
+
+export async function getStaticPaths() {
+  const all = await pages();
+  return all.map((item, i) => ({
+    params: { slug: item.path.replace(/^docs\//, "").replace(/\/$/, "") },
+    props: { item, prev: all[i - 1] ?? null, next: all[i + 1] ?? null },
+  }));
+}
+
+interface Props {
+  item: SideItem;
+  prev: SideItem | null;
+  next: SideItem | null;
+}
+const { item, prev, next } = Astro.props;
+const { Content, headings } = await render(item.entry);
+const shallowest = Math.min(...headings.map((h) => h.depth), 2);
+const rail = headings.filter((h) => h.depth - shallowest <= 1).map((h) => ({ slug: h.slug, text: h.text, depth: h.depth - shallowest + 2 }));
+const quick = item.path === "docs/quickstart/";
+const name = (it: SideItem) => (it.mobile ? [it.label, it.mobile] : [it.label, null]);
+---
+<Docs title={pageTitle(item.label, true)} description={item.entry.data.description} here={item.path} rail={rail}>
+  <header class="doc__head">
+    <h1 class="h1">{item.mobile ? <Fragment><span class="t-d">{item.label}</span><span class="t-m">{item.mobile}</span></Fragment> : item.label}</h1>
+    {quick && <p class="lede">{t("docs.index.steps[0].text")}</p>}
+  </header>
+  <div class="prose"><Content components={{ CardGrid, LinkCard, ProviderTable, RecipeTabs, Steps }} /></div>
+  <div class="pager">
+    {[prev, next].map((it, i) => {
+      const href = it ? `/${it.path}` : i ? null : "/docs/";
+      const [d, m] = it ? name(it) : [t("docs.index.title"), null];
+      return href && (
+        <a class:list={["pager__a", { "pager__a--next": i }]} href={href}>
+          <Icon name={i ? "chevron" : "chevron-left"} />
+          <span class="pager__txt"><span class="pager__k">{t(i ? "docs.pager.next" : "docs.pager.prev")}</span><span class="pager__t">{m ? <Fragment><span class="t-d">{d}</span><span class="t-m">{m}</span></Fragment> : d}</span></span>
+        </a>
+      );
+    })}
+  </div>
+</Docs>

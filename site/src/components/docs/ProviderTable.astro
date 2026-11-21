@@ -1,0 +1,15 @@
+---
+// The mailboxes postkeep connects, as on the home page (home.works.boxes), each linking to its setup guide.
+import Brand from "../Brand.astro";
+import Icon from "../Icon.astro";
+import Text from "../Text.astro";
+import { BOXES } from "../../lib/logos.js";
+import { pair, t } from "../../lib/copy";
+
+const boxes = pair("home.works.boxes", BOXES);
+---
+<ul class="dprov">
+  {boxes.map(({ logo, guide }, i) => (
+    <li><a class="dprov__a" href={guide}><Brand id={logo} /><span class="dprov__txt"><span class="dprov__n"><Text id={`home.works.boxes[${i}].name`} /></span><span class="dprov__h">{t(`home.works.boxes[${i}].how`)}</span></span><Icon name="arrow" class="card__go" /></a></li>
+  ))}
+</ul>

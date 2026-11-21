@@ -1,0 +1,13 @@
+---
+// A copy slot's desktop line, with its phone line swapped in below 480 px when the slot has one (tv()). A phrase that
+// must not break at its hyphen ("sign-in page.") stays on one line, by markup.
+import { slot } from "../lib/copy";
+
+interface Props {
+  id?: string;
+  text?: string;
+}
+const { id = "", text } = Astro.props;
+const s = text === undefined ? slot(id) : { text, mobile: undefined };
+---
+{s.mobile ? <Fragment><span class="t-d"><Astro.self text={s.text} /></span><span class="t-m"><Astro.self text={s.mobile} /></span></Fragment> : s.text.split(/(sign-in page\.)/).map((p, i) => (i % 2 ? <span class="nw">{p}</span> : p))}

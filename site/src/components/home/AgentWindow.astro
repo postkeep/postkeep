@@ -1,0 +1,49 @@
+---
+// The agent window: an example request in the agent app, the postkeep tools it used, the mail they found,
+// the reply it drafts and the send. Static markup; every line reads without JavaScript.
+import Brand from "../Brand.astro";
+import Icon from "../Icon.astro";
+import { SITE } from "../../lib/data";
+import { MARK } from "../../lib/mark";
+import { pair, t } from "../../lib/copy";
+import { emailOff, esc } from "../../lib/highlight";
+
+const W = "home.agent.window.";
+// Each row's avatar colour and tag colour.
+const ROWS = pair(`${W}rows`, [[2, "amber"], [2, "violet"], [1, "blue"]] as const);
+---
+<div class="win aw">
+  <div class="win__bar">
+    <Brand id="claude" />
+    <b>{t("home.works.apps[0].name")}</b>
+    <span class="aw__dim">{t(W + "title")}</span>
+    <span class="aw__pk"><svg viewBox={MARK.viewBox} aria-hidden="true" focusable="false"><path d={MARK.d} /></svg>{SITE.name}</span>
+  </div>
+  <div class="aw__body">
+    <p class="aw__bub">{t(W + "ask")}</p>
+    <p class="aw__used"><Icon name="check" /><span>{t(W + "usedLabel")}</span><b>{SITE.name}</b><code>{t(W + "used")}</code></p>
+    <div class="aw__box">
+      <p class="aw__lh"><Icon name="search" /><b>{t(W + "found")}</b><span>{t(W + "need")}</span></p>
+      <ul class="aw__rows">
+        {ROWS.map(([av, tag], i) => (
+          <li class:list={["aw__row", { "is-pick": i === 0 }]}>
+            <span class={`av av--${av}`}>{t(`${W}rows[${i}].initials`)}</span>
+            <b class="aw__from">{t(`${W}rows[${i}].from`)}</b>
+            <span class="aw__subj">{t(`${W}rows[${i}].subject`)}</span>
+            <span class={`tag tag--${tag}`}>{t(`${W}rows[${i}].tag`)}</span>
+            <span class="aw__date">{t(`${W}rows[${i}].date`)}</span>
+          </li>
+        ))}
+      </ul>
+      <p class="aw__more">{t(W + "more")}</p>
+    </div>
+    <p class="aw__say">{t(W + "reply")}</p>
+    <div class="aw__box aw__draft">
+      <p class="aw__to"><span class="aw__dim">{t(W + "toLabel")}</span><span class="av av--2 av--s">{t(`${W}rows[0].initials`)}</span><b>{t(`${W}rows[0].from`)}</b><span class="aw__dim aw__addr" set:html={emailOff(esc(t(W + "to")))} /><span class="tag tag--ok">{t(W + "thread")}</span></p>
+      <p class="aw__text">{t(W + "draft")}</p>
+      <p class="aw__note">{t(W + "draftNote")}</p>
+    </div>
+    <p class="aw__bub">{t(W + "ok")}</p>
+    <p class="aw__sent"><span class="aw__ic"><Icon name="send" /></span><span class="aw__sentt"><code>{t("home.tools[4].name")}</code><span>{t(W + "sent")}</span></span><span class="tag tag--ok">{t(W + "sentTag")}</span></p>
+  </div>
+</div>

@@ -1,0 +1,271 @@
+# Default: webhooks on, no Microsoft or Google sign-in
+GET / -> 200 text/plain; charset=utf-8
+POST / -> 405 - allow=GET,HEAD
+GET /.well-known/oauth-authorization-server -> 200 application/json
+POST /.well-known/oauth-authorization-server -> 405 - allow=GET,HEAD
+GET /.well-known/oauth-protected-resource -> 200 application/json
+POST /.well-known/oauth-protected-resource -> 405 - allow=GET,HEAD
+GET /.well-known/oauth-protected-resource/mcp -> 200 application/json
+POST /.well-known/oauth-protected-resource/mcp -> 405 - allow=GET,HEAD
+GET /.well-known/openid-configuration -> 404 -
+POST /.well-known/openid-configuration -> 404 -
+GET /account -> 200 text/html; charset=utf-8
+POST /account -> 405 - allow=GET,HEAD
+GET /account/clients/revoke -> 405 - allow=POST
+POST /account/clients/revoke -> 403 text/html; charset=utf-8
+GET /account/delete -> 405 - allow=POST
+POST /account/delete -> 403 text/html; charset=utf-8
+GET /account/password -> 405 - allow=POST
+POST /account/password -> 403 text/html; charset=utf-8
+GET /account/revoke -> 405 - allow=POST
+POST /account/revoke -> 403 text/html; charset=utf-8
+GET /account/sign-in -> 405 - allow=POST
+POST /account/sign-in -> 403 text/html; charset=utf-8
+GET /account/sign-out -> 405 - allow=POST
+POST /account/sign-out -> 403 text/html; charset=utf-8
+GET /account/webhook -> 405 - allow=POST
+POST /account/webhook -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/add -> 405 - allow=POST
+POST /account/webhook/filters/add -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/edit -> 405 - allow=POST
+POST /account/webhook/filters/edit -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/enabled -> 405 - allow=POST
+POST /account/webhook/filters/enabled -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/remove -> 405 - allow=POST
+POST /account/webhook/filters/remove -> 403 text/html; charset=utf-8
+GET /account/webhook/rotate-secret -> 405 - allow=POST
+POST /account/webhook/rotate-secret -> 403 text/html; charset=utf-8
+GET /account/webhook/test -> 405 - allow=POST
+POST /account/webhook/test -> 403 text/html; charset=utf-8
+GET /apple-touch-icon.png -> 200 image/png
+POST /apple-touch-icon.png -> 405 - allow=GET,HEAD
+GET /assets/css/app.css -> 200 text/css; charset=utf-8
+POST /assets/css/app.css -> 405 - allow=GET,HEAD
+GET /assets/css/postkeep.css -> 200 text/css; charset=utf-8
+POST /assets/css/postkeep.css -> 405 - allow=GET,HEAD
+GET /assets/css/tokens.css -> 200 text/css; charset=utf-8
+POST /assets/css/tokens.css -> 405 - allow=GET,HEAD
+GET /assets/fonts/Geist-Variable.woff2 -> 200 font/woff2
+POST /assets/fonts/Geist-Variable.woff2 -> 405 - allow=GET,HEAD
+GET /assets/fonts/GeistMono-Variable.woff2 -> 200 font/woff2
+POST /assets/fonts/GeistMono-Variable.woff2 -> 405 - allow=GET,HEAD
+GET /assets/js/app.js -> 200 text/javascript; charset=utf-8
+POST /assets/js/app.js -> 405 - allow=GET,HEAD
+GET /assets/missing.css -> 404 -
+POST /assets/missing.css -> 404 -
+GET /assets/providers/fastmail.svg -> 200 image/svg+xml
+POST /assets/providers/fastmail.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/gmail.svg -> 200 image/svg+xml
+POST /assets/providers/gmail.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark.png -> 200 image/png
+POST /assets/providers/google/signin-dark.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark@2x.png -> 200 image/png
+POST /assets/providers/google/signin-dark@2x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark@3x.png -> 200 image/png
+POST /assets/providers/google/signin-dark@3x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark@4x.png -> 200 image/png
+POST /assets/providers/google/signin-dark@4x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light.png -> 200 image/png
+POST /assets/providers/google/signin-light.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light@2x.png -> 200 image/png
+POST /assets/providers/google/signin-light@2x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light@3x.png -> 200 image/png
+POST /assets/providers/google/signin-light@3x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light@4x.png -> 200 image/png
+POST /assets/providers/google/signin-light@4x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/icloud.svg -> 200 image/svg+xml
+POST /assets/providers/icloud.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/imap.svg -> 200 image/svg+xml
+POST /assets/providers/imap.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/microsoft/ms-symbollockup_signin_dark.svg -> 200 image/svg+xml
+POST /assets/providers/microsoft/ms-symbollockup_signin_dark.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/microsoft/ms-symbollockup_signin_light.svg -> 200 image/svg+xml
+POST /assets/providers/microsoft/ms-symbollockup_signin_light.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/yahoo.svg -> 200 image/svg+xml
+POST /assets/providers/yahoo.svg -> 405 - allow=GET,HEAD
+GET /authorize -> 400 text/html; charset=utf-8
+POST /authorize -> 403 text/html; charset=utf-8
+GET /favicon.ico -> 200 image/x-icon
+POST /favicon.ico -> 405 - allow=GET,HEAD
+GET /favicon.svg -> 200 image/svg+xml
+POST /favicon.svg -> 405 - allow=GET,HEAD
+GET /healthz -> 200 text/plain; charset=utf-8
+POST /healthz -> 405 - allow=GET,HEAD
+GET /icon-192.png -> 200 image/png
+POST /icon-192.png -> 405 - allow=GET,HEAD
+GET /icon-512.png -> 200 image/png
+POST /icon-512.png -> 405 - allow=GET,HEAD
+GET /mcp -> 401 -
+POST /mcp -> 401 -
+GET /mcp/extra -> 404 -
+POST /mcp/extra -> 404 -
+GET /oauth/google/callback -> 404 text/html; charset=utf-8
+POST /oauth/google/callback -> 405 - allow=GET,HEAD
+GET /oauth/google/start -> 405 - allow=POST
+POST /oauth/google/start -> 403 text/html; charset=utf-8
+GET /oauth/icon.svg -> 200 image/svg+xml
+POST /oauth/icon.svg -> 405 - allow=GET,HEAD
+GET /oauth/logo.svg -> 200 image/svg+xml
+POST /oauth/logo.svg -> 405 - allow=GET,HEAD
+GET /oauth/microsoft/callback -> 404 text/html; charset=utf-8
+POST /oauth/microsoft/callback -> 405 - allow=GET,HEAD
+GET /oauth/microsoft/start -> 405 - allow=POST
+POST /oauth/microsoft/start -> 403 text/html; charset=utf-8
+GET /oauth/other/callback -> 404 text/html; charset=utf-8
+POST /oauth/other/callback -> 405 - allow=GET,HEAD
+GET /oauth/other/start -> 405 - allow=POST
+POST /oauth/other/start -> 403 text/html; charset=utf-8
+GET /push/google -> 404 -
+POST /push/google -> 404 -
+GET /push/microsoft -> 404 -
+POST /push/microsoft -> 404 -
+GET /push/microsoft/lifecycle -> 404 -
+POST /push/microsoft/lifecycle -> 404 -
+GET /readyz -> 200 text/plain; charset=utf-8
+POST /readyz -> 405 - allow=GET,HEAD
+GET /register -> 405 - allow=POST
+POST /register -> 400 application/json
+GET /revoke -> 405 - allow=POST
+POST /revoke -> 400 application/json
+GET /robots.txt -> 404 -
+POST /robots.txt -> 404 -
+GET /site.webmanifest -> 200 application/manifest+json
+POST /site.webmanifest -> 405 - allow=GET,HEAD
+GET /token -> 405 - allow=POST
+POST /token -> 400 application/json
+
+# Microsoft and Google sign-in, webhooks and Gmail push
+GET / -> 200 text/plain; charset=utf-8
+POST / -> 405 - allow=GET,HEAD
+GET /.well-known/oauth-authorization-server -> 200 application/json
+POST /.well-known/oauth-authorization-server -> 405 - allow=GET,HEAD
+GET /.well-known/oauth-protected-resource -> 200 application/json
+POST /.well-known/oauth-protected-resource -> 405 - allow=GET,HEAD
+GET /.well-known/oauth-protected-resource/mcp -> 200 application/json
+POST /.well-known/oauth-protected-resource/mcp -> 405 - allow=GET,HEAD
+GET /.well-known/openid-configuration -> 404 -
+POST /.well-known/openid-configuration -> 404 -
+GET /account -> 200 text/html; charset=utf-8
+POST /account -> 405 - allow=GET,HEAD
+GET /account/clients/revoke -> 405 - allow=POST
+POST /account/clients/revoke -> 403 text/html; charset=utf-8
+GET /account/delete -> 405 - allow=POST
+POST /account/delete -> 403 text/html; charset=utf-8
+GET /account/password -> 405 - allow=POST
+POST /account/password -> 403 text/html; charset=utf-8
+GET /account/revoke -> 405 - allow=POST
+POST /account/revoke -> 403 text/html; charset=utf-8
+GET /account/sign-in -> 405 - allow=POST
+POST /account/sign-in -> 403 text/html; charset=utf-8
+GET /account/sign-out -> 405 - allow=POST
+POST /account/sign-out -> 403 text/html; charset=utf-8
+GET /account/webhook -> 405 - allow=POST
+POST /account/webhook -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/add -> 405 - allow=POST
+POST /account/webhook/filters/add -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/edit -> 405 - allow=POST
+POST /account/webhook/filters/edit -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/enabled -> 405 - allow=POST
+POST /account/webhook/filters/enabled -> 403 text/html; charset=utf-8
+GET /account/webhook/filters/remove -> 405 - allow=POST
+POST /account/webhook/filters/remove -> 403 text/html; charset=utf-8
+GET /account/webhook/rotate-secret -> 405 - allow=POST
+POST /account/webhook/rotate-secret -> 403 text/html; charset=utf-8
+GET /account/webhook/test -> 405 - allow=POST
+POST /account/webhook/test -> 403 text/html; charset=utf-8
+GET /apple-touch-icon.png -> 200 image/png
+POST /apple-touch-icon.png -> 405 - allow=GET,HEAD
+GET /assets/css/app.css -> 200 text/css; charset=utf-8
+POST /assets/css/app.css -> 405 - allow=GET,HEAD
+GET /assets/css/postkeep.css -> 200 text/css; charset=utf-8
+POST /assets/css/postkeep.css -> 405 - allow=GET,HEAD
+GET /assets/css/tokens.css -> 200 text/css; charset=utf-8
+POST /assets/css/tokens.css -> 405 - allow=GET,HEAD
+GET /assets/fonts/Geist-Variable.woff2 -> 200 font/woff2
+POST /assets/fonts/Geist-Variable.woff2 -> 405 - allow=GET,HEAD
+GET /assets/fonts/GeistMono-Variable.woff2 -> 200 font/woff2
+POST /assets/fonts/GeistMono-Variable.woff2 -> 405 - allow=GET,HEAD
+GET /assets/js/app.js -> 200 text/javascript; charset=utf-8
+POST /assets/js/app.js -> 405 - allow=GET,HEAD
+GET /assets/missing.css -> 404 -
+POST /assets/missing.css -> 404 -
+GET /assets/providers/fastmail.svg -> 200 image/svg+xml
+POST /assets/providers/fastmail.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/gmail.svg -> 200 image/svg+xml
+POST /assets/providers/gmail.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark.png -> 200 image/png
+POST /assets/providers/google/signin-dark.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark@2x.png -> 200 image/png
+POST /assets/providers/google/signin-dark@2x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark@3x.png -> 200 image/png
+POST /assets/providers/google/signin-dark@3x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-dark@4x.png -> 200 image/png
+POST /assets/providers/google/signin-dark@4x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light.png -> 200 image/png
+POST /assets/providers/google/signin-light.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light@2x.png -> 200 image/png
+POST /assets/providers/google/signin-light@2x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light@3x.png -> 200 image/png
+POST /assets/providers/google/signin-light@3x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/google/signin-light@4x.png -> 200 image/png
+POST /assets/providers/google/signin-light@4x.png -> 405 - allow=GET,HEAD
+GET /assets/providers/icloud.svg -> 200 image/svg+xml
+POST /assets/providers/icloud.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/imap.svg -> 200 image/svg+xml
+POST /assets/providers/imap.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/microsoft/ms-symbollockup_signin_dark.svg -> 200 image/svg+xml
+POST /assets/providers/microsoft/ms-symbollockup_signin_dark.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/microsoft/ms-symbollockup_signin_light.svg -> 200 image/svg+xml
+POST /assets/providers/microsoft/ms-symbollockup_signin_light.svg -> 405 - allow=GET,HEAD
+GET /assets/providers/yahoo.svg -> 200 image/svg+xml
+POST /assets/providers/yahoo.svg -> 405 - allow=GET,HEAD
+GET /authorize -> 400 text/html; charset=utf-8
+POST /authorize -> 403 text/html; charset=utf-8
+GET /favicon.ico -> 200 image/x-icon
+POST /favicon.ico -> 405 - allow=GET,HEAD
+GET /favicon.svg -> 200 image/svg+xml
+POST /favicon.svg -> 405 - allow=GET,HEAD
+GET /healthz -> 200 text/plain; charset=utf-8
+POST /healthz -> 405 - allow=GET,HEAD
+GET /icon-192.png -> 200 image/png
+POST /icon-192.png -> 405 - allow=GET,HEAD
+GET /icon-512.png -> 200 image/png
+POST /icon-512.png -> 405 - allow=GET,HEAD
+GET /mcp -> 401 -
+POST /mcp -> 401 -
+GET /mcp/extra -> 404 -
+POST /mcp/extra -> 404 -
+GET /oauth/google/callback -> 400 text/html; charset=utf-8
+POST /oauth/google/callback -> 405 - allow=GET,HEAD
+GET /oauth/google/start -> 405 - allow=POST
+POST /oauth/google/start -> 403 text/html; charset=utf-8
+GET /oauth/icon.svg -> 200 image/svg+xml
+POST /oauth/icon.svg -> 405 - allow=GET,HEAD
+GET /oauth/logo.svg -> 200 image/svg+xml
+POST /oauth/logo.svg -> 405 - allow=GET,HEAD
+GET /oauth/microsoft/callback -> 400 text/html; charset=utf-8
+POST /oauth/microsoft/callback -> 405 - allow=GET,HEAD
+GET /oauth/microsoft/start -> 405 - allow=POST
+POST /oauth/microsoft/start -> 403 text/html; charset=utf-8
+GET /oauth/other/callback -> 404 text/html; charset=utf-8
+POST /oauth/other/callback -> 405 - allow=GET,HEAD
+GET /oauth/other/start -> 405 - allow=POST
+POST /oauth/other/start -> 403 text/html; charset=utf-8
+GET /push/google -> 405 - allow=POST
+POST /push/google -> 401 -
+GET /push/microsoft -> 405 - allow=POST
+POST /push/microsoft -> 400 -
+GET /push/microsoft/lifecycle -> 405 - allow=POST
+POST /push/microsoft/lifecycle -> 400 -
+GET /readyz -> 200 text/plain; charset=utf-8
+POST /readyz -> 405 - allow=GET,HEAD
+GET /register -> 405 - allow=POST
+POST /register -> 400 application/json
+GET /revoke -> 405 - allow=POST
+POST /revoke -> 400 application/json
+GET /robots.txt -> 404 -
+POST /robots.txt -> 404 -
+GET /site.webmanifest -> 200 application/manifest+json
+POST /site.webmanifest -> 405 - allow=GET,HEAD
+GET /token -> 405 - allow=POST
+POST /token -> 400 application/json

@@ -1,0 +1,49 @@
+---
+// Open source, one panel: the license, the source and image links and the crates; under a rule, the published
+// reviews and postkeep Cloud, the hosted service built on this server.
+import Brand from "../Brand.astro";
+import Icon from "../Icon.astro";
+import SiteLink from "../SiteLink.astro";
+import Text from "../Text.astro";
+import { SITE } from "../../lib/data";
+import { items, pair, t } from "../../lib/copy";
+
+// Each link's logo and the address under its name.
+const LINKS = pair("home.mit.links", [
+  ["github", SITE.source.web.replace(/^https:\/\//, "")],
+  ["docker", SITE.image.name],
+] as const);
+// The docs' Security step links, after its first (the Security page itself).
+const REVIEWS = items("docs.index.steps[5].links").slice(1).map((n) => `docs.index.steps[5].links[${n}]`);
+const CRATES = items("home.mit.crates");
+---
+<section class="sec" aria-labelledby="mit-h">
+  <div class="wrap"><div class="mit">
+    <div class="mit__top">
+      <div>
+        <p class="kicker">{t("home.mit.kicker")}</p>
+        <h2 class="h1 sec__h" id="mit-h">{t("home.mit.title")}</h2>
+        <p class="lede mit__lede">{t("home.mit.lead")}</p>
+        <ul class="links">
+          {LINKS.map(([logo, sub], i) => <li><SiteLink id={`home.mit.links[${i}]`} class="lk" ext={false}><span class="lk__logo"><Brand id={logo} /></span><span class="lk__t"><b>{t(`home.mit.links[${i}]`)}</b><code>{sub}</code></span><Icon name="external" class="lk__ext" /></SiteLink></li>)}
+        </ul>
+      </div>
+      <div class="crates">
+        <p class="crates__bar"><code>{t("home.mit.crates.dir")}</code><span>{t("home.mit.crates.title")}</span></p>
+        <dl class="crates__list">{CRATES.map((i) => <div><dt>{t(`home.mit.crates[${i}].name`)}</dt><dd>{t(`home.mit.crates[${i}].text`)}</dd></div>)}</dl>
+        <p class="crates__ft">{t("home.mit.crates.license")}</p>
+      </div>
+    </div>
+    <div class="mit__top mit__foot">
+      <div>
+        <h3 class="sub">{t("home.mit.reviewed")}</h3>
+        <ul class="docs-list">{REVIEWS.map((id) => <li><SiteLink id={id} class="dl" before="file" ext={false}>{t(id)}</SiteLink></li>)}</ul>
+      </div>
+      <div>
+        <h3 class="sub">{t("home.cloud.title")}</h3>
+        <p class="mit__cloud"><Text id="home.cloud.text" /></p>
+        <SiteLink id="home.cloud.button" class="tlink" />
+      </div>
+    </div>
+  </div></div>
+</section>

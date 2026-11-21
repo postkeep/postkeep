@@ -1,0 +1,103 @@
+name: main
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  changes:
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.paths.outputs.image }}
+      site_deploy: ${{ steps.paths.outputs['site-deploy'] }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: paths
+        run: .github/ci/changes.sh >> "$GITHUB_OUTPUT"
+  tag-prerelease:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+      - run: .github/ci/tag-prerelease.sh --self-test
+      - id: tag
+        run: .github/ci/tag-prerelease.sh
+  publish-dev:
+    needs: tag-prerelease
+    if: github.event_name == 'push' && needs.tag-prerelease.outputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    environment: image-release
+    concurrency: &publish-queue
+      group: publish-image
+      queue: max
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - env:
+          DEV_TAG: ${{ needs.tag-prerelease.outputs.tag }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: .github/ci/publish-image.sh "$DEV_TAG"
+  publish-main:
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    environment: image-release
+    concurrency: *publish-queue
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: .github/ci/publish-image.sh
+  deploy-site:
+    needs: changes
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.site_deploy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container: node:22-bookworm
+    permissions:
+      contents: read
+    environment:
+      name: production
+      url: https://postkeep.dev
+    concurrency:
+      group: pages-postkeep-dev
+      queue: max
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . .github/ci/versions.sh
+          npm install -g "bun@$BUN_VERSION"
+          cd site
+          bun install --frozen-lockfile && bun run build
+          test -d dist
+          npx --yes wrangler@4.149.0 pages deploy dist \
+            --project-name="${CLOUDFLARE_PAGES_PROJECT:?CLOUDFLARE_PAGES_PROJECT is not set}" \
+            --branch=main --commit-hash="$GITHUB_SHA" --commit-message="$(git log -1 --format=%s)"

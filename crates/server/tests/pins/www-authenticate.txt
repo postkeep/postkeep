@@ -1,0 +1,2 @@
+no token: 401 WWW-Authenticate: Bearer resource_metadata="https://mail.example.com/.well-known/oauth-protected-resource/mcp"
+unknown token: 401 WWW-Authenticate: Bearer resource_metadata="https://mail.example.com/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="the access token is invalid or expired"

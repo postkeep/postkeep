@@ -1,0 +1,29 @@
+---
+// The hero: the mailboxes, the headline (its second sentence dimmed), the lede and two actions, then the
+// picture: the agent window and its MCP call log, with the loop line running into the window from the left.
+import AgentWindow from "./AgentWindow.astro";
+import CallLog from "./CallLog.astro";
+import LoopLine from "../LoopLine.astro";
+import SiteLink from "../SiteLink.astro";
+import { t } from "../../lib/copy";
+
+const headline = t("home.hero.headline");
+const cut = headline.indexOf(". ") + 1;
+---
+<section class="hero" aria-labelledby="hero-h">
+  <div class="wrap hero__in">
+    <div class="hero__copy">
+      <p class="seps hero__eyebrow"><span>{t("home.hero.eyebrow").split(" · ").map((s) => <Fragment><span class="seps__i">{s}</span>{" "}</Fragment>)}</span></p>
+      <h1 class="hero__h" id="hero-h">{headline.slice(0, cut)} <span>{headline.slice(cut + 1)}</span></h1>
+    </div>
+    <div class="hero__side">
+      <p class="lede">{t("home.hero.subhead")}</p>
+      <div class="actions"><SiteLink id="home.hero.primary" class="btn btn--lg btn--primary" ext={false} /><SiteLink id="home.hero.secondary" class="tlink" after="arrow" ext={false} /></div>
+    </div>
+  </div>
+  <div class="wrap hero__pic" id="agent">
+    <LoopLine hero />
+    <AgentWindow />
+    <CallLog />
+  </div>
+</section>

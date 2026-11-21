@@ -1,0 +1,45 @@
+---
+// A docs page: the header with the sidebar in its phone menu, the sidebar column, the page's column,
+// the "On this page" rail from 1280 px, and the footer.
+import Base from "./Base.astro";
+import SiteFooter from "../components/SiteFooter.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+import Search from "../components/docs/Search.astro";
+import Sidebar from "../components/docs/Sidebar.astro";
+import { t } from "../lib/copy";
+import "../styles/docs.css";
+
+export interface RailItem {
+  slug: string;
+  text: string;
+  depth: number;
+}
+
+interface Props {
+  title: string;
+  description: string;
+  /** This page's path from the site root ("docs/" or "docs/webhooks/"). */
+  here: string;
+  rail: RailItem[];
+}
+const { title, description, here, rail } = Astro.props;
+---
+<Base title={title} description={description} page={here === "docs/" ? "docs" : "doc"}>
+  <SiteHeader current="nav.links[2]">
+    <Search id="search-menu" slot="search" />
+    <div class="menu__side" slot="menu"><Sidebar here={here} where="menu" /></div>
+  </SiteHeader>
+  <div class="wrap dl">
+    <div class="dl__side"><Sidebar here={here} where="side" /></div>
+    <main id="main" class="dl__main" tabindex="-1"><article class="doc"><slot /></article></main>
+    {rail.length > 0 && (
+      <aside class="rail" aria-labelledby="rail-h"><p class="rail__h" id="rail-h">{t("docs.rail.title")}</p><ol class="rail__list">
+        {rail.map((r) => <li><a class:list={["rail__a", { "rail__a--sub": r.depth > 2 }]} href={`#${r.slug}`}>{r.text}</a></li>)}
+      </ol></aside>
+    )}
+  </div>
+  <SiteFooter />
+  <script>
+    import "../scripts/search.ts";
+  </script>
+</Base>

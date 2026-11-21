@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "serviceNotAvailable",
+    "message": "The service is temporarily unavailable. Try the request again after a delay.",
+    "innerError": {
+      "date": "2026-10-08T09:04:30",
+      "request-id": "3c1f5c4e-8a43-4f0e-9b5a-2d7c1e6b9f10",
+      "client-request-id": "3c1f5c4e-8a43-4f0e-9b5a-2d7c1e6b9f10"
+    }
+  }
+}

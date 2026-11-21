@@ -1,0 +1,66 @@
+---
+// Every page: the CSP, the theme set before the first paint (public/js/theme-init.js, a file because the
+// CSP allows no inline script), the two self-hosted fonts, the brand's tokens and the site's stylesheet,
+// then the page and the polite live region the copy buttons speak through.
+import "../design/tokens.css";
+import "../styles/site.css";
+import { CSP_META } from "../lib/csp";
+import { t } from "../lib/copy";
+import { SITE } from "../lib/data";
+import { CANVAS } from "../lib/canvas";
+
+interface Props {
+  /** The full title, already in the site's format (lib/copy.ts pageTitle). */
+  title: string;
+  description: string;
+  /** Open Graph overrides; the home page has its own (M3 to M5). */
+  og?: { title?: string; description?: string };
+  /** body data-page, which the stylesheets key some rules on. */
+  page: string;
+  /** Keeps the page out of search results and the sitemap (the 404 page). */
+  noindex?: boolean;
+}
+const { title, description, og = {}, page, noindex = false } = Astro.props;
+const canonical = new URL(Astro.url.pathname.replace(/index\.html$/, ""), Astro.site).href;
+const ogImage = new URL(SITE.ogImage, Astro.site).href;
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content={CSP_META} />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content={CANVAS.light} media="(prefers-color-scheme: light)" data-light={CANVAS.light} data-dark={CANVAS.dark} />
+  <meta name="theme-color" content={CANVAS.dark} media="(prefers-color-scheme: dark)" data-light={CANVAS.light} data-dark={CANVAS.dark} />
+  <title>{title}</title>
+  <meta name="description" content={description} />
+  {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content={SITE.name} />
+  <meta property="og:title" content={og.title ?? title} />
+  <meta property="og:description" content={og.description ?? description} />
+  {!noindex && <meta property="og:url" content={canonical} />}
+  <meta property="og:image" content={ogImage} />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content={t("meta.og.imageAlt")} />
+  <meta name="twitter:card" content="summary_large_image" />
+  <script is:inline src="/js/theme-init.js"></script>
+  <link rel="preload" href="/fonts/InstrumentSans-latin.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="/fonts/JetBrainsMono-latin.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="icon" href="/favicon.ico" sizes="48x48" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+</head>
+<body data-page={page}>
+  <div id="app">
+    <slot />
+  </div>
+  <div id="live" class="vh" aria-live="polite"></div>
+  <script>
+    import "../scripts/site.ts";
+  </script>
+</body>
+</html>

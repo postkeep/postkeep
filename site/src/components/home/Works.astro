@@ -1,0 +1,33 @@
+---
+// The agent apps and the mailboxes, each with its logo and how it connects, and each list's note under it.
+import Brand from "../Brand.astro";
+import Code from "./Code.astro";
+import Head from "./Head.astro";
+import { APPS, BOXES } from "../../lib/logos.js";
+import { pair, t } from "../../lib/copy";
+
+// Each list's logos, item for item with its copy (src/lib/logos.js); the own-server item has no brand.
+const LISTS: [string, readonly (string | null)[], string][] = [
+  ["apps", pair("home.works.apps", APPS), "home.works.apps.more"],
+  ["boxes", pair("home.works.boxes", BOXES).map((b) => b.logo), "home.works.boxes.footnote"],
+];
+const RUNS = ["~/.cursor/mcp.json", "mcp-remote"];
+---
+<section class="sec" aria-labelledby="works-h">
+  <div class="wrap">
+    <Head id="works-h" kicker="home.works.kicker" title="home.works.title" lede="home.works.apps.lead" />
+    <div class="works">
+      {LISTS.map(([k, logos, note]) => (
+        <section aria-labelledby={`wk-${k}`}>
+          <h3 class="sub" id={`wk-${k}`}>{t(`home.works.${k}.title`)}<span>{logos.length}</span></h3>
+          <ul class="works__list">
+            {logos.map((logo, i) => (
+              <li class="wk"><span class:list={["tile", { "tile--own": !logo }]}><Brand id={logo} /></span><b class="wk__n">{t(`home.works.${k}[${i}].name`)}</b><span class="wk__h"><Code id={`home.works.${k}[${i}].how`} runs={RUNS} /></span></li>
+            ))}
+          </ul>
+          <p class="works__note"><Code id={note} runs={RUNS} /></p>
+        </section>
+      ))}
+    </div>
+  </div>
+</section>

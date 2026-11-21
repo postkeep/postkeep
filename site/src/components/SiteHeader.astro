@@ -1,0 +1,39 @@
+---
+// The site header: skip link, lockup, the nav, the theme pill, Source and postkeep Cloud, and a Menu
+// button below 1024 px that opens the same links (a <details>, so it works without JavaScript). Docs
+// pages put their search above the links ("search" slot) and their sidebar under them ("menu" slot).
+import Icon from "./Icon.astro";
+import Logo from "./Logo.astro";
+import SiteLink from "./SiteLink.astro";
+import ThemeToggle from "./ThemeToggle.astro";
+import { items, t } from "../lib/copy";
+
+interface Props {
+  /** The nav slot of the page this is, marked aria-current. */
+  current?: string | null;
+}
+const { current = null } = Astro.props;
+const NAV = items("nav.links").map((i) => `nav.links[${i}]`);
+---
+<a class="skip" href="#main">{t("nav.skip")}</a>
+<header class="hd"><div class="wrap hd__in">
+  <Logo />
+  <nav class="nav"><ul class="nav__list">{NAV.map((id) => <li><SiteLink id={id} class="nav__a" current={current === id} /></li>)}</ul></nav>
+  <div class="hd__end">
+    <ThemeToggle />
+    <SiteLink id="nav.source" class="nav__a hd__ext" />
+    <SiteLink id="nav.cloud" class="nav__a hd__ext" />
+    <details class="menu">
+      <summary class="menu__btn"><Icon name="menu" class="menu__open" /><Icon name="close" class="menu__close" /><span class="vh menu__open">{t("nav.menu.open")}</span><span class="vh menu__close">{t("nav.menu.close")}</span></summary>
+      <div class="menu__panel">
+        <slot name="search" />
+        <ul class="menu__list">
+          {NAV.map((id) => <li><SiteLink id={id} class="menu__a" current={current === id} /></li>)}
+          <li><SiteLink id="nav.source" class="menu__a" /></li>
+          <li><SiteLink id="nav.cloud" class="menu__a" /></li>
+        </ul>
+        <slot name="menu" />
+      </div>
+    </details>
+  </div>
+</div></header>

@@ -1,0 +1,48 @@
+[package]
+name = "postkeep-upstream"
+description = "OAuth client, token refresh and HTTPS plumbing for postkeep's Microsoft and Google accounts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+keywords = ["oauth", "microsoft-graph", "gmail", "mcp"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+# Exposes parsing hooks to the fuzz targets in fuzz/.
+fuzzing = []
+
+[dependencies]
+base64.workspace = true
+bytes = "1"
+chrono.workspace = true
+getrandom.workspace = true
+http = "1"
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "logging", "webpki-tokio"] }
+hyper-util = { workspace = true, features = ["client-legacy"] }
+postkeep-store.workspace = true
+ring.workspace = true
+rustls.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+webpki-roots.workspace = true
+
+[dev-dependencies]
+postkeep-store = { workspace = true, features = ["sqlite"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tempfile.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

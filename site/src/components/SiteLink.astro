@@ -1,0 +1,24 @@
+---
+// A link from a link slot. Its text is the slot's unless the default slot gives
+// other markup; "before" and "after" name icons. Links that leave the site get the external icon, unless
+// ext is false.
+import Icon from "./Icon.astro";
+import Text from "./Text.astro";
+import { target } from "../lib/links";
+
+interface Props {
+  id: string;
+  class?: string;
+  before?: string;
+  after?: string;
+  afterClass?: string;
+  ext?: boolean;
+  current?: boolean;
+}
+const { id, class: cls = "", before, after, afterClass, ext = true, current = false } = Astro.props;
+const to = target(id);
+const hasInner = Astro.slots.has("default");
+---
+<a class={cls || undefined} href={to.href} aria-current={current ? "page" : undefined}>
+  {before && <Icon name={before} />}{hasInner ? <slot /> : <Text id={id} />}{after && <Icon name={after} class={afterClass} />}{to.ext && ext && <Icon name="external" class="ic--ext" />}
+</a>

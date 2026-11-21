@@ -1,0 +1,11 @@
+---
+// One of the brand's line icons, drawn in currentColor and hidden from assistive technology.
+import { iconSvg } from "../lib/icons";
+
+interface Props {
+  name: string;
+  class?: string | undefined;
+}
+const { name, class: cls = "" } = Astro.props;
+---
+<Fragment set:html={iconSvg(name, cls)} />

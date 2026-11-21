@@ -1,0 +1,74 @@
+# release-plz manages versions and the changelog. Its tag and release settings
+# below apply only when `release-plz release` runs, which no workflow does yet.
+# Nothing is published to crates.io: versions come from git tags.
+#
+# Flow: release-plz opens a "chore: release vX.Y.Z" pull request.
+# After its squash merge, the vX.Y.Z tag is pushed by hand (RELEASING.md).
+# CI also tags every merge to main vX.Y.Z-dev.N (.github/ci/tag-prerelease.sh).
+# release-plz reads the git_tag_name below as exactly vX.Y.Z: those are no release to it.
+#
+# v0.2.0 is the first release tagged under the postkeep package names; it
+# was bumped by hand in a "chore(release): v0.2.0" PR from a release-plz-*
+# branch (release_always = false only releases commits from such branches).
+
+[workspace]
+git_only = true
+release_always = false
+semver_check = false
+dependencies_update = false
+changelog_update = false
+git_tag_enable = false
+git_release_enable = false
+pr_labels = ["release"]
+pr_name = "chore: release v{{ version }}"
+# Only the binary is tagged (v{{ version }}, set below). The libraries are
+# never tagged; giving them their own tag pattern means release-plz treats
+# them as unreleased instead of looking them up in the tree of the binary's
+# last tag, which fails for crates added since (such as postkeep-upstream).
+git_tag_name = "{{ package }}-v{{ version }}"
+
+# Only the binary is released. The libraries share the workspace version
+# and their changes are listed in its changelog.
+[[package]]
+name = "postkeep"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["postkeep-mail", "postkeep-store", "postkeep-auth", "postkeep-webhook", "postkeep-upstream"]
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+
+[[package]]
+name = "postkeep-mail"
+release = false
+
+[[package]]
+name = "postkeep-store"
+release = false
+
+[[package]]
+name = "postkeep-auth"
+release = false
+
+[[package]]
+name = "postkeep-webhook"
+release = false
+
+[[package]]
+name = "postkeep-upstream"
+release = false
+
+[changelog]
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^revert", group = "Reverted" },
+  { message = "^chore: release", skip = true },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^(build|ci|chore|style|test)", group = "Maintenance" },
+  { message = ".*", group = "Other" },
+]

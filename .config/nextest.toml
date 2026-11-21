@@ -1,0 +1,45 @@
+[test-groups]
+# Every PostgreSQL test uses the one database in TEST_POSTGRES_URL, and a
+# purge in one suite prunes every suite's outboxes with its own defaults.
+postgres = { max-threads = 1 }
+# The linear-time tests time themselves; run them one at a time.
+linear = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/^postgres_/)'
+test-group = 'postgres'
+
+[profile.ci]
+# Report every failure instead of stopping at the first one.
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Timing-sensitive on shared runners: a wall-clock bound and a debounce.
+[[profile.ci.overrides]]
+filter = 'test(=large_adversarial_html_stays_linear) | test(=graph_notifications_become_ordered_webhook_events)'
+retries = 2
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# The new-mail watchers' lower bounds on real waits; a watcher that does not
+# back off still fails every try.
+[[profile.ci.overrides]]
+filter = 'test(=a_start_that_keeps_losing_the_cursor_waits_longer_each_time) | test(=watch::gmail::tests::a_first_start_that_keeps_losing_the_position_waits_longer_each_time)'
+retries = 2
+
+# Deleting an account, timed against a session and a provider stuck in slow
+# calls; one that waits for either still fails every try.
+[[profile.ci.overrides]]
+filter = 'test(=watch::gmail::tests::deleting_the_account_waits_for_a_slow_session_or_provider_only_so_long)'
+retries = 2
+
+# The text converter's, the MIME parser's and the invisible-character
+# filter's wall-clock bounds, apart from each other and with a debounce; a
+# quadratic scan still fails every try.
+[[profile.ci.overrides]]
+filter = 'test(/^(text|parse|invisible)::tests::.*_stays?_linear$/)'
+test-group = 'linear'
+retries = 2
+
+[profile.ci.junit]
+# Uploaded from target/nextest/ci/junit.xml by the test job.
+path = "junit.xml"

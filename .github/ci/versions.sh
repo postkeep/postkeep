@@ -1,0 +1,11 @@
+# shellcheck shell=sh
+# CI and image tool pins. Contributors keep rust-toolchain.toml's stable channel.
+RUST_VERSION=1.99.0
+DOCKERHUB_USERNAME=postkeep
+BUILDKIT_IMAGE=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+NEXTEST_VERSION=0.9.148
+NEXTEST_SHA256=223ba936714cc861a9cdedad5a8eb664dfdd69d6fbdf6cea6aa8184f523290dc
+CARGO_DENY_VERSION=0.20.2
+CARGO_DENY_SHA256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+BUN_VERSION=$(sed -n 's/.*"packageManager": "bun@\([^"]*\)".*/\1/p' site/package.json)
+export DOCKERHUB_USERNAME BUILDKIT_IMAGE RUST_VERSION NEXTEST_VERSION NEXTEST_SHA256 CARGO_DENY_VERSION CARGO_DENY_SHA256 BUN_VERSION

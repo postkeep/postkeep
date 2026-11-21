@@ -1,0 +1,59 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on vulnerabilities, unmaintained crates and yanked versions.
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    # Drop when basic-toml leaves Cargo.lock (cargo deny then warns
+    # advisory-not-detected): https://gitlab.com/postkeep/postkeep/-/issues/22
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml is unmaintained, with no fixed release; only askama_derive uses it, at compile time, to parse askama.toml, and postkeep has none" },
+    # Drop when pin-utils leaves Cargo.lock (cargo deny then warns
+    # advisory-not-detected): https://gitlab.com/postkeep/postkeep/-/issues/135
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained (repository archived), with no patched version and no known vulnerability; it comes only through async-imap 0.12.0 in postkeep-mail, no async-imap release drops it yet, and postkeep's own code does not use it" },
+    # Drop once sqlx is updated to a release that allows libsqlite3-sys 0.39
+    # (cargo deny then warns advisory-not-detected): https://gitlab.com/postkeep/postkeep/-/issues/134
+    { id = "RUSTSEC-2026-0459", reason = "SQLite before 3.54 can return uninitialized page-cache memory when it opens a database with a crafted -wal file; postkeep opens only the SQLite file its operator configures, and whoever can write that file can already mint access tokens to every connected mailbox; sqlx-sqlite 0.9.0 caps libsqlite3-sys below 0.38" },
+    # Drop when chrono leaves Cargo.lock (cargo deny then warns
+    # advisory-not-detected): https://gitlab.com/postkeep/postkeep/-/issues/136
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is unmaintained, with no safe upgrade; async-imap, rmcp, schemars and postkeep's own crates still depend on it" },
+]
+
+[licenses]
+# Permissive licenses compatible with distributing postkeep under MIT.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies are fine: no crate here is published.
+allow-wildcard-paths = true
+# Keep the TLS stack pure Rust: no OpenSSL or native-tls.
+deny = [
+    { crate = "openssl", reason = "use rustls" },
+    { crate = "openssl-sys", reason = "use rustls" },
+    { crate = "native-tls", reason = "use rustls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

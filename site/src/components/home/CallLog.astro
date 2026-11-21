@@ -1,0 +1,23 @@
+---
+// The MCP call log beside the agent window: the three calls the agent made, each with its tool's hints,
+// its arguments and what came back. It stays on the dark code surface in both themes.
+import Hints from "./Hints.astro";
+import { highlight } from "../../lib/highlight";
+import { pair, t } from "../../lib/copy";
+
+// The calls are the tools the window says it used, then the reply it sends (AgentWindow.astro).
+const CALLS = pair("home.calls", [...t("home.agent.window.used").split(", "), t("home.tools[4].name")]);
+---
+<div class="calls">
+  <p class="calls__bar"><span class="calls__t"><i></i>{t("home.calls.title")}</span><span class="calls__url">{t("home.install.connect.url")}</span></p>
+  <ol class="calls__list">
+    {CALLS.map((name, i) => (
+      <li class="call">
+        <p class="call__h"><span class="call__n">{i + 1}</span><code class="call__name">{name}</code><Hints name={name} /></p>
+        <pre class="call__args"><code set:html={highlight(t(`home.calls[${i}].args`), "json")} /></pre>
+        <p class="call__res"><span>→</span><code>{t(`home.calls[${i}].result`)}</code></p>
+      </li>
+    ))}
+  </ol>
+  <p class="calls__ft">{t("home.calls.footer")}</p>
+</div>

@@ -1,0 +1,36 @@
+{#- "Sign in with Microsoft/Google" buttons. Each is a POST form (the
+    start route checks the origin); `oauth.request_id` ties it to the MCP
+    client's authorization request. Include only when `oauth.any()`. #}
+      <div class="oauth">
+        <h2 class="section-title" id="oauth-title">Sign in with your provider</h2>
+        <ul class="oauth__list" aria-labelledby="oauth-title">
+          {% if let Some(url) = oauth.microsoft %}
+          <li class="oauth__item">
+            <form class="oauth__form" method="post" action="{{ url }}">
+              {% if let Some(request_id) = oauth.request_id %}<input type="hidden" name="request_id" value="{{ request_id }}">{% endif %}
+              <button type="submit" class="oauth-btn" data-oauth="Microsoft">
+              <picture>
+                <source srcset="/assets/providers/microsoft/ms-symbollockup_signin_dark.svg" media="(prefers-color-scheme: dark)">
+                <img src="/assets/providers/microsoft/ms-symbollockup_signin_light.svg" width="215" height="41" alt="Sign in with Microsoft">
+              </picture>
+              </button>
+            </form>
+          </li>
+          {% endif %}
+          {% if let Some(url) = oauth.google %}
+          <li class="oauth__item">
+            <form class="oauth__form" method="post" action="{{ url }}">
+              {% if let Some(request_id) = oauth.request_id %}<input type="hidden" name="request_id" value="{{ request_id }}">{% endif %}
+              <button type="submit" class="oauth-btn" data-oauth="Google">
+              <picture>
+                <source srcset="/assets/providers/google/signin-dark.png 1x, /assets/providers/google/signin-dark@2x.png 2x, /assets/providers/google/signin-dark@3x.png 3x, /assets/providers/google/signin-dark@4x.png 4x" media="(prefers-color-scheme: dark)">
+                <img src="/assets/providers/google/signin-light.png" srcset="/assets/providers/google/signin-light.png 1x, /assets/providers/google/signin-light@2x.png 2x, /assets/providers/google/signin-light@3x.png 3x, /assets/providers/google/signin-light@4x.png 4x" width="180" height="40" alt="Sign in with Google">
+              </picture>
+              </button>
+            </form>
+          </li>
+          {% endif %}
+        </ul>
+        <p class="oauth__hint">{% if oauth.microsoft.is_some() %}<span>Microsoft: a personal account, or a work or school account.</span>{% endif %} {% if oauth.google.is_some() %}<span>Google: Gmail or Google Workspace.</span>{% endif %}</p>
+        <p class="oauth__status" role="status" aria-live="polite" data-busy-status-template="Redirecting you to {provider}…"></p>
+      </div>

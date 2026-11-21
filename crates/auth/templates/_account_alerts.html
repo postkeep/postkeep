@@ -1,0 +1,150 @@
+{#- The account page's "Webhook" section (webhook settings), included
+    with `webhook` in scope. The on/off switch sits in the section header and
+    joins the form through form="alerts-form". #}
+    <section class="sec" id="alerts" aria-labelledby="alerts-title">
+      <div class="sec__head">
+        <div class="sec__titles"><h2 id="alerts-title">Webhook{% if webhook.status == crate::webhook::Status::Paused %} <span class="badge badge--warning"><span class="badge__dot" aria-hidden="true"></span>Paused</span>{% endif %}</h2><p class="sec__desc">A small signed JSON event goes to your HTTPS endpoint when mail lands in your inbox. <a href="{{ crate::pages::DOCS }}/docs/webhooks/" target="_blank" rel="noopener noreferrer">Payload and signature<span class="visually-hidden"> docs (opens in a new tab)</span></a></p></div><label class="switch">
+          <input class="switch__input" type="checkbox" name="enabled" value="on" role="switch" form="alerts-form"{% if webhook.enabled %} checked{% endif %}>
+          <span class="switch__track" aria-hidden="true"></span>
+          <span class="switch__text"><span class="switch__on" aria-hidden="true">On</span><span class="switch__off" aria-hidden="true">Off</span><span class="visually-hidden">Webhook</span></span>
+        </label>
+      </div>
+      <div class="sec__body">
+        <p class="muted-line">{{ webhook.outbox_summary }}</p>
+        {% if webhook.unreadable %}
+        <p class="result result--bad" role="alert"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>These webhook settings can't be read because the encryption key changed. Enter the URL and auth header again and save to replace them.</span></p>
+        {% endif %}
+        {% if webhook.status == crate::webhook::Status::Paused %}
+        <p class="result result--warn" role="status"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>Paused after {{ webhook.failure_threshold }} failed deliveries in a row — retrying {{ webhook.retry_phrase }}.{% if let Some(time) = webhook.paused_since %} Paused since <time datetime="{{ time.iso }}">{{ time.label }}</time>.{% endif %}{% if let Some(error) = webhook.last_error %} Last error: <code>{{ error }}</code>.{% endif %}{% if let Some(time) = webhook.last_success %} Last success <time datetime="{{ time.iso }}">{{ time.label }}</time>.{% endif %}{% if let Some(time) = webhook.next_retry %} Next retry <time datetime="{{ time.iso }}">{{ time.label }}</time>.{% endif %}</span></p>
+        {% else if webhook.status == crate::webhook::Status::Failing %}
+        {% if let Some(error) = webhook.last_error %}
+        <p class="result result--bad" role="status"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>The last delivery failed: <code>{{ error }}</code></span></p>
+        {% endif %}
+        {% endif %}
+
+        {% if webhook.errors.url.is_some() || webhook.errors.header_name.is_some() || webhook.errors.header_value.is_some() %}
+        <div class="alert alert--error" role="alert" id="webhook-errors">
+          <svg class="i" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg>
+          <div class="alert__body">
+            <p class="alert__title">Nothing was saved. Fix these fields:</p>
+            <ul>
+              {% if let Some(error) = webhook.errors.url %}<li><a href="#webhook_url">{{ error }}</a></li>{% endif %}
+              {% if let Some(error) = webhook.errors.header_name %}<li><a href="#auth_header_name">{{ error }}</a></li>{% endif %}
+              {% if let Some(error) = webhook.errors.header_value %}<li><a href="#auth_header_value">{{ error }}</a></li>{% endif %}
+            </ul>
+          </div>
+        </div>
+        {% endif %}
+
+        <form class="stack-form" id="alerts-form" method="post" action="/account/webhook" data-busy-form novalidate>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="field">
+            <label class="field__label" for="webhook_url">Endpoint URL</label>
+            <input class="input" id="webhook_url" name="webhook_url" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://example.com/hooks/new-mail" value="{{ webhook.url }}" aria-describedby="{% if webhook.errors.url.is_some() %}webhook_url-error {% endif %}webhook_url-hint"{% if webhook.errors.url.is_some() %} aria-invalid="true"{% endif %}>
+            {% if let Some(error) = webhook.errors.url %}
+            <p class="field__error" id="webhook_url-error"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>{{ error }}</span></p>
+            {% endif %}
+            <p class="field__hint" id="webhook_url-hint">HTTPS only. Private and loopback addresses are refused; redirects are never followed.</p>
+          </div>
+          <div class="field">
+            <label class="field__label" for="signing_secret">Signing secret</label>
+            {% if let Some(secret) = webhook.signing_secret %}
+            <div class="input-wrap">
+              <input class="input input--mono input--has-action2" id="signing_secret" type="password" readonly value="{{ secret }}" aria-describedby="signing_secret-hint">
+              <span class="input-actions">
+                <button class="input-action" type="button" data-toggle-password="signing_secret" aria-controls="signing_secret" aria-pressed="false" hidden><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></svg><span data-label>Show</span><span class="visually-hidden"> signing secret</span></button>
+                <button class="input-action" type="button" data-copy="signing_secret" hidden><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg><span data-label>Copy</span><span class="visually-hidden"> signing secret</span></button>
+              </span>
+            </div>
+            {% else %}
+            <input class="input input--mono" id="signing_secret" type="text" readonly value="" placeholder="Created when you save" aria-describedby="signing_secret-hint">
+            {% endif %}
+            <p class="field__hint" id="signing_secret-hint">Verify the <code>X-Signature-256</code> HMAC-SHA256 header with this secret.</p>
+          </div>
+
+          <details class="disclose"{% if webhook.errors.header_name.is_some() || webhook.errors.header_value.is_some() %} open{% endif %}>
+            <summary class="disclose__summary"><svg class="i i--sm disclose__chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>Advanced</summary>
+            <div class="disclose__body">
+              <div class="pair">
+                <div class="field">
+                  <label class="field__label" for="auth_header_name">Auth header name <span class="field__optional">optional</span></label>
+                  <input class="input input--mono" id="auth_header_name" name="auth_header_name" type="text" autocomplete="off" spellcheck="false" maxlength="100" placeholder="Authorization" value="{{ webhook.auth_header_name }}"{% if webhook.errors.header_name.is_some() %} aria-invalid="true" aria-describedby="auth_header_name-error"{% endif %}>
+                  {% if let Some(error) = webhook.errors.header_name %}
+                  <p class="field__error" id="auth_header_name-error"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>{{ error }}</span></p>
+                  {% endif %}
+                </div>
+                <div class="field">
+                  <label class="field__label" for="auth_header_value">Auth header value <span class="field__optional">optional</span></label>
+                  <div class="input-wrap">
+                    <input class="input input--mono input--has-action" id="auth_header_value" name="auth_header_value" type="password" autocomplete="new-password" spellcheck="false" maxlength="4096" placeholder="{% if webhook.has_auth_value %}•••••••• saved{% endif %}" value="" aria-describedby="{% if webhook.errors.header_value.is_some() %}auth_header_value-error {% endif %}auth_header_value-hint"{% if webhook.errors.header_value.is_some() %} aria-invalid="true"{% endif %}>
+                    <button class="input-action" type="button" data-toggle-password="auth_header_value" aria-controls="auth_header_value" aria-pressed="false" hidden><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></svg><span data-label>Show</span><span class="visually-hidden"> header value</span></button>
+                  </div>
+                  {% if let Some(error) = webhook.errors.header_value %}
+                  <p class="field__error" id="auth_header_value-error"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>{{ error }}</span></p>
+                  {% endif %}
+                  <p class="field__hint" id="auth_header_value-hint">{% if webhook.has_auth_value %}{% if let Some(hint) = webhook.auth_value_hint %}Ends in <code>…{{ hint }}</code>. {% else %}A value is saved. {% endif %}Leave blank to keep it; clear the name to remove it.{% else %}Sent with every event, e.g. <code>Bearer …</code>{% endif %}</p>
+                </div>
+              </div>
+              <div class="setting">
+                <div class="setting__text"><p class="setting__title" id="hmac-title">Sign events</p><p class="setting__desc" id="hmac-desc">Adds the <code>X-Signature-256</code> header. Leave on unless your endpoint can't use it.</p></div>
+                <label class="switch">
+                  <input class="switch__input" type="checkbox" name="hmac_signing" value="on" role="switch"{% if webhook.signing %} checked{% endif %} aria-labelledby="hmac-title" aria-describedby="hmac-desc">
+                  <span class="switch__track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="setting">
+                <div class="setting__text"><p class="setting__title" id="incl-title">Include sender and subject</p><p class="setting__desc" id="incl-desc">Off by default: events carry only the folder and message ID.</p></div>
+                <label class="switch">
+                  <input class="switch__input" type="checkbox" name="include_sender_subject" value="on" role="switch"{% if webhook.include_sender %} checked{% endif %} aria-labelledby="incl-title" aria-describedby="incl-desc">
+                  <span class="switch__track" aria-hidden="true"></span>
+                </label>
+              </div>
+              {% if webhook.configured %}
+              <div class="setting">
+                <div class="setting__text"><p class="setting__title">Rotate signing secret</p><p class="setting__desc">Issues a new secret. The old one stops verifying immediately.</p></div>
+                <button class="btn btn--secondary btn--sm" type="submit" formaction="/account/webhook/rotate-secret" formnovalidate><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20v-4h-4"/></svg>Rotate</button>
+              </div>
+              {% endif %}
+            </div>
+          </details>
+
+          <div class="actions">
+            <button class="btn btn--secondary" type="submit" formaction="/account/webhook/test"{% if !webhook.configured %} disabled{% endif %}><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 3 10 14"/><path d="m21 3-6.5 18-4.5-7-7-4.5z"/></svg>Send test event</button>
+            <button class="btn btn--primary" type="submit" name="action" value="save">
+              <span class="btn__label">Save</span>
+              <span class="btn__busy"><span class="spinner" aria-hidden="true"></span>Saving…</span>
+            </button>
+          </div>
+          <p class="form__status visually-hidden" role="status" aria-live="polite" data-busy-status="Saving webhook settings."></p>
+          {% if let Some(result) = webhook.test_result %}
+          {% if result.ok %}
+          <p class="result result--ok" role="status"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-4.8"/></svg><span>Test delivered.{% if let Some(status) = result.status %} Your endpoint answered <code>{{ status }}</code>{% if let Some(duration) = result.duration %} in {{ duration }}{% endif %}.{% endif %}</span></p>
+          {% else %}
+          <p class="result result--bad" role="status"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>Test not accepted: <code>{{ result.detail }}</code></span></p>
+          {% endif %}
+          {% endif %}
+        </form>
+
+        {% include "_account_filters.html" %}
+
+        <details class="disclose disclose--history">
+          <summary class="disclose__summary"><svg class="i i--sm disclose__chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>Delivery history{% if !webhook.history_digest().is_empty() %} <span class="disclose__meta">{{ webhook.history_digest() }}</span>{% endif %}</summary>
+          <div class="disclose__body">
+          {% if webhook.recent.is_empty() %}
+            <p class="muted-line">No deliveries yet. Save a URL and send a test event to see them here.</p>
+          {% else %}
+            <div class="table-wrap" tabindex="0" role="region" aria-label="Recent deliveries">
+              <table class="table">
+                <thead><tr><th scope="col">Time</th><th scope="col">Event</th><th scope="col">Response</th><th scope="col" class="num">Duration</th></tr></thead>
+                <tbody>
+                {% for delivery in webhook.recent %}
+                <tr><td><time datetime="{{ delivery.time.iso }}">{{ delivery.time.label }}</time></td><td><code>{{ delivery.event }}</code></td><td><span class="code-status{% if !delivery.succeeded %} code-status--bad{% endif %}" title="{{ delivery.detail }}">{% if let Some(code) = delivery.status_code %}{{ code }}{% else %}error{% endif %}</span>{% if delivery.status_code.is_none() %}<span class="visually-hidden">: {{ delivery.detail }}</span>{% endif %}</td><td class="num">{% if delivery.duration.is_empty() %}–{% else %}{{ delivery.duration }}{% endif %}</td></tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% endif %}
+          </div>
+        </details>
+      </div>
+    </section>

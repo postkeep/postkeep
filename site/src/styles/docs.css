@@ -1,0 +1,161 @@
+/* Docs: the sidebar, the 680 px reading column with its prose, steps, asides, cards and tables, the
+   "On this page" rail and the pager. Code blocks and tabs are site.css's. */
+
+/* ---------------------------------------------------------------- layout: sidebar 248, column 680, rail 248, 76 apart */
+.dl { display: grid; grid-template-columns: 248px minmax(0, 680px) 248px; justify-content: start; gap: 76px; padding-bottom: 96px; }
+.dl__side, .rail { position: sticky; top: var(--hd-h); align-self: start; max-height: calc(100vh - var(--hd-h)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+/* The search field, the page's title and the rail's heading start 40 px under the header; blocks sit 20 apart. */
+.dl__side { padding: 36px 0 32px; }
+.dl__main { padding-top: 40px; }
+.doc { display: flex; flex-direction: column; gap: 20px; }
+.doc__head { display: flex; flex-direction: column; gap: 16px; padding-bottom: 28px; }
+.doc__head .lede { max-width: 560px; }
+.doc__h2, .prose h2, .dstep__h { font: var(--type-docs-h2); letter-spacing: -0.025em; }
+.doc__h2, .prose h2 { margin: 28px 0 -4px; color: var(--text-primary); }
+
+/* ---------------------------------------------------------------- sidebar and search */
+.side { display: flex; flex-direction: column; }
+.side__a { display: flex; align-items: center; min-height: 32px; padding: 6px 10px; border-radius: var(--radius-tile); color: var(--text-secondary); font: var(--weight-regular) var(--type-ui-size) / 20px var(--font-sans); }
+.side__a:hover { background: var(--console-hover); color: var(--text-primary); }
+.side__a[aria-current="page"] { background: var(--console-hover); color: var(--text-primary); font-weight: var(--weight-medium); }
+.side__top { margin-top: 8px; }
+.side__grp { margin-top: 24px; }
+.side__sum, .side__lab { color: var(--text-primary); font: var(--weight-medium) var(--type-ui-size) / 20px var(--font-sans); }
+.side__sum { display: flex; align-items: center; justify-content: space-between; min-height: 32px; padding: 6px 10px; list-style: none; cursor: pointer; transition: transform var(--duration-press) var(--easing-standard); }
+.side__sum:active { transform: scale(0.97); }
+.side__sum::-webkit-details-marker { display: none; }
+.side__ic { width: 14px; height: 14px; }
+.side__grp[open] .side__ic--shut, .side__grp:not([open]) .side__ic--open { display: none; }
+.side__list { display: flex; flex-direction: column; list-style: none; }
+.dsearch { position: relative; padding: 4px 0; }
+html:not(.js) .dsearch { display: none; }
+.dsearch__ic { position: absolute; top: 14.5px; left: 12px; width: 15px; height: 15px; color: var(--text-tertiary); pointer-events: none; }
+.dsearch__hit { position: absolute; top: 0; left: 0; right: 0; height: 44px; }
+.dsearch__in { position: relative; width: 100%; height: 36px; padding: 0 12px 0 35px; border: 0; border-radius: var(--radius-control); background: none; box-shadow: inset 0 0 0 1px var(--border-strong); color: var(--text-primary); font: var(--weight-regular) var(--type-ui-size) / 17px var(--font-sans); }
+.dsearch__in::placeholder { color: var(--text-tertiary); opacity: 1; }
+.dsearch__in:focus-visible { outline-offset: 0; }
+.dsearch__list:not([hidden]) { display: grid; gap: 2px; margin-top: 6px; list-style: none; }
+.dsearch__a { display: grid; gap: 2px; padding: 8px 10px; border-radius: var(--radius-tile); }
+.dsearch__a:hover, .dsearch__a:focus-visible { background: var(--console-hover); }
+.dsearch__t { font: var(--weight-medium) var(--type-ui-size) / 17px var(--font-sans); }
+.dsearch__s { color: var(--text-secondary); font-size: var(--type-caption-size); line-height: 18px; }
+
+/* ---------------------------------------------------------------- prose: body type, links, inline code chips */
+.prose { display: flex; flex-direction: column; gap: 20px; min-width: 0; color: var(--text-secondary); }
+.prose > :first-child { margin-top: 0; }
+.prose h3 { margin: 12px 0 -8px; color: var(--text-primary); font: var(--weight-semibold) var(--type-h4-size) / var(--type-h4-line) var(--font-sans); letter-spacing: calc(var(--type-h4-tracking) * 1em); }
+.prose h4 { color: var(--text-primary); font: var(--weight-semibold) 15px / 22px var(--font-sans); }
+.prose h2, .prose h3, .prose h4 { scroll-margin-top: calc(var(--hd-h) + 16px); }
+.prose p, .prose li, .prose td, .dhelp, .dstep__body p { font-size: var(--type-body-size); line-height: var(--type-prose-line); }
+.prose p:not(.aside p), .prose li:not(.dsteps-md > ol > li), .dstep__body p { max-width: 600px; }
+.prose strong, .prose th { color: var(--text-primary); font-weight: var(--weight-semibold); }
+.prose ul, .prose ol { display: flex; flex-direction: column; gap: 8px; padding-inline-start: 24px; }
+.prose li::marker { color: var(--text-tertiary); }
+.prose li > ul, .prose li > ol, .prose li > p + p, .prose li > .code { margin-top: 8px; }
+.prose a:not([class]), .dhelp a { color: var(--text-link); text-decoration: underline 1px; text-underline-offset: 0.2em; overflow-wrap: anywhere; }
+.prose a:not([class]):hover, .dhelp a:hover { text-decoration-thickness: 2px; }
+.prose :not(pre) > code { font-size: 13px; overflow-wrap: anywhere; }
+.prose blockquote { padding-inline-start: 16px; border-inline-start: 2px solid var(--border-subtle); }
+.prose hr { width: 100%; border: 0; border-top: 1px solid var(--border-subtle); }
+
+/* ---------------------------------------------------------------- steps (Getting started's and the Markdown's): 28 px discs on the
+   first line, the text 48 px in, its parts 16 apart, steps 32 apart */
+.dsteps, .dsteps-md > ol { display: flex; flex-direction: column; gap: 32px; padding: 0; list-style: none; }
+.dstep, .dsteps-md > ol > li { position: relative; padding-left: 48px; }
+.dstep__body, .dsteps-md > ol > li { display: flex; flex-direction: column; gap: 16px; }
+.dstep__n, .dsteps-md > ol > li::before { position: absolute; top: -2px; left: 0; display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-pill); background: var(--bg-canvas); box-shadow: inset 0 0 0 1px var(--border-subtle); color: var(--action-primary); font: var(--weight-regular) var(--type-caption-size) / 17px var(--font-mono); letter-spacing: -0.01em; }
+.dstep__n { top: 3px; }
+.dstep__body > p { color: var(--text-secondary); }
+.dsteps-md > ol { counter-reset: dstep; }
+.dsteps-md > ol > li { counter-increment: dstep; }
+.prose .dsteps-md > ol > li > * { margin-top: 0; }
+.dsteps-md > ol > li::before { content: counter(dstep); }
+.dlinks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; list-style: none; }
+.dlinks__a { display: flex; min-height: 32px; padding: 6px 0; color: var(--text-primary); font: var(--weight-medium) var(--type-ui-size) / 20px var(--font-sans); }
+.dlinks__a:hover { color: var(--text-link); }
+
+/* ---------------------------------------------------------------- asides: a square box on its kind's wash, its edge and icon in its kind's colour */
+.prose .aside { --edge: var(--console-t2); --wash: var(--status-neutral-wash); position: relative; display: flex; flex-direction: column; gap: 6px; padding: 16px 16px 16px 44px; border-left: 2px solid var(--edge); border-radius: 0; background: var(--wash); color: var(--text-primary); }
+.prose .aside > .pk-icon { position: absolute; top: 20px; left: 16px; color: var(--edge); }
+.prose .aside--tip { --edge: var(--status-ok-text); --wash: var(--status-ok-wash); }
+.prose .aside--caution { --edge: var(--status-warning-text); --wash: var(--status-warning-wash); }
+.prose .aside--danger { --edge: var(--status-danger-text); --wash: var(--status-danger-wash); }
+
+/* ---------------------------------------------------------------- link cards (Reference, Quickstart's next pages) */
+.dref__grid, .lcards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; list-style: none; }
+.lcards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.card { display: flex; flex-direction: column; height: 100%; padding: 20px; border-radius: var(--radius-card); background: var(--console-canvas); box-shadow: inset 0 0 0 1px var(--border-subtle); color: var(--text-primary); }
+.card:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.card__top { display: flex; align-items: center; justify-content: space-between; }
+.tile { display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-tile-lg); background: var(--console-hover); color: var(--action-primary); }
+.card__go { color: var(--text-tertiary); }
+.card__t { margin-top: 16px; font: var(--weight-semibold) var(--type-h4-size) / var(--type-h4-line) var(--font-sans); letter-spacing: calc(var(--type-h4-tracking) * 1em); }
+.card__d { color: var(--text-secondary); font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.dref { display: flex; flex-direction: column; gap: 16px; margin-top: 28px; }
+.dref .doc__h2 { margin: 0; }
+.dhelp { display: flex; align-items: start; gap: 12px; margin-top: 28px; color: var(--text-secondary); }
+.dhelp > .pk-icon { margin-top: 4px; color: var(--text-tertiary); }
+.dhelp a { font-weight: var(--weight-medium); }
+
+/* ---------------------------------------------------------------- tables: their own scroll box, hairline rules */
+.tbl-scroll { max-width: 100%; overflow-x: auto; border-radius: var(--radius-panel-inner); box-shadow: inset 0 0 0 1px var(--border-subtle); scrollbar-width: thin; }
+.tbl-scroll table { width: 100%; min-width: 32rem; border-collapse: collapse; font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.tbl-scroll th, .tbl-scroll td { padding: 9.5px 14px; border-top: 1px solid var(--border-subtle); font-size: inherit; line-height: inherit; text-align: start; vertical-align: top; }
+.tbl-scroll .num { font-variant-numeric: tabular-nums; text-align: end; }
+.tbl-scroll thead th { border-top: 0; background: var(--bg-sunken); }
+.tbl-scroll td code { overflow-wrap: normal; }
+
+/* ---------------------------------------------------------------- the mailbox list */
+.dprov { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 0 !important; list-style: none; }
+.dprov__a { display: flex; align-items: center; gap: 12px; height: 100%; padding: 14px 16px; border-radius: var(--radius-panel-inner); background: var(--console-canvas); box-shadow: inset 0 0 0 1px var(--border-subtle); color: var(--text-primary); }
+.dprov__a:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.dprov__txt { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.dprov__n { font-weight: var(--weight-medium); }
+.dprov__h { color: var(--text-secondary); font-size: var(--type-caption-size); line-height: 18px; }
+.dprov .card__go { color: var(--text-tertiary); }
+
+/* ---------------------------------------------------------------- rail and pager */
+.rail { padding: 40px 0 32px; }
+.rail__h { padding-bottom: 8px; color: var(--text-primary); font: var(--weight-medium) var(--type-ui-size) / 17px var(--font-sans); }
+.rail__list { list-style: none; }
+.rail__a { display: block; padding: 5.5px 0 5.5px 14px; box-shadow: inset 1px 0 0 var(--border-subtle); color: var(--text-secondary); font-size: var(--type-body-sm-size); line-height: var(--type-body-sm-line); }
+.rail__a--sub { padding-left: 26px; }
+.rail__a:hover { color: var(--text-primary); }
+.rail__a[aria-current="location"] { box-shadow: inset 2px 0 0 var(--action-primary); color: var(--text-primary); }
+.pager { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 28px; }
+.pager__a { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-radius: var(--radius-card); box-shadow: inset 0 0 0 1px var(--border-subtle); }
+.pager__a:hover { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.pager__a--next { grid-column: 2; flex-direction: row-reverse; text-align: right; }
+.pager__a > .pk-icon { color: var(--text-tertiary); }
+.pager__txt { display: flex; flex-direction: column; }
+.pager__k { color: var(--text-tertiary); font-size: var(--type-caption-size); line-height: 16px; }
+.pager__t { font: var(--weight-medium) var(--type-ui-size) / 17px var(--font-sans); }
+
+/* ---------------------------------------------------------------- narrower screens: the rail goes, then the sidebar moves into the menu */
+@media (max-width: 1279px) { .dl { grid-template-columns: 248px minmax(0, 680px); gap: 56px; } .rail { display: none; } }
+@media (max-width: 1023px) {
+  .dl { grid-template-columns: minmax(0, 1fr); padding-bottom: 64px; }
+  .dl__side { display: none; }
+  .dl__main { padding-top: 32px; }
+  .menu .menu__list { margin-top: 8px; box-shadow: inset 0 1px 0 var(--border-subtle); }
+  .menu__side { margin-top: 24px; }
+  .menu__side .side__a, .menu__side .side__sum { min-height: 44px; padding-block: 12px; box-shadow: inset 0 -1px 0 var(--border-subtle); }
+  .menu__side .side__top, .menu__side .side__grp { margin-top: 0; }
+}
+@media (max-width: 599px) {
+  .dref__grid, .lcards, .dprov { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .card { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-content: center; column-gap: 12px; min-height: 64px; padding: 16px; }
+  .card__top { display: contents; }
+  .card .tile { grid-row: span 2; }
+  .card__go { grid-area: 1 / 3 / span 2; align-self: center; }
+  .card__t, .card__d { grid-column: 2; margin: 0; }
+  .card__t { font-size: 16px; line-height: 20px; }
+  .card__t:last-child { grid-row: span 2; align-self: center; }
+  .dlinks { grid-template-columns: minmax(0, 1fr); box-shadow: inset 0 1px 0 var(--border-subtle); }
+  .dlinks__a { min-height: 44px; padding-block: 12px; box-shadow: inset 0 -1px 0 var(--border-subtle); }
+  .dsteps-md > ol > li > .code, .dsteps-md > ol > li > .tbl-scroll { margin-left: -48px; }
+  .dsteps { margin-top: -16px; }
+  .dstep__n { top: 1px; }
+  .pager { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .pager__a--next { grid-column: auto; }
+}

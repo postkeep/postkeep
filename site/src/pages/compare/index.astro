@@ -1,0 +1,44 @@
+---
+// Cloud or self-host (/compare/): the two halves, each with its name, tagline, picture, three facts and one
+// action. Self-host has its own ground and the install panel with Docker Compose picked, its .env and the
+// /mcp address; postkeep Cloud a picture of its console. Then the closing line. Widths: src/styles/compare.css.
+import Base from "../../layouts/Base.astro";
+import Icon from "../../components/Icon.astro";
+import InstallPanel from "../../components/InstallPanel.astro";
+import LoopLine from "../../components/LoopLine.astro";
+import SiteFooter from "../../components/SiteFooter.astro";
+import SiteHeader from "../../components/SiteHeader.astro";
+import SiteLink from "../../components/SiteLink.astro";
+import Console from "../../components/compare/Console.astro";
+import Env from "../../components/compare/Env.astro";
+import { items, pageTitle, t } from "../../lib/copy";
+import "../../styles/compare.css";
+
+const SIDES = [
+  { key: "selfhost", icon: "server" },
+  { key: "cloud", icon: "cloud" },
+] as const;
+---
+<Base title={pageTitle(t("compare.title"))} description={t("meta.compare.description")} page="compare">
+  <SiteHeader current="nav.links[3]" />
+  <main id="main" tabindex="-1">
+    <div class="wrap cmp-top"><h1 class="display">{t("compare.title")}</h1><p class="lede">{t("meta.compare.description")}</p></div>
+    <div class="split">
+      {SIDES.map(({ key, icon }) => (
+        <section class={`half half--${key}`} aria-labelledby={`${key}-h`}>
+          <div><h2 class="h1 half__h" id={`${key}-h`}><Icon name={icon} />{t(`compare.${key}.title`)}</h2><p class="lede">{t(`compare.${key}.tagline`)}</p></div>
+          {key === "selfhost" ? (
+            <InstallPanel base="cmp" pick="home.install.tabs.compose">
+              <Env />
+              <p class="code__foot" slot="foot">{t("compare.selfhost.connect")} <code>{t("home.install.connect.url")}</code></p>
+            </InstallPanel>
+          ) : <Console />}
+          <ul class="half__facts">{items(`compare.${key}.good`).map((i) => <li>{t(`compare.${key}.good[${i}]`)}</li>)}</ul>
+          <p class="half__act">{key === "selfhost" ? <SiteLink id="compare.selfhost.button" class="btn btn--lg btn--primary" ext={false} /> : <SiteLink id="compare.cloud.button" class="tlink" />}</p>
+        </section>
+      ))}
+    </div>
+    <div class="wrap cmp-close"><p class="lede"><LoopLine />{t("compare.footer")}</p></div>
+  </main>
+  <SiteFooter />
+</Base>

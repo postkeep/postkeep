@@ -1,0 +1,50 @@
+[package]
+name = "postkeep-webhook"
+description = "SSRF-safe, signed webhook delivery used by postkeep"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["webhook", "hmac", "ssrf", "mcp"]
+categories = ["network-programming", "asynchronous"]
+
+[lib]
+name = "postkeep_webhook"
+
+[dependencies]
+base64.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"], optional = true }
+bytes = "1"
+getrandom.workspace = true
+hex = "0.4"
+hmac = "0.13"
+http = "1"
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client"] }
+hyper-util.workspace = true
+regex.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "time", "rt", "io-util", "sync"] }
+tokio-rustls.workspace = true
+tracing.workspace = true
+url.workspace = true
+webpki-roots.workspace = true
+
+[features]
+# Test helpers (a local HTTPS receiver). Only for dev-dependencies.
+testing = ["dep:rcgen"]
+
+[dev-dependencies]
+postkeep-webhook = { path = ".", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

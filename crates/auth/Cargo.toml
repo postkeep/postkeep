@@ -1,0 +1,49 @@
+[package]
+name = "postkeep-auth"
+description = "OAuth 2.1 authorization server and sign-in page for postkeep"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+readme = "README.md"
+
+[lib]
+name = "postkeep_auth"
+
+[features]
+# Internal entry points for the cargo-fuzz targets in `fuzz/`.
+fuzzing = []
+
+[dependencies]
+askama.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+postkeep-mail.workspace = true
+postkeep-store.workspace = true
+postkeep-upstream.workspace = true
+postkeep-webhook.workspace = true
+secrecy = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+postkeep-store = { workspace = true, features = ["sqlite"] }
+postkeep-webhook = { workspace = true, features = ["testing"] }
+sqlx = { workspace = true, features = ["sqlite"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util"] }
+tower.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

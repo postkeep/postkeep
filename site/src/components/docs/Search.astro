@@ -1,0 +1,20 @@
+---
+// Docs search: a field that matches titles, headings and text from /docs/search.json and lists the pages.
+// It needs the page's script, so it shows only when that can run; the sidebar works without it. Its words
+// are in src/data/site.json (search).
+import Icon from "../Icon.astro";
+import { SITE } from "../../lib/data";
+
+interface Props {
+  id: string;
+}
+const { id } = Astro.props;
+const S = SITE.search;
+---
+<div class="dsearch" data-search data-none={S.none} data-one={S.one} data-many={S.many}>
+  <label class="dsearch__hit" for={id}><span class="vh">{S.label}</span></label>
+  <Icon name="search" class="dsearch__ic" />
+  <input class="dsearch__in" id={id} type="search" placeholder={S.placeholder} autocomplete="off" spellcheck="false" aria-describedby={`${id}-n`} />
+  <p class="dsearch__n vh" id={`${id}-n`} aria-live="polite"></p>
+  <ul class="dsearch__list" hidden></ul>
+</div>

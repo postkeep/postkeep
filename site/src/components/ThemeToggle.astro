@@ -1,0 +1,16 @@
+---
+// The theme pill: Light, Dark and Match device as three radio cells, the picked one filled. It needs
+// JavaScript (src/scripts/site.ts saves the pick), so it shows only when the page's script can run;
+// without it the page follows the device.
+import Icon from "./Icon.astro";
+import { t } from "../lib/copy";
+
+const THEME = [
+  ["light", "sun", "nav.theme.light"],
+  ["dark", "moon", "nav.theme.dark"],
+  ["system", "monitor", "nav.theme.system"],
+] as const;
+---
+<fieldset class="pill" data-theme-toggle><legend class="vh">{t("nav.theme.label")}</legend>
+  {THEME.map(([c, ic, id]) => <label class="pill__cell" title={t(id)}><input class="pill__in" type="radio" name="theme" value={c} data-theme-set checked={c === "dark"} /><Icon name={ic} /><span class="vh">{t(id)}</span></label>)}
+</fieldset>

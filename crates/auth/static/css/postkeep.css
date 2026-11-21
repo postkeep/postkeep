@@ -1,0 +1,28 @@
+/* postkeep additions to the designer's app.css, kept separate so app.css can be replaced as delivered. */
+
+/* The picker offers every configured server (iCloud Mail, Fastmail, Yahoo Mail, a custom server),
+   not just iCloud and "Other IMAP": any choice other than iCloud shows the generic app-password guide. */
+.signin:has(.picker__input:checked:not(#provider-icloud)) .guide--imap { display: revert !important; }
+.signin:has(.picker__input:checked:not(#provider-icloud)) .guide--icloud { display: none !important; }
+.signin:has(.picker__input:checked:not(#provider-icloud)) .guide__body > .guide--imap { display: grid !important; }
+.signin:has(.picker__input:checked:not(#provider-icloud)) .guide__title.guide--imap { display: block !important; }
+.picker__hint { margin-top: 8px; }
+.guide .step__action { margin-right: 8px; }
+
+/* Failed test events and delivery problems on the account page. */
+.result--bad .i { color: var(--pk-ui-error); flex: none; }
+.result--warn .i { color: var(--pk-ui-warning); flex: none; }
+.badge--warning { background: color-mix(in srgb, var(--pk-ui-warning) 16%, transparent); color: var(--pk-ui-warning); }
+.result code { overflow-wrap: anywhere; }
+.sec__body > .result { margin-bottom: 16px; }
+
+/* Filter rules in New-mail alerts: patterns wrap instead of truncating, and a redirect to #filters clears the sticky header. */
+.filters { scroll-margin-top: 80px; }
+.row__title--wrap { white-space: normal; overflow-wrap: anywhere; }
+.badge--muted { background: var(--pk-ui-surface-sunken); color: var(--pk-ui-text-muted); }
+/* On a phone the pattern takes its own line, with the badge and buttons under it. */
+@media (max-width: 480px) { .filters .row { flex-wrap: wrap; } .filters .row__main { flex-basis: 100%; } }
+/* The rule form's lists stay readable in dark mode. */
+select.input option { background: var(--input-bg); color: var(--pk-ui-text); }
+/* An escaped character in a pattern: boxed, so a typed \u{…} doesn't look the same. */
+.esc { border: 1px dashed currentColor; border-radius: var(--pk-radius-xs); padding: 0 0.2em; color: var(--pk-ui-text-muted); white-space: nowrap; }

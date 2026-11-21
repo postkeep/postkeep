@@ -1,0 +1,37 @@
+---
+title: iCloud Mail
+description: iCloud Mail connects with an app-specific password, which needs two-factor authentication on your Apple Account.
+---
+
+import Steps from '~/components/docs/Steps.astro';
+
+iCloud Mail connects with an **app-specific password**: it doesn't accept
+your Apple Account password from other apps.
+
+:::caution
+Your Apple Account must use two-factor authentication.
+:::
+
+<Steps>
+
+1. Sign in at [account.apple.com](https://account.apple.com).
+
+2. Under **Sign-In and Security**, choose **App-Specific Passwords**.
+
+3. Choose **Generate an app-specific password** and follow the steps
+   ([Apple's guide](https://support.apple.com/en-us/102654)).
+
+4. Copy the password (it looks like `abcd-efgh-ijkl-mnop`) and paste it on
+   postkeep's sign-in page, with or without the dashes.
+
+</Steps>
+
+To remove postkeep's access, see [Disconnect](/docs/clients/#disconnect).
+Changing your Apple Account password revokes every app-specific password:
+sign in again on `/account` with a new one. Signing in there with a new
+password replaces the stored one and signs out other browsers on the
+account page.
+
+iCloud doesn't save mail sent over SMTP to Sent Messages, so
+`send_message` and `reply_to_message` save a copy there unless
+`save_to_sent` is `false`.

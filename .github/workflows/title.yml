@@ -1,0 +1,22 @@
+name: title
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+permissions: {}
+concurrency:
+  group: title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  title:
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          .github/ci/check-mr-title.sh --self-test
+          .github/ci/check-mr-title.sh "$TITLE"

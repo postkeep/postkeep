@@ -1,0 +1,14 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#subscriptions/$entity",
+  "id": "7f105c7d-2dc5-4530-97cd-4e7ae6534c07",
+  "resource": "me/mailFolders('inbox')/messages",
+  "applicationId": "24d3b144-21ae-4080-943f-7067b395b913",
+  "changeType": "created",
+  "clientState": "recorded-client-state",
+  "notificationUrl": "https://mail.example.com/push/microsoft",
+  "lifecycleNotificationUrl": "https://mail.example.com/push/microsoft/lifecycle",
+  "expirationDateTime": "2026-10-15T08:50:00Z",
+  "creatorId": "8ee44408-0679-472c-bc2a-692812af3437",
+  "latestSupportedTlsVersion": "v1_2",
+  "notificationContentType": "application/json"
+}

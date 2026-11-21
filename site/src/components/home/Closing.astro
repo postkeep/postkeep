@@ -1,0 +1,15 @@
+---
+// The closing line: the promise, how to start, and the loop line ending at the first button.
+import LoopLine from "../LoopLine.astro";
+import SiteLink from "../SiteLink.astro";
+import { t } from "../../lib/copy";
+---
+<section class="closing closing--home" aria-labelledby="closing-h">
+  <h2 class="display" id="closing-h"><span>{t("home.closing.title[0]")}</span> <span>{t("home.closing.title[1]")}</span></h2>
+  <p class="lede">{t("home.closing.lead")}</p>
+  <div class="actions">
+    <LoopLine />
+    <SiteLink id="home.hero.primary" class="btn btn--lg btn--primary" ext={false} />
+    <SiteLink id="home.closing.secondary" class="tlink" after="arrow" ext={false} />
+  </div>
+</section>

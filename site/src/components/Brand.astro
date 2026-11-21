@@ -1,0 +1,21 @@
+---
+// An agent app, mail provider or host logo (sources and terms in src/lib/LOGO-SOURCES.md). The name always
+// sits beside it, so the logo is decorative. A brand with a file per surface shows the one for the theme; a
+// slot without a brand takes one of postkeep's own icons.
+import Icon from "./Icon.astro";
+import { LOGOS } from "../lib/logos.js";
+
+type File = { src: string; w: number; h: number };
+interface Props {
+  id: string | null;
+  own?: string;
+}
+const { id, own = "server" } = Astro.props;
+const logo = id ? (LOGOS as Record<string, File | { light: File; dark: File }>)[id] : undefined;
+const files: [File, string | undefined][] = !logo ? [] : "src" in logo ? [[logo, undefined]] : [[logo.light, "logo__l"], [logo.dark, "logo__d"]];
+---
+{logo ? (
+  <span class="brand" data-brand={id} aria-hidden="true">{files.map(([x, cls]) => <img class={cls} src={`/${x.src}`} width={x.w} height={x.h} alt="" />)}</span>
+) : (
+  <span class="brand brand--own" aria-hidden="true"><Icon name={own} /></span>
+)}

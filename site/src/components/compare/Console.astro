@@ -1,0 +1,57 @@
+---
+// A picture of postkeep Cloud's Overview with one mailbox, in the product's own words: one role="img" with
+// its description. Every control is drawn, none is live, and nothing in it takes focus. The values come from
+// the slots: the workspace is the address's local part, the avatar its initials, the limit Free's count.
+import Brand from "../Brand.astro";
+import Icon from "../Icon.astro";
+import Text from "../Text.astro";
+import { fill, items, t } from "../../lib/copy";
+import { emailOff, esc } from "../../lib/highlight";
+import { MARK } from "../../lib/mark";
+
+const C = "compare.console.";
+const email = t(C + "address");
+const limit = /\d+/.exec(t("compare.cloud.good[0]"))?.[0];
+if (!limit) throw new Error("compare.cloud.good[0] has no number for the console's mailbox limit");
+const v = { email, name: email.split("@")[0]!, plan: t(C + "plan"), used: 1, limit, provider: t(C + "provider") };
+const f = (id: string) => fill(t(C + id), v);
+// The first letters of the name's first two words (split at ".", "_" and "-"), else its first two letters.
+const words = v.name.split(/[._-]+/).filter(Boolean);
+const initials = (words.length > 1 ? words[0]![0]! + words[1]![0]! : v.name.slice(0, 2)).toUpperCase();
+---
+<div class="cns-pic">
+  <div class="win cns" role="img" aria-label={f("alt")}>
+    <div class="win__bar cns__bar">
+      <span class="cns__ws"><svg class="cns__mark" viewBox={MARK.viewBox} aria-hidden="true" focusable="false"><path d={MARK.d} /></svg><b>{v.name}</b><svg class="pk-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 10l4 4 4-4" /></svg></span>
+      <span class="cns__crumb">{t(C + "crumb")} <span>/</span> <b>{t(C + "tabs[0]")}</b></span>
+      <span class="cns__search"><Icon name="search" />{t(C + "search")}<kbd>{t(C + "searchKey")}</kbd></span>
+      <span class="av av--1">{initials}</span>
+    </div>
+    <div class="cns__tabs">{items(C + "tabs").map((i) => <span class:list={{ "is-on": i === 0 }}>{t(`${C}tabs[${i}]`)}</span>)}</div>
+    <div class="cns__body">
+      <div class="cns__head"><b>{t(C + "tabs[0]")}</b><span class="cns__pill">{f("workspace")}</span></div>
+      <div class="cns__tile">
+        <span class="cns__lab"><span class="cns__ti"><Icon name="inbox" /></span>{t(C + "mailboxes")}</span>
+        <span class="cns__n"><b>{v.used}</b>{f("of")}</span>
+        <svg class="cns__meter" aria-hidden="true" focusable="false"><rect width="100%" height="6" rx="3" /><rect width={`${(100 * v.used) / +limit}%`} height="6" rx="3" /></svg>
+        <span class="cns__dim">{f("planLine")}</span>
+      </div>
+      <div class="cns__mb">
+        <p class="cns__mbh"><b>{t(C + "mailboxes")}</b><span>{f("inUse")}</span></p>
+        <div class="cns__row">
+          <span class="cns__box"><Brand id={v.provider.toLowerCase()} /></span>
+          <span class="cns__who"><b set:html={emailOff(esc(email))} /><span class="cns__dim">{v.provider}</span></span>
+          <span class="cns__state"><span class="tag tag--ok">{t(C + "connected")}</span><b>{t(C + "disconnect")}</b></span>
+        </div>
+      </div>
+      <div class="cns__add">
+        <p class="cns__addh"><span class="cns__ti"><Icon name="plus" /></span><b>{t(C + "add")}</b></p>
+        <p class="cns__line"><Text id={C + "addLine"} /></p>
+        <div class="cns__msg">
+          <p class="cns__msgh"><span>{t(C + "messageLabel")}</span><span class="cns__copy"><Icon name="copy" />{t(C + "copyMessage")}</span></p>
+          <code>{t(C + "message")}</code>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

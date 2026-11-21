@@ -1,0 +1,19 @@
+---
+// A section's kicker, title and lede: the title left, the lede at the right column's edge, or under the title
+// when `stack` is set (and on phones).
+import { t } from "../../lib/copy";
+import Text from "../Text.astro";
+
+interface Props {
+  id: string;
+  kicker: string;
+  title: string;
+  lede: string;
+  stack?: boolean;
+}
+const { id, kicker, title, lede, stack = false } = Astro.props;
+---
+<div class:list={["sec__head", { "sec__head--stack": stack }]}>
+  <div><p class="kicker">{t(kicker)}</p><h2 class="h1 sec__h" id={id}>{t(title)}</h2></div>
+  <p class="lede sec__lede"><Text id={lede} /></p>
+</div>

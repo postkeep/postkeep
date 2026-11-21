@@ -1,0 +1,13 @@
+---
+// Copies the code block it names; the page's live region says "Copied" (src/scripts/site.ts).
+import Icon from "./Icon.astro";
+import { t } from "../lib/copy";
+
+interface Props {
+  /** id of the <pre> to copy. */
+  of: string;
+  describedBy?: string | undefined;
+}
+const { of, describedBy } = Astro.props;
+---
+<button class="copy" type="button" data-copy={of} aria-describedby={describedBy}><Icon name="copy" class="copy__ic" /><Icon name="check" class="copy__ok" /><span class="copy__t">{t("home.install.copy")}</span><span class="copy__done">{t("home.install.copied")}</span></button>

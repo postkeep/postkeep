@@ -1,0 +1,21 @@
+# Expected result | pull request title. check-mr-title.sh --self-test runs these.
+pass|fix(store): x
+pass|feat: add a migrate subcommand
+pass|feat(auth)!: require a resource indicator
+pass|ci: run the CI pipeline on GitHub
+pass|test(server): pin the 12 tools, their schemas and annotations
+pass|docs(site-v2): 2fa notes
+pass|revert: undo the pool change
+pass|chore: 1 more thing
+pass|fix: handle an empty subject (#12)
+fail|Fix stuff
+fail|fix(store): Handle an empty subject
+fail|fix: X
+fail|feature: add a thing
+fail|Feat: add a thing
+fail|fix(Store): x
+fail|fix(store) : x
+fail|fix(store):x
+fail|fix(store): 
+fail|fix():  x
+fail|wip

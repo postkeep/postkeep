@@ -1,0 +1,17 @@
+# Keep the build context small and free of secrets.
+target/
+.git/
+.github/
+.config/
+deploy/
+docs/
+**/*.db
+**/*.db-*
+**/*.sqlite
+.env
+.env.*
+*.key
+*.pem
+master.key
+# The image pins its own toolchain through the base image.
+rust-toolchain.toml

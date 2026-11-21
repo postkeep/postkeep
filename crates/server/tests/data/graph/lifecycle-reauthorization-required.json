@@ -1,0 +1,11 @@
+{
+  "value": [
+    {
+      "subscriptionId": "0e8f1b3a-4c5d-4e6f-9a0b-1c2d3e4f5a6b",
+      "subscriptionExpirationDateTime": "2026-10-15T08:50:00.0000000Z",
+      "tenantId": "84bd8158-6d4d-4958-8b9f-9d6445542f95",
+      "clientState": "recorded-client-state",
+      "lifecycleEvent": "reauthorizationRequired"
+    }
+  ]
+}

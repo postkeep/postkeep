@@ -1,0 +1,17 @@
+{
+  "about": "Files copied from the brand source at this commit by scripts/sync-design.ts. Do not edit them here.",
+  "commit": "118377d7a8ed85511e57078297105eecf8c58670",
+  "files": {
+    "src/design/tokens.css": "b06106ed8a43bd5faef6c6c492e82f77d2167e79b88c31a807d480b256f7f8a1",
+    "public/favicon.svg": "850f9bf40c57c6ef510afda0ac7f9b74b3505b2183f41d8a0f4d4e164d4cc192",
+    "public/favicon.ico": "e2e3fbc55dafcf040fc9aec9c62965e592d7315c3191ba6964b3c6d7191f0851",
+    "public/apple-touch-icon.png": "0e921af43b790ec600c80d14d74dcf3253490d24534e453ac903a680f56a1758",
+    "public/assets/lockup-kelp.svg": "4ebeb7eeccd7d39c429c064d30459e511c95f1d64dd769ba2a962a9a2a2fcfc1",
+    "public/assets/lockup-reversed.svg": "aead1fcbb31f290f0797d2dd674a59ef48f3d1d299964ad929b91ec911346415",
+    "public/assets/og-postkeep-dev-1200x630.png": "f3e9945a79272dab6af6bd7f28d4512dc055c50643928a31c51047db1f12bcd2",
+    "public/fonts/InstrumentSans-latin.woff2": "a543caa73fe82f59a2231177c9fec0af4fc651ac42be6da5dba2c50873c4aa85",
+    "public/fonts/InstrumentSans-OFL.txt": "9e27a72ed30eb49a08678f6a5d6ed98ec7ba5368f541637ee0683ec9134ef966",
+    "public/fonts/JetBrainsMono-latin.woff2": "dd479796d4a439ad91fb17b8f6bf019e5ba9acecf874be47fe47d2db6ee0e8c7",
+    "public/fonts/JetBrainsMono-OFL.txt": "b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d"
+  }
+}

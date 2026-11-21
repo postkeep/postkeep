@@ -1,0 +1,47 @@
+# Docker Compose deployment for postkeep. Steps: docs/deployment.md#docker-compose
+
+services:
+  postkeep:
+    image: postkeep/postkeep:${IMAGE_TAG:-latest}
+    # To build from source instead of pulling the image:
+    # build: ../..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTKEEP_PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env}
+      POSTKEEP_MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      POSTKEEP_ALLOWED_EMAILS: ${ALLOWED_EMAILS:-${POSTKEEP_ALLOWED_EMAILS:-}}
+      # The bundled Caddy sets X-Forwarded-For; use the header of your own
+      # proxy otherwise, or leave empty if nothing sits in front.
+      POSTKEEP_CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-${POSTKEEP_CLIENT_IP_HEADER:-}}
+      POSTKEEP_LOG: ${LOG:-${POSTKEEP_LOG:-info}}
+      # To use PostgreSQL instead of the bundled SQLite file, set DATABASE_URL
+      # in .env (such as postgres://postkeep:<password>@<host>/postkeep) and
+      # uncomment this:
+      # POSTKEEP_DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+    volumes:
+      - data:/data
+    ports:
+      # Only reachable from this machine; put a TLS proxy in front.
+      - "127.0.0.1:8080:8080"
+
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on: [postkeep]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env when using the caddy profile}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,1354 @@
+{
+  "slots": {
+    "meta.home.title": {
+      "n": "M1",
+      "text": "postkeep: an open-source MCP server for your email"
+    },
+    "meta.home.description": {
+      "n": "M2",
+      "text": "Let your agent search, read, reply to and file your mail. postkeep is a free, MIT-licensed MCP server you host, for iCloud, Gmail, Outlook and more."
+    },
+    "meta.og.title": {
+      "n": "M3",
+      "text": "postkeep: your agent reads and answers your mail. You run the server."
+    },
+    "meta.og.description": {
+      "n": "M4",
+      "text": "A free, MIT-licensed MCP server for iCloud, Gmail, Outlook, Fastmail, Yahoo and IMAP. Your agent searches, reads, replies and files, with new-mail webhooks."
+    },
+    "meta.og.imageAlt": {
+      "n": "M5",
+      "text": "The postkeep logo above the words “Your agent reads and answers your mail. You run the server.”, and a looped line between the mailboxes it works with and the agent apps."
+    },
+    "meta.docs.title": {
+      "n": "M6",
+      "text": "Getting started · postkeep docs"
+    },
+    "meta.docs.description": {
+      "n": "M7",
+      "text": "Install postkeep, connect a mailbox and your agent app, turn on new-mail webhooks, and configure your server."
+    },
+    "meta.compare.description": {
+      "n": "M9",
+      "text": "Run postkeep yourself, free under the MIT License, or, once it opens, let postkeep Cloud run it for you."
+    },
+    "meta.404.title": {
+      "n": "M10",
+      "text": "Page not found · postkeep"
+    },
+    "nav.links[0]": {
+      "n": "N2",
+      "text": "What it does",
+      "kind": "link"
+    },
+    "nav.links[1]": {
+      "n": "N3",
+      "text": "Install",
+      "kind": "link"
+    },
+    "nav.links[2]": {
+      "n": "N4",
+      "text": "Docs",
+      "kind": "link",
+      "to": "/docs/"
+    },
+    "nav.links[3]": {
+      "n": "N5",
+      "text": "Cloud or self-host",
+      "kind": "link"
+    },
+    "nav.source": {
+      "n": "N6",
+      "text": "Source",
+      "kind": "link"
+    },
+    "nav.cloud": {
+      "n": "N7",
+      "text": "postkeep Cloud",
+      "kind": "link"
+    },
+    "nav.skip": {
+      "n": "N8",
+      "text": "Skip to content"
+    },
+    "nav.menu.open": {
+      "n": "N9",
+      "text": "Menu"
+    },
+    "nav.menu.close": {
+      "n": "N10",
+      "text": "Close"
+    },
+    "nav.theme.label": {
+      "n": "N11",
+      "text": "Theme"
+    },
+    "nav.theme.light": {
+      "n": "N12",
+      "text": "Light"
+    },
+    "nav.theme.dark": {
+      "n": "N13",
+      "text": "Dark"
+    },
+    "nav.theme.system": {
+      "n": "N14",
+      "text": "Match device"
+    },
+    "home.hero.eyebrow": {
+      "n": "H138",
+      "text": "iCloud · Gmail · Outlook · Fastmail · Yahoo · IMAP"
+    },
+    "home.hero.headline": {
+      "n": "H2",
+      "text": "Your agent reads and answers your mail. You run the server."
+    },
+    "home.hero.subhead": {
+      "n": "H3",
+      "text": "postkeep is a free, MIT-licensed MCP server for the mail you already have. Your agent can search, read, reply and file, and a webhook can tell it when new mail arrives."
+    },
+    "home.hero.primary": {
+      "n": "H4",
+      "text": "Get started",
+      "kind": "link",
+      "to": "/docs/quickstart/"
+    },
+    "home.hero.secondary": {
+      "n": "H5",
+      "text": "View the source",
+      "kind": "link"
+    },
+    "home.agent.window.title": {
+      "n": "H139",
+      "text": "Today’s mail"
+    },
+    "home.agent.window.ask": {
+      "n": "H140",
+      "text": "What needs a reply today?"
+    },
+    "home.agent.window.usedLabel": {
+      "n": "H141",
+      "text": "Used"
+    },
+    "home.agent.window.used": {
+      "n": "H142",
+      "text": "search_messages, get_message"
+    },
+    "home.agent.window.found": {
+      "n": "H143",
+      "text": "Work · 14 unread"
+    },
+    "home.agent.window.need": {
+      "n": "H144",
+      "text": "3 need a reply"
+    },
+    "home.agent.window.rows[0].initials": {
+      "n": "H145",
+      "text": "NW"
+    },
+    "home.agent.window.rows[0].from": {
+      "n": "H146",
+      "text": "Northwind"
+    },
+    "home.agent.window.rows[0].subject": {
+      "n": "H147",
+      "text": "Invoice 1042 · October"
+    },
+    "home.agent.window.rows[0].tag": {
+      "n": "H148",
+      "text": "Invoice due"
+    },
+    "home.agent.window.rows[0].date": {
+      "n": "H149",
+      "text": "Oct 24"
+    },
+    "home.agent.window.rows[1].initials": {
+      "n": "H150",
+      "text": "OT"
+    },
+    "home.agent.window.rows[1].from": {
+      "n": "H151",
+      "text": "Ops team"
+    },
+    "home.agent.window.rows[1].subject": {
+      "n": "H152",
+      "text": "Re: Launch checklist"
+    },
+    "home.agent.window.rows[1].tag": {
+      "n": "H153",
+      "text": "Question"
+    },
+    "home.agent.window.rows[1].date": {
+      "n": "H154",
+      "text": "Oct 22"
+    },
+    "home.agent.window.rows[2].initials": {
+      "n": "H155",
+      "text": "SB"
+    },
+    "home.agent.window.rows[2].from": {
+      "n": "H156",
+      "text": "Studio billing"
+    },
+    "home.agent.window.rows[2].subject": {
+      "n": "H157",
+      "text": "Payment details updated"
+    },
+    "home.agent.window.rows[2].tag": {
+      "n": "H158",
+      "text": "Check details"
+    },
+    "home.agent.window.rows[2].date": {
+      "n": "H159",
+      "text": "Oct 21"
+    },
+    "home.agent.window.more": {
+      "n": "H160",
+      "text": "+11 more"
+    },
+    "home.agent.window.reply": {
+      "n": "H161",
+      "text": "First, Northwind’s October invoice (1042). Here’s a reply for that thread. Send it?"
+    },
+    "home.agent.window.toLabel": {
+      "n": "H162",
+      "text": "To"
+    },
+    "home.agent.window.to": {
+      "n": "H163",
+      "text": "billing@northwind.example"
+    },
+    "home.agent.window.thread": {
+      "n": "H164",
+      "text": "Same thread"
+    },
+    "home.agent.window.draft": {
+      "n": "H165",
+      "text": "Hi, thanks for the October invoice. It’s in, and we’ll pay it this week."
+    },
+    "home.agent.window.draftNote": {
+      "n": "H166",
+      "text": "Plain text · no attachments"
+    },
+    "home.agent.window.ok": {
+      "n": "H167",
+      "text": "Send it."
+    },
+    "home.agent.window.sent": {
+      "n": "H168",
+      "text": "sent to Northwind, in the same thread"
+    },
+    "home.agent.window.sentTag": {
+      "n": "H169",
+      "text": "Sent"
+    },
+    "home.calls.title": {
+      "n": "H170",
+      "text": "MCP calls"
+    },
+    "home.calls[0].args": {
+      "n": "H171",
+      "text": "{ \"unread_only\": true, \"limit\": 20 }"
+    },
+    "home.calls[0].result": {
+      "n": "H172",
+      "text": "14 messages, newest first"
+    },
+    "home.calls[1].args": {
+      "n": "H173",
+      "text": "{ \"id\": \"<id from search_messages>\" }"
+    },
+    "home.calls[1].result": {
+      "n": "H174",
+      "text": "Invoice 1042 · October, the body as Markdown"
+    },
+    "home.calls[2].args": {
+      "n": "H175",
+      "text": "{ \"id\": \"<same id>\",\n  \"body\": \"Hi, thanks for the October invoice. It’s in, and…\"\n}"
+    },
+    "home.calls[2].result": {
+      "n": "H176",
+      "text": "sent, in the same thread"
+    },
+    "home.calls.footer": {
+      "n": "H177",
+      "text": "Streamable HTTP · OAuth 2.1"
+    },
+    "home.install.kicker": {
+      "n": "H10",
+      "text": "Install"
+    },
+    "home.install.title": {
+      "n": "H11",
+      "text": "A key, a container, and HTTPS"
+    },
+    "home.install.tabs.docker": {
+      "n": "H13",
+      "text": "Docker"
+    },
+    "home.install.snippet": {
+      "n": "H14",
+      "kind": "code",
+      "lang": "sh",
+      "text": "# 1. Generate a master key once, and keep a copy of master.key somewhere safe\ntest -s master.key || (umask 077 && docker run --rm {image} generate-key > master.key)\n\n# 2. From the folder with master.key, start the server behind your HTTPS proxy\ndocker run -d --name postkeep -p 127.0.0.1:8080:8080 \\\n  -v postkeep:/data \\\n  -e POSTKEEP_PUBLIC_URL=https://mail.example.com \\\n  -e POSTKEEP_MASTER_KEY=\"$(cat master.key)\" \\\n  -e POSTKEEP_ALLOWED_EMAILS=alice@example.com \\\n  {image}"
+    },
+    "home.install.tabs.compose": {
+      "n": "H15",
+      "text": "Docker Compose"
+    },
+    "home.install.snippet.compose": {
+      "n": "H16",
+      "kind": "code",
+      "lang": "sh",
+      "text": "# App plus Caddy, which gets the HTTPS certificate for you\ngit clone {repo}\ncd postkeep/deploy/compose\ncp -i .env.example .env && chmod 600 .env\n# Generate MASTER_KEY once, and keep a copy somewhere safe\ndocker run --rm {image} generate-key\n# edit .env: PUBLIC_URL, MASTER_KEY, ALLOWED_EMAILS, DOMAIN, CLIENT_IP_HEADER\ndocker compose --profile caddy up -d"
+    },
+    "home.install.tabs.binary": {
+      "n": "H17",
+      "text": "Binary"
+    },
+    "home.install.snippet.binary": {
+      "n": "H18",
+      "kind": "code",
+      "lang": "sh",
+      "text": "# Rust 1.94 or newer\ncargo build --release\n# Generate a master key once, and keep a copy of master.key somewhere safe\ntest -s master.key || (umask 077 && ./target/release/postkeep generate-key > master.key)\n\nexport POSTKEEP_BIND=127.0.0.1:8080\nexport POSTKEEP_PUBLIC_URL=https://mail.example.com\nexport POSTKEEP_MASTER_KEY_FILE=$PWD/master.key\nexport POSTKEEP_ALLOWED_EMAILS=alice@example.com\n./target/release/postkeep serve"
+    },
+    "home.install.copy": {
+      "n": "H19",
+      "text": "Copy"
+    },
+    "home.install.copied": {
+      "n": "H20",
+      "text": "Copied"
+    },
+    "home.install.connect.url": {
+      "n": "H22",
+      "kind": "code",
+      "text": "https://mail.example.com/mcp"
+    },
+    "home.install.needs": {
+      "n": "H23",
+      "text": "Back up the master key apart from the data, and keep the same key across restarts and upgrades: it decrypts the saved passwords and sign-ins."
+    },
+    "home.install.steps[0].title": {
+      "n": "H178",
+      "text": "Generate a master key"
+    },
+    "home.install.steps[0].text": {
+      "n": "H179",
+      "text": "It encrypts the saved passwords and sign-ins. Keep a copy somewhere safe."
+    },
+    "home.install.steps[1].title": {
+      "n": "H180",
+      "text": "Start the server behind HTTPS"
+    },
+    "home.install.steps[1].text": {
+      "n": "H181",
+      "text": "One container or one binary, with your public address and who may connect."
+    },
+    "home.install.steps[2].title": {
+      "n": "H182",
+      "text": "Add it to your agent app"
+    },
+    "home.install.steps[2].text": {
+      "n": "H183",
+      "text": "Paste the /mcp address. The app opens postkeep’s sign-in page."
+    },
+    "home.install.link": {
+      "n": "H24",
+      "text": "Deployment guide: Docker, Compose, Fly.io, and the binary with systemd",
+      "mobile": "Deployment guide",
+      "kind": "link",
+      "to": "/docs/deployment/"
+    },
+    "home.works.kicker": {
+      "n": "H25",
+      "text": "Works with"
+    },
+    "home.works.title": {
+      "n": "H26",
+      "text": "The agent apps and mailboxes you already use"
+    },
+    "home.works.apps.title": {
+      "n": "H27",
+      "text": "Agent apps"
+    },
+    "home.works.apps.lead": {
+      "n": "H28",
+      "text": "postkeep speaks MCP over Streamable HTTP, with OAuth sign-in. Add your server’s /mcp address, and the app opens postkeep’s sign-in page."
+    },
+    "home.works.apps[0].name": {
+      "n": "H29",
+      "text": "Claude"
+    },
+    "home.works.apps[0].how": {
+      "n": "H30",
+      "text": "Add a custom connector and paste the address."
+    },
+    "home.works.apps[1].name": {
+      "n": "H31",
+      "text": "ChatGPT"
+    },
+    "home.works.apps[1].how": {
+      "n": "H32",
+      "text": "Create an app in developer mode, with the address and OAuth."
+    },
+    "home.works.apps[2].name": {
+      "n": "H33",
+      "text": "Grok"
+    },
+    "home.works.apps[2].how": {
+      "n": "H34",
+      "text": "Add a custom connector with the address."
+    },
+    "home.works.apps[3].name": {
+      "n": "H35",
+      "text": "Cursor"
+    },
+    "home.works.apps[3].how": {
+      "n": "H36",
+      "text": "Add the address to ~/.cursor/mcp.json."
+    },
+    "home.works.apps[4].name": {
+      "n": "H38",
+      "text": "VS Code"
+    },
+    "home.works.apps[4].how": {
+      "n": "H39",
+      "text": "Run MCP: Add Server, choose HTTP, and paste the address."
+    },
+    "home.works.apps.more": {
+      "n": "H40",
+      "text": "Other remote MCP clients with OAuth sign-in connect the same way. Clients that only run local servers can use a bridge such as mcp-remote."
+    },
+    "home.works.boxes.title": {
+      "n": "H41",
+      "text": "Mailboxes"
+    },
+    "home.works.boxes[0].name": {
+      "n": "H42",
+      "text": "iCloud Mail"
+    },
+    "home.works.boxes[0].how": {
+      "n": "H43",
+      "text": "An app-specific password. The sign-in page shows the steps."
+    },
+    "home.works.boxes[1].name": {
+      "n": "H44",
+      "text": "Gmail"
+    },
+    "home.works.boxes[1].how": {
+      "n": "H45",
+      "text": "An app password, or Sign in with Google. Labels show up as folders."
+    },
+    "home.works.boxes[2].name": {
+      "n": "H46",
+      "text": "Outlook.com and Microsoft 365"
+    },
+    "home.works.boxes[2].how": {
+      "n": "H47",
+      "text": "Sign in with Microsoft, with a personal or a work or school account."
+    },
+    "home.works.boxes[3].name": {
+      "n": "H48",
+      "text": "Fastmail"
+    },
+    "home.works.boxes[3].how": {
+      "n": "H49",
+      "text": "An app password."
+    },
+    "home.works.boxes[4].name": {
+      "n": "H50",
+      "text": "Yahoo Mail"
+    },
+    "home.works.boxes[4].how": {
+      "n": "H51",
+      "text": "An app password."
+    },
+    "home.works.boxes[5].name": {
+      "n": "H52",
+      "text": "Your own IMAP server"
+    },
+    "home.works.boxes[5].how": {
+      "n": "H53",
+      "text": "Added by the server’s operator, with IMAP and SMTP settings."
+    },
+    "home.works.boxes.footnote": {
+      "n": "H54",
+      "text": "For Outlook, and for Gmail with Sign in with Google, you register one OAuth app with Microsoft or Google. The setup guides walk you through it. Each connection is one mailbox, so add the server to your agent app once for each mailbox you want."
+    },
+    "home.tools.kicker": {
+      "n": "H68",
+      "text": "Tools"
+    },
+    "home.tools.title": {
+      "n": "H69",
+      "text": "Seventeen tools, for your mail"
+    },
+    "home.tools.lead": {
+      "n": "H70",
+      "text": "Plain names, one job each. They work the same way across providers, with a few differences the docs list, such as Gmail sending deleted mail to Trash."
+    },
+    "home.tools.groups.read": {
+      "n": "H71",
+      "text": "Read"
+    },
+    "home.tools.groups.send": {
+      "n": "H72",
+      "text": "Send"
+    },
+    "home.tools.groups.organize": {
+      "n": "H73",
+      "text": "Organize"
+    },
+    "home.tools.groups.alerts": {
+      "n": "H74",
+      "text": "Alerts"
+    },
+    "home.tools[0].name": {
+      "n": "H75",
+      "kind": "code",
+      "text": "list_folders"
+    },
+    "home.tools[0].desc": {
+      "n": "H76",
+      "text": "Lists your folders and their roles, such as Inbox, Sent and Trash."
+    },
+    "home.tools[1].name": {
+      "n": "H77",
+      "kind": "code",
+      "text": "search_messages"
+    },
+    "home.tools[1].desc": {
+      "n": "H78",
+      "text": "Searches a folder by sender, recipient, subject, text, date, unread or flagged, newest first."
+    },
+    "home.tools[2].name": {
+      "n": "H79",
+      "kind": "code",
+      "text": "get_message"
+    },
+    "home.tools[2].desc": {
+      "n": "H80",
+      "text": "Reads one message: headers, the body as Markdown (links and images as references, never loaded) or plain text, and the attachment list with ids; body_format: \"html\" gives the raw HTML instead (Markdown is recommended for LLMs). It stays unread."
+    },
+    "home.tools[3].name": {
+      "n": "H81",
+      "kind": "code",
+      "text": "send_message"
+    },
+    "home.tools[3].desc": {
+      "n": "H82",
+      "text": "Sends a new plain-text email with any attachments or forwards a message with its attachments. Saves a copy to Sent by default."
+    },
+    "home.tools[4].name": {
+      "n": "H83",
+      "kind": "code",
+      "text": "reply_to_message"
+    },
+    "home.tools[4].desc": {
+      "n": "H84",
+      "text": "Replies, or replies to all, with any attachments, and keeps the thread together."
+    },
+    "home.tools[5].name": {
+      "n": "H85",
+      "kind": "code",
+      "text": "update_flags"
+    },
+    "home.tools[5].desc": {
+      "n": "H86",
+      "text": "Marks a message read or unread, flagged or unflagged."
+    },
+    "home.tools[6].name": {
+      "n": "H87",
+      "kind": "code",
+      "text": "move_message"
+    },
+    "home.tools[6].desc": {
+      "n": "H88",
+      "text": "Moves a message to another folder."
+    },
+    "home.tools[7].name": {
+      "n": "H89",
+      "kind": "code",
+      "text": "delete_message"
+    },
+    "home.tools[7].desc": {
+      "n": "H90",
+      "text": "Moves a message to the trash, or deletes it for good when you ask."
+    },
+    "home.tools[8].name": {
+      "n": "H91",
+      "kind": "code",
+      "text": "create_folder"
+    },
+    "home.tools[8].desc": {
+      "n": "H92",
+      "text": "Creates a new folder."
+    },
+    "home.tools[9].name": {
+      "n": "H93",
+      "kind": "code",
+      "text": "get_webhook_status"
+    },
+    "home.tools[9].desc": {
+      "n": "H94",
+      "text": "Shows whether this mailbox’s new-mail webhook is active, paused, off, not set up, unreadable, waiting for a new password, or rules_unreadable (its filter rules can’t be read or compiled), with its outbox limits and filter rule counts."
+    },
+    "home.tools[10].name": {
+      "n": "H95",
+      "kind": "code",
+      "text": "set_webhook_enabled"
+    },
+    "home.tools[10].desc": {
+      "n": "H96",
+      "text": "Turns this mailbox’s new-mail webhook on or off."
+    },
+    "home.tools[11].name": {
+      "n": "H97",
+      "kind": "code",
+      "text": "set_webhook_outbox_limits"
+    },
+    "home.tools[11].desc": {
+      "n": "H98",
+      "text": "Sets how long new-mail events are kept, and how many."
+    },
+    "home.tools[12].name": {
+      "n": "H130",
+      "kind": "code",
+      "text": "download_attachment"
+    },
+    "home.tools[12].desc": {
+      "n": "H131",
+      "text": "Downloads one attachment of a message: images as images, text as text, other files as base64, or any file as base64 with base64: true, up to 3 MiB. It stays unread."
+    },
+    "home.tools[13].name": {
+      "n": "H132",
+      "kind": "code",
+      "text": "list_webhook_filters"
+    },
+    "home.tools[13].desc": {
+      "n": "H133",
+      "text": "Lists this mailbox’s webhook filter rules, oldest first, a page at a time."
+    },
+    "home.tools[14].name": {
+      "n": "H134",
+      "kind": "code",
+      "text": "add_webhook_filter"
+    },
+    "home.tools[14].desc": {
+      "n": "H135",
+      "text": "Adds a rule that chooses which new mail sends an event."
+    },
+    "home.tools[15].name": {
+      "n": "H136",
+      "kind": "code",
+      "text": "remove_webhook_filter"
+    },
+    "home.tools[15].desc": {
+      "n": "H137",
+      "text": "Removes one filter rule, or all of them."
+    },
+    "home.tools[16].name": {
+      "n": "H205",
+      "kind": "code",
+      "text": "create_draft"
+    },
+    "home.tools[16].desc": {
+      "n": "H206",
+      "text": "Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it. Not available for Outlook or for Gmail with Sign in with Google."
+    },
+    "home.tools.after": {
+      "n": "H99",
+      "text": "You set the webhook address and its secrets yourself, on your server’s account page."
+    },
+    "home.tools.link": {
+      "n": "H100",
+      "text": "Full tool reference",
+      "kind": "link",
+      "to": "/docs/reference/tools/"
+    },
+    "home.selfhost.kicker": {
+      "n": "H101",
+      "text": "Self-host"
+    },
+    "home.selfhost.title": {
+      "n": "H102",
+      "text": "Yours to run"
+    },
+    "home.selfhost.lead": {
+      "n": "H103",
+      "text": "postkeep is one Rust binary, also published as a container image for linux/amd64 and linux/arm64. You choose where it lives and who can use it."
+    },
+    "home.selfhost.points[0].title": {
+      "n": "H104",
+      "text": "Fits the machine you have"
+    },
+    "home.selfhost.points[0].text": {
+      "n": "H105",
+      "text": "A VPS, a home server, a container platform or Kubernetes. Give it HTTPS, the master key and a volume or PostgreSQL."
+    },
+    "home.selfhost.points[1].title": {
+      "n": "H106",
+      "text": "SQLite or PostgreSQL"
+    },
+    "home.selfhost.points[1].text": {
+      "n": "H107",
+      "text": "SQLite by default. Point it at PostgreSQL and set POSTKEEP_WEBHOOKS=false to run several replicas."
+    },
+    "home.selfhost.points[2].title": {
+      "n": "H108",
+      "text": "You hold the key"
+    },
+    "home.selfhost.points[2].text": {
+      "n": "H109",
+      "text": "Saved app passwords, Microsoft and Google sign-ins, webhook secrets, webhook filter patterns and stored events are encrypted with AES-256-GCM under data keys wrapped by a master key you generate."
+    },
+    "home.selfhost.points[3].title": {
+      "n": "H110",
+      "text": "You choose who connects"
+    },
+    "home.selfhost.points[3].text": {
+      "n": "H111",
+      "text": "List the addresses allowed to use your server in POSTKEEP_ALLOWED_EMAILS. postkeep checks it at sign-in and on every request."
+    },
+    "home.selfhost.points[4].title": {
+      "n": "H112",
+      "text": "An account page for each person"
+    },
+    "home.selfhost.points[4].text": {
+      "n": "H113",
+      "text": "At /account on your server, each person can see their connection, disconnect their agent apps, set up a webhook, or delete what the server keeps about them."
+    },
+    "home.mit.kicker": {
+      "n": "H115",
+      "text": "Open source"
+    },
+    "home.mit.title": {
+      "n": "H116",
+      "text": "MIT licensed, and yours to change"
+    },
+    "home.mit.lead": {
+      "n": "H117",
+      "text": "Use it, change it and share it, free of charge. The code, the threat model and the October 2026 security reviews are all in the repository."
+    },
+    "home.mit.links[0]": {
+      "n": "H184",
+      "text": "Source on GitHub",
+      "kind": "link"
+    },
+    "home.mit.links[1]": {
+      "n": "H185",
+      "text": "Image on Docker Hub",
+      "kind": "link"
+    },
+    "home.cloud.title": {
+      "n": "H126",
+      "text": "postkeep Cloud"
+    },
+    "home.cloud.text": {
+      "n": "H127",
+      "text": "The hosted service built on this server. It isn’t open yet.",
+      "mobile": "The hosted service. It isn’t open yet."
+    },
+    "home.cloud.button": {
+      "n": "H128",
+      "text": "About postkeep Cloud",
+      "kind": "link"
+    },
+    "home.closing.title[0]": {
+      "n": "H201",
+      "text": "Your agent does the mail work."
+    },
+    "home.closing.title[1]": {
+      "n": "H202",
+      "text": "You keep the free end of the line."
+    },
+    "home.closing.lead": {
+      "n": "H203",
+      "text": "Run the server, add its /mcp address to your agent app, then ask in your own words."
+    },
+    "home.closing.secondary": {
+      "n": "H204",
+      "text": "Read the docs",
+      "kind": "link",
+      "to": "/docs/"
+    },
+    "docs.index.title": {
+      "n": "D1",
+      "text": "Getting started"
+    },
+    "docs.index.lead": {
+      "n": "D2",
+      "text": "Six steps from an empty server to an agent that can use your mail."
+    },
+    "docs.index.steps[0].title": {
+      "n": "D3",
+      "text": "Install"
+    },
+    "docs.index.steps[0].text": {
+      "n": "D4",
+      "text": "Run the container or the binary behind HTTPS, with a master key and storage."
+    },
+    "docs.index.steps[0].links[0]": {
+      "n": "D5",
+      "text": "Quickstart",
+      "kind": "link",
+      "to": "/docs/quickstart/"
+    },
+    "docs.index.steps[0].links[1]": {
+      "n": "D6",
+      "text": "Deploying postkeep",
+      "kind": "link",
+      "to": "/docs/deployment/"
+    },
+    "docs.index.steps[0].links[2]": {
+      "n": "D7",
+      "text": "Docker",
+      "kind": "link",
+      "to": "/docs/deployment/#docker"
+    },
+    "docs.index.steps[0].links[3]": {
+      "n": "D8",
+      "text": "Docker Compose",
+      "kind": "link",
+      "to": "/docs/deployment/#docker-compose"
+    },
+    "docs.index.steps[0].links[4]": {
+      "n": "D9",
+      "text": "Fly.io",
+      "kind": "link",
+      "to": "/docs/deployment/#flyio"
+    },
+    "docs.index.steps[0].links[5]": {
+      "n": "D10",
+      "text": "Binary and systemd",
+      "kind": "link",
+      "to": "/docs/deployment/#plain-binary"
+    },
+    "docs.index.steps[1].title": {
+      "n": "D11",
+      "text": "Connect a mailbox"
+    },
+    "docs.index.steps[1].text": {
+      "n": "D12",
+      "text": "Pick your mailbox’s provider for its sign-in steps."
+    },
+    "docs.index.steps[1].links[0]": {
+      "n": "D13",
+      "text": "Mail providers",
+      "kind": "link",
+      "to": "/docs/providers/"
+    },
+    "docs.index.steps[1].links[1]": {
+      "n": "D14",
+      "text": "iCloud Mail",
+      "kind": "link",
+      "to": "/docs/providers/icloud/"
+    },
+    "docs.index.steps[1].links[2]": {
+      "n": "D15",
+      "text": "Fastmail",
+      "kind": "link",
+      "to": "/docs/providers/fastmail/"
+    },
+    "docs.index.steps[1].links[3]": {
+      "n": "D16",
+      "text": "Yahoo Mail",
+      "kind": "link",
+      "to": "/docs/providers/yahoo/"
+    },
+    "docs.index.steps[1].links[4]": {
+      "n": "D17",
+      "text": "Any IMAP server",
+      "kind": "link",
+      "to": "/docs/providers/imap/"
+    },
+    "docs.index.steps[1].links[5]": {
+      "n": "D18",
+      "text": "Outlook",
+      "kind": "link",
+      "to": "/docs/providers/microsoft/"
+    },
+    "docs.index.steps[1].links[6]": {
+      "n": "D19",
+      "text": "Gmail",
+      "kind": "link",
+      "to": "/docs/providers/google/"
+    },
+    "docs.index.steps[2].title": {
+      "n": "D20",
+      "text": "Connect your agent app"
+    },
+    "docs.index.steps[2].text": {
+      "n": "D21",
+      "text": "Add your server’s /mcp address to your agent app, then sign in with the mailbox you want it to use."
+    },
+    "docs.index.steps[2].links[0]": {
+      "n": "D22",
+      "text": "Agent apps",
+      "kind": "link",
+      "to": "/docs/clients/"
+    },
+    "docs.index.steps[2].links[1]": {
+      "n": "D23",
+      "text": "Claude",
+      "kind": "link",
+      "to": "/docs/clients/#claude"
+    },
+    "docs.index.steps[2].links[2]": {
+      "n": "D24",
+      "text": "ChatGPT",
+      "kind": "link",
+      "to": "/docs/clients/#chatgpt"
+    },
+    "docs.index.steps[2].links[3]": {
+      "n": "D25",
+      "text": "Grok",
+      "kind": "link",
+      "to": "/docs/clients/#grok"
+    },
+    "docs.index.steps[2].links[4]": {
+      "n": "D26",
+      "text": "Cursor",
+      "kind": "link",
+      "to": "/docs/clients/#cursor"
+    },
+    "docs.index.steps[2].links[5]": {
+      "n": "D27",
+      "text": "VS Code",
+      "kind": "link",
+      "to": "/docs/clients/#vs-code"
+    },
+    "docs.index.steps[3].title": {
+      "n": "D28",
+      "text": "Turn on new-mail alerts"
+    },
+    "docs.index.steps[3].text": {
+      "n": "D29",
+      "text": "Turn on a webhook on your account page, and receive a small event, signed by default, when mail lands in the Inbox."
+    },
+    "docs.index.steps[3].links[0]": {
+      "n": "D30",
+      "text": "New-mail webhooks",
+      "kind": "link",
+      "to": "/docs/webhooks/"
+    },
+    "docs.index.steps[3].links[1]": {
+      "n": "D31",
+      "text": "How new mail is detected",
+      "kind": "link",
+      "to": "/docs/webhooks/#how-new-mail-is-detected"
+    },
+    "docs.index.steps[3].links[2]": {
+      "n": "D32",
+      "text": "Verifying the signature",
+      "kind": "link",
+      "to": "/docs/webhooks/#verifying-the-signature"
+    },
+    "docs.index.steps[3].links[3]": {
+      "n": "D33",
+      "text": "Delivery and retries",
+      "kind": "link",
+      "to": "/docs/webhooks/#delivery-and-retries"
+    },
+    "docs.index.steps[4].title": {
+      "n": "D34",
+      "text": "Configure"
+    },
+    "docs.index.steps[4].text": {
+      "n": "D35",
+      "text": "Every setting is an environment variable."
+    },
+    "docs.index.steps[4].links[0]": {
+      "n": "D36",
+      "text": "Configuration reference",
+      "kind": "link",
+      "to": "/docs/configuration/"
+    },
+    "docs.index.steps[4].links[1]": {
+      "n": "D37",
+      "text": "Who can connect",
+      "kind": "link",
+      "to": "/docs/configuration/#who-can-connect"
+    },
+    "docs.index.steps[4].links[2]": {
+      "n": "D38",
+      "text": "Microsoft and Google sign-in",
+      "kind": "link",
+      "to": "/docs/configuration/#microsoft-and-google-sign-in"
+    },
+    "docs.index.steps[4].links[3]": {
+      "n": "D39",
+      "text": "Mail providers",
+      "kind": "link",
+      "to": "/docs/configuration/#mail-providers"
+    },
+    "docs.index.steps[5].title": {
+      "n": "D40",
+      "text": "Security"
+    },
+    "docs.index.steps[5].text": {
+      "n": "D41",
+      "text": "What the server protects and how, and how to report a problem privately."
+    },
+    "docs.index.steps[5].links[0]": {
+      "n": "D42",
+      "text": "Security",
+      "kind": "link",
+      "to": "/docs/security/"
+    },
+    "docs.index.steps[5].links[1]": {
+      "n": "D43",
+      "text": "Threat model",
+      "kind": "link",
+      "to": "/docs/security/threat-model/"
+    },
+    "docs.index.steps[5].links[2]": {
+      "n": "D44",
+      "text": "Security audit, October 2026",
+      "kind": "link",
+      "to": "/docs/security/audit-2026-10/"
+    },
+    "docs.index.steps[5].links[3]": {
+      "n": "D45",
+      "text": "Security review: Outlook and Gmail support, October 2026",
+      "mobile": "Outlook and Gmail review, October 2026",
+      "kind": "link",
+      "to": "/docs/security/providers-review-2026-10/"
+    },
+    "docs.index.reference.title": {
+      "n": "D46",
+      "text": "Reference"
+    },
+    "docs.index.reference.links[0]": {
+      "n": "D47",
+      "text": "MCP tools",
+      "kind": "link",
+      "to": "/docs/reference/tools/"
+    },
+    "docs.index.reference.links[1]": {
+      "n": "D48",
+      "text": "Endpoints",
+      "kind": "link",
+      "to": "/docs/reference/endpoints/"
+    },
+    "docs.index.reference.links[2]": {
+      "n": "D49",
+      "text": "CLI",
+      "kind": "link",
+      "to": "/docs/reference/cli/"
+    },
+    "docs.index.reference.links[3]": {
+      "n": "D50",
+      "text": "FAQ",
+      "kind": "link",
+      "to": "/docs/faq/"
+    },
+    "docs.index.help": {
+      "n": "D51",
+      "text": "Stuck? Check the FAQ, or open an issue in the repository."
+    },
+    "docs.pager.prev": {
+      "n": "D52",
+      "text": "Previous"
+    },
+    "docs.pager.next": {
+      "n": "D53",
+      "text": "Next"
+    },
+    "docs.rail.title": {
+      "n": "D54",
+      "text": "On this page"
+    },
+    "compare.title": {
+      "n": "C1",
+      "text": "Cloud or self-host"
+    },
+    "compare.selfhost.title": {
+      "n": "C3",
+      "text": "Self-host"
+    },
+    "compare.selfhost.tagline": {
+      "n": "C4",
+      "text": "You run it, and you own it."
+    },
+    "compare.selfhost.good[0]": {
+      "n": "C6",
+      "text": "Your server, your database and your master key."
+    },
+    "compare.selfhost.good[1]": {
+      "n": "C7",
+      "text": "Every setting is yours: which providers to offer, who can connect, how long alerts are kept."
+    },
+    "compare.selfhost.good[2]": {
+      "n": "C8",
+      "text": "Read the code, and change it to suit you."
+    },
+    "compare.selfhost.button": {
+      "n": "C9",
+      "text": "Get started",
+      "kind": "link",
+      "to": "/docs/quickstart/"
+    },
+    "compare.selfhost.env": {
+      "n": "C40",
+      "text": ".env"
+    },
+    "compare.selfhost.connect": {
+      "n": "C41",
+      "text": "Add this address to your agent app:"
+    },
+    "compare.cloud.title": {
+      "n": "C10",
+      "text": "postkeep Cloud"
+    },
+    "compare.cloud.tagline": {
+      "n": "C11",
+      "text": "Hosted for you. It isn’t open yet."
+    },
+    "compare.cloud.good[0]": {
+      "n": "C12",
+      "text": "Free for 2 mailboxes, no card."
+    },
+    "compare.cloud.good[1]": {
+      "n": "C14",
+      "text": "You type your app password on a one-time postkeep page, so it stays out of the chat."
+    },
+    "compare.cloud.good[2]": {
+      "n": "C15",
+      "text": "People with roles, and keys that can be limited, on Business."
+    },
+    "compare.cloud.button": {
+      "n": "C16",
+      "text": "About postkeep Cloud",
+      "kind": "link"
+    },
+    "compare.footer": {
+      "n": "C39",
+      "text": "postkeep Cloud is built on this open-source server."
+    },
+    "compare.console.address": {
+      "n": "C42",
+      "text": "ops@northwind.example"
+    },
+    "compare.console.plan": {
+      "n": "C43",
+      "text": "Free"
+    },
+    "compare.console.tabs[0]": {
+      "n": "C44",
+      "text": "Overview"
+    },
+    "compare.console.tabs[1]": {
+      "n": "C45",
+      "text": "Settings"
+    },
+    "compare.console.tabs[2]": {
+      "n": "C46",
+      "text": "Billing"
+    },
+    "compare.console.mailboxes": {
+      "n": "C48",
+      "text": "Mailboxes"
+    },
+    "compare.console.provider": {
+      "n": "C49",
+      "text": "Gmail"
+    },
+    "compare.console.connected": {
+      "n": "C50",
+      "text": "Connected"
+    },
+    "compare.console.disconnect": {
+      "n": "C51",
+      "text": "Disconnect"
+    },
+    "compare.console.add": {
+      "n": "C52",
+      "text": "Add a mailbox"
+    },
+    "compare.console.addLine": {
+      "n": "C53",
+      "text": "Mailboxes your agent can reach. To add one, ask your agent.",
+      "mobile": "To add one, ask your agent."
+    },
+    "compare.console.messageLabel": {
+      "n": "C54",
+      "text": "Message for your agent"
+    },
+    "compare.console.message": {
+      "n": "C55",
+      "text": "Connect my Gmail to postkeep"
+    },
+    "compare.console.copyMessage": {
+      "n": "C56",
+      "text": "Copy message"
+    },
+    "compare.console.workspace": {
+      "n": "C57",
+      "text": "Workspace {name} · {plan}"
+    },
+    "compare.console.of": {
+      "n": "C58",
+      "text": "of {limit}"
+    },
+    "compare.console.planLine": {
+      "n": "C59",
+      "text": "{plan} plan"
+    },
+    "compare.console.inUse": {
+      "n": "C60",
+      "text": "{used} of {limit} in use"
+    },
+    "compare.console.alt": {
+      "n": "C61",
+      "text": "postkeep Cloud’s Overview, signed in as {email}: workspace {name} on the {plan} plan, {used} of {limit} mailboxes in use, a {provider} mailbox connected, and a message to copy so your agent adds another."
+    },
+    "compare.console.crumb": {
+      "n": "C62",
+      "text": "Workspace"
+    },
+    "compare.console.search": {
+      "n": "C63",
+      "text": "Search"
+    },
+    "compare.console.searchKey": {
+      "n": "C64",
+      "text": "⌘K"
+    },
+    "footer.columns[0].links[0]": {
+      "n": "F4",
+      "text": "What it does",
+      "kind": "link"
+    },
+    "footer.columns[0].links[1]": {
+      "n": "F5",
+      "text": "Install",
+      "kind": "link"
+    },
+    "footer.columns[0].links[3]": {
+      "n": "F7",
+      "text": "Cloud or self-host",
+      "kind": "link"
+    },
+    "footer.columns[2].links[0]": {
+      "n": "F18",
+      "text": "Source code",
+      "kind": "link"
+    },
+    "footer.columns[2].links[1]": {
+      "n": "F19",
+      "text": "Releases",
+      "kind": "link"
+    },
+    "footer.columns[2].links[2]": {
+      "n": "F20",
+      "text": "Changelog",
+      "kind": "link"
+    },
+    "footer.columns[2].links[5]": {
+      "n": "F23",
+      "text": "Security policy",
+      "kind": "link"
+    },
+    "footer.license": {
+      "n": "F25",
+      "text": "Free and open-source software under the MIT License."
+    },
+    "footer.copyright": {
+      "n": "F26",
+      "text": "© 2026 postkeep contributors"
+    },
+    "footer.trademark": {
+      "n": "F27",
+      "text": "postkeep is an independent project. It is not affiliated with, sponsored by or endorsed by Anthropic, Anysphere, Apple, Docker, Fastmail, GitHub, Google, Microsoft, OpenAI, xAI or Yahoo. Product names and logos are trademarks of their owners."
+    },
+    "404.badge": {
+      "n": "E1",
+      "text": "404"
+    },
+    "404.heading": {
+      "n": "E2",
+      "text": "Page not found"
+    },
+    "404.text": {
+      "n": "E3",
+      "text": "This page has moved, or the link has a typo."
+    },
+    "404.primary": {
+      "n": "E4",
+      "text": "Back to postkeep",
+      "kind": "link"
+    },
+    "404.secondary": {
+      "n": "E5",
+      "text": "Read the docs",
+      "kind": "link",
+      "to": "/docs/"
+    },
+    "home.mit.reviewed": {
+      "n": "H120",
+      "text": "Reviewed in the open"
+    },
+    "home.mit.crates.dir": {
+      "n": "H186",
+      "text": "crates/"
+    },
+    "home.mit.crates.title": {
+      "n": "H187",
+      "text": "Rust, in six crates"
+    },
+    "home.mit.crates[0].name": {
+      "n": "H188",
+      "text": "mail"
+    },
+    "home.mit.crates[0].text": {
+      "n": "H189",
+      "text": "IMAP and SMTP client, with presets for iCloud, Fastmail, Yahoo and Gmail"
+    },
+    "home.mit.crates[1].name": {
+      "n": "H190",
+      "text": "upstream"
+    },
+    "home.mit.crates[1].text": {
+      "n": "H191",
+      "text": "OAuth client and token refresh for Microsoft and Google"
+    },
+    "home.mit.crates[2].name": {
+      "n": "H192",
+      "text": "store"
+    },
+    "home.mit.crates[2].text": {
+      "n": "H193",
+      "text": "Storage: SQLite by default, PostgreSQL optional"
+    },
+    "home.mit.crates[3].name": {
+      "n": "H194",
+      "text": "auth"
+    },
+    "home.mit.crates[3].text": {
+      "n": "H195",
+      "text": "OAuth 2.1 server, plus the sign-in and account pages"
+    },
+    "home.mit.crates[4].name": {
+      "n": "H196",
+      "text": "webhook"
+    },
+    "home.mit.crates[4].text": {
+      "n": "H197",
+      "text": "Webhook delivery: signing and retries"
+    },
+    "home.mit.crates[5].name": {
+      "n": "H198",
+      "text": "server"
+    },
+    "home.mit.crates[5].text": {
+      "n": "H199",
+      "text": "The postkeep binary: MCP over Streamable HTTP"
+    },
+    "home.mit.crates.license": {
+      "n": "H200",
+      "text": "MIT License · postkeep contributors"
+    }
+  }
+}

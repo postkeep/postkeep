@@ -1,0 +1,39 @@
+{#- A filter rule's fields, included with `form` (a `FilterFormView`) in scope. #}
+            <div class="field">
+              <label class="field__label" for="{{ form.dom_id("action") }}">Action</label>
+              <select class="input" id="{{ form.dom_id("action") }}" name="action" aria-describedby="{{ form.dom_id("action-hint") }}">
+                <option value="block"{% if form.action == "block" %} selected{% endif %}>block: matching mail doesn't call the webhook</option>
+                <option value="allow"{% if form.action == "allow" %} selected{% endif %}>allow: only matching mail calls the webhook</option>
+              </select>
+              <p class="field__hint" id="{{ form.dom_id("action-hint") }}">The first allow rule that's on silences all other mail.</p>
+            </div>
+            <div class="field">
+              <label class="field__label" for="{{ form.dom_id("field") }}">Field</label>
+              <select class="input" id="{{ form.dom_id("field") }}" name="field">
+                <option value="from"{% if form.field == "from" %} selected{% endif %}>from: the sender's address</option>
+                <option value="from_domain"{% if form.field == "from_domain" %} selected{% endif %}>from_domain: the sender's domain</option>
+                <option value="to"{% if form.field == "to" %} selected{% endif %}>to: the To and Cc addresses</option>
+                <option value="subject"{% if form.field == "subject" %} selected{% endif %}>subject: the subject</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field__label" for="{{ form.dom_id("kind") }}">Kind</label>
+              <select class="input" id="{{ form.dom_id("kind") }}" name="kind" aria-describedby="{{ form.dom_id("kind-hint") }}">
+                <option value="equals"{% if form.kind == "equals" %} selected{% endif %}>equals: the whole text</option>
+                <option value="contains"{% if form.kind == "contains" %} selected{% endif %}>contains: part of the text</option>
+                <option value="domain"{% if form.kind == "domain" %} selected{% endif %}>domain: a domain and its subdomains</option>
+                <option value="regex"{% if form.kind == "regex" %} selected{% endif %}>regex: a regular expression</option>
+              </select>
+              <p class="field__hint" id="{{ form.dom_id("kind-hint") }}">domain takes a plain domain such as example.com and can't look at the subject. regex uses Rust syntax, without look-around or back-references.</p>
+            </div>
+            <div class="field">
+              <label class="field__label" for="{{ form.dom_id("pattern") }}">Pattern</label>
+              <input class="input input--mono" id="{{ form.dom_id("pattern") }}" name="pattern" type="text" maxlength="512" autocomplete="off" autocapitalize="none" spellcheck="false" value="{{ form.pattern }}" aria-describedby="{% if form.error.is_some() %}{{ form.dom_id("pattern-error") }} {% endif %}{% if form.note.is_some() %}{{ form.dom_id("pattern-note") }} {% endif %}{{ form.dom_id("pattern-hint") }}"{% if form.error.is_some() %} aria-invalid="true" autofocus{% endif %}>
+              {%- if let Some(error) = form.error %}
+              <p class="field__error" id="{{ form.dom_id("pattern-error") }}"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>{{ error }}</span></p>
+              {%- endif %}
+              {%- if let Some(note) = form.note %}
+              <p class="field__hint" id="{{ form.dom_id("pattern-note") }}">{{ note }}</p>
+              {%- endif %}
+              <p class="field__hint" id="{{ form.dom_id("pattern-hint") }}">1 to 512 bytes. Case is ignored.</p>
+            </div>

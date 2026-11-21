@@ -1,0 +1,48 @@
+---
+// Getting started (/docs/): the steps from an empty server to a connected agent,
+// each linking to its guides, then the reference cards and where to get help.
+import Docs from "../../layouts/Docs.astro";
+import Icon from "../../components/Icon.astro";
+import SiteLink from "../../components/SiteLink.astro";
+import { pair, t } from "../../lib/copy";
+import { SITE } from "../../lib/data";
+import { REFERENCE, STEP_LINKS } from "../../lib/docs";
+import { target } from "../../lib/links";
+import { esc } from "../../lib/highlight";
+
+const REF_ICONS = pair("docs.index.reference.links", ["list", "link", "terminal", "info"]);
+const rail = [
+  ...STEP_LINKS.map((_, i) => ({ slug: `step-${i + 1}`, text: t(`docs.index.steps[${i}].title`), depth: 2 })),
+  { slug: "reference", text: t("docs.index.reference.title"), depth: 2 },
+];
+
+// The help line names the FAQ and the repository's issues; both words get their link, the sentence stays as written.
+const faq = target("docs.index.reference.links[3]");
+const help = esc(t("docs.index.help"))
+  .replace("FAQ", `<a href="${faq.href}">FAQ</a>`)
+  .replace("open an issue in the repository", (m) => `<a href="${esc(SITE.source.issues)}">${m}</a>`);
+---
+<Docs title={t("meta.docs.title")} description={t("meta.docs.description")} here="docs/" rail={rail}>
+  <header class="doc__head"><h1 class="h1">{t("docs.index.title")}</h1><p class="lede">{t("docs.index.lead")}</p></header>
+  <ol class="dsteps">
+    {STEP_LINKS.map((n, i) => (
+      <li class="dstep" id={`step-${i + 1}`}>
+        <span class="dstep__n" aria-hidden="true">{i + 1}</span>
+        <div class="dstep__body">
+          <h2 class="dstep__h">{t(`docs.index.steps[${i}].title`)}</h2>
+          <p>{t(`docs.index.steps[${i}].text`)}</p>
+          <ul class="dlinks">{Array.from({ length: n }, (_, k) => <li><SiteLink id={`docs.index.steps[${i}].links[${k}]`} class="dlinks__a" ext={false}>{t(`docs.index.steps[${i}].links[${k}]`)}</SiteLink></li>)}</ul>
+        </div>
+      </li>
+    ))}
+  </ol>
+  <section class="dref" id="reference" aria-labelledby="ref-h">
+    <h2 class="doc__h2" id="ref-h">{t("docs.index.reference.title")}</h2>
+    <ul class="dref__grid">
+      {REFERENCE.map((id, k) => (
+        <li><SiteLink id={id} class="card dref__a" ext={false}><span class="card__top"><span class="tile"><Icon name={REF_ICONS[k]!} /></span><Icon name="arrow" class="card__go" /></span><span class="card__t">{t(id)}</span></SiteLink></li>
+      ))}
+    </ul>
+  </section>
+  <p class="dhelp"><Icon name="info" /><span set:html={help} /></p>
+</Docs>

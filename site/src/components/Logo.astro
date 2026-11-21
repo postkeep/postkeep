@@ -1,0 +1,8 @@
+---
+// The postkeep lockup: the logo ink file on light pages, the reversed file on dark ones.
+interface Props {
+  class?: string;
+}
+const { class: cls = "logo" } = Astro.props;
+---
+<a class={cls} href="/"><img class="logo__l" src="/assets/lockup-kelp.svg" width="106" height="26" alt="postkeep" /><img class="logo__d" src="/assets/lockup-reversed.svg" width="106" height="26" alt="postkeep" /></a>

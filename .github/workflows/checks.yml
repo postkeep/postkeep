@@ -1,0 +1,158 @@
+name: checks
+on:
+  pull_request:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+  workflow_call:
+permissions: {}
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_NET_RETRY: '10'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  RUSTFLAGS: -D warnings
+jobs:
+  changes:
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      site: ${{ steps.paths.outputs.site }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - id: paths
+        run: .github/ci/changes.sh >> "$GITHUB_OUTPUT"
+  lint:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - &toolchain
+        name: Set up Rust
+        run: |
+          . .github/ci/versions.sh
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          echo "RUSTUP_TOOLCHAIN=$RUST_VERSION" >> "$GITHUB_ENV"
+      - &rust-cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+      - name: Check CI scripts
+        run: |
+          .github/ci/check-mr-title.sh --self-test
+          .github/ci/install-tool.sh --self-test
+          .github/ci/tag-prerelease.sh --self-test
+          .github/ci/changes.sh --self-test
+          tools/stamp-workspace-version.sh --self-test
+      - run: cargo fmt --all -- --check
+      - name: Check dependencies
+        run: |
+          . .github/ci/versions.sh
+          sudo .github/ci/install-tool.sh \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            "$CARGO_DENY_SHA256" "cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl/cargo-deny" "$CARGO_DENY_VERSION" "cargo deny --version"
+          CARGO_HOME="$(mktemp -d)" cargo deny --locked check advisories bans licenses sources
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
+  test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.14
+        env:
+          GREENMAIL_OPTS: >-
+            -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap
+            -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users.login=email
+            -Dgreenmail.users=alice:alicepass@example.com,bob:abcdabcdabcdabcd@example.com
+        ports: ['3025:3025', '3143:3143']
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      GREENMAIL_HOST: 127.0.0.1
+      GREENMAIL_IMAP_PORT: '3143'
+      GREENMAIL_SMTP_PORT: '3025'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - *toolchain
+      - *rust-cache
+      - name: Install nextest and wait for services
+        run: |
+          . .github/ci/versions.sh
+          sudo .github/ci/install-tool.sh \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/cargo-nextest-${NEXTEST_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            "$NEXTEST_SHA256" cargo-nextest "$NEXTEST_VERSION" "cargo nextest --version"
+          for port in 3025 3143 5432; do
+            for _ in $(seq 1 60); do
+              (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null && break
+              sleep 1
+            done
+            (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null || { echo "port $port is not reachable"; exit 1; }
+          done
+      - run: cargo nextest run --workspace --all-features --locked --profile ci --run-ignored all 2>&1 | tee nextest.log
+      - run: |
+          ignored=$(cargo nextest list --workspace --all-features --locked --run-ignored only --message-format oneline | wc -l)
+          .github/ci/check-test-summary.sh nextest.log "$ignored"
+      - run: cargo test --workspace --all-features --locked --doc
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: nextest
+          path: |
+            nextest.log
+            target/nextest/ci/junit.xml
+          retention-days: 14
+  site:
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container: node:22-bookworm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - run: |
+          . .github/ci/versions.sh
+          npm install -g "bun@$BUN_VERSION"
+          cd site
+          bun install --frozen-lockfile && bun run check
+  checks:
+    needs: [changes, lint, test, site]
+    if: always()
+    runs-on: ubuntu-slim
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: '[[ "$RESULTS" != *failure* && "$RESULTS" != *cancelled* ]]'

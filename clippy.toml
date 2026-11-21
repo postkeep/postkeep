@@ -1,0 +1,25 @@
+# Panicking helpers are fine in tests; library code must return errors.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+doc-valid-idents = ["iCloud", "GreenMail", "SQLite", "PostgreSQL", "OAuth", ".."]
+
+# Every transaction begins in the store's `Store::begin_write`, which on SQLite
+# takes the write lock as it begins, so that it waits for another writer: a
+# plain BEGIN that reads first fails at once while another connection writes.
+# If a path below stops resolving, `refused_begins` in
+# `crates/store/tests/providers.rs` fails the lint job.
+disallowed-methods = [
+    { path = "sqlx::Pool::begin", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Pool::try_begin", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Pool::begin_with", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Pool::try_begin_with", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Acquire::begin", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Connection::begin", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Connection::begin_with", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Connection::transaction", reason = "transactions begin in postkeep-store's Store::begin_write" },
+    { path = "sqlx::Transaction::begin", reason = "transactions begin in postkeep-store's Store::begin_write" },
+]

@@ -1,0 +1,32 @@
+{
+  "name": "postkeep.dev",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The open-source postkeep website (postkeep.dev): home, docs, Cloud or self-host, and the 404 page.",
+  "packageManager": "bun@1.4.2",
+  "scripts": {
+    "docs": "bun scripts/docs.ts",
+    "dev": "bun run docs && bun --bun astro dev",
+    "build": "bun run docs && bun --bun astro build",
+    "preview": "bun --bun astro preview",
+    "sync-design": "bun scripts/sync-design.ts",
+    "check:types": "bun run docs && bun --bun astro check && bun x tsc --noEmit -p .",
+    "check:design": "bun scripts/sync-design.ts --check",
+    "check:content": "bun scripts/check-content.ts",
+    "check:dist": "bun checks/dist.ts",
+    "check": "bun run check:types && bun run build && bun test checks/facts.test.ts && bun run check:content && bun run check:dist"
+  },
+  "dependencies": {
+    "@astrojs/markdown-satteri": "0.4.3",
+    "@astrojs/mdx": "8.0.3",
+    "astro": "7.3.8",
+    "satteri": "0.10.5"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.10",
+    "@types/bun": "1.4.2",
+    "@types/hast": "3.0.5",
+    "typescript": "6.0.3"
+  }
+}

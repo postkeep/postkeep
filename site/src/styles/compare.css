@@ -1,0 +1,141 @@
+/* Cloud or self-host: the page top; the split, whose halves share their rows and run their grounds edge to edge
+   from 1180 px, with the content on .wrap's edges; the .env pane and the address row in the install panel; the
+   console picture; the closing line; then the bands below 1180 px and phones. Code, tabs, Copy, buttons and
+   links are site.css's. */
+/* The top: the title over the Self-host half, the lede at the Cloud half's content edge (both halves' edges sit 56 px
+   from the seam), their feet on one line. */
+.cmp-top { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; column-gap: 112px; padding-top: 96px; }
+.cmp-top .lede { max-width: 560px; }
+.cmp-top .display { margin-right: -112px; } /* the title may take the gap, so it stays one line at 1180 */
+
+/* ---------------------------------------------------------------- the split */
+.split { display: grid; grid-template-columns: 1fr 1fr; margin-top: 56px; container-type: inline-size; }
+.half { display: grid; grid-row: span 6; grid-template-rows: subgrid; grid-template-columns: minmax(0, 608px); padding: 72px 56px 80px; }
+.half--selfhost { padding-left: max(var(--margin), 50cqw - 664px); background: light-dark(var(--console-sunk), var(--code-bg)); box-shadow: inset 0 1px 0 var(--border-subtle), inset -1px 0 0 var(--border-subtle); }
+.half--cloud { padding-right: max(var(--margin), 50cqw - 664px); }
+.half__h { display: flex; align-items: center; gap: 16px; }
+.half__h .pk-icon { width: 24px; height: 24px; color: var(--action-primary); }
+.half .lede { margin-top: 14px; }
+.half > .code, .cns-pic, .half__facts { align-self: start; margin-top: 40px; }
+/* With JavaScript the tabs switch panels, so the code block spans the first fact's row too: only the crop sizes the
+   picture row, nothing under the split moves on a switch, and a scrollbar in the Compose block takes some of the 40 px
+   gap. Each fact is a row of the split, so the two halves' rules meet across the seam. */
+.js .half > .code { grid-area: 2 / 1 / span 2; }
+.js .half__facts { grid-area: 3 / 1 / span 3; }
+.half__facts { display: grid; grid-row: span 3; grid-template-rows: subgrid; list-style: none; box-shadow: inset 0 -1px 0 var(--border-subtle); }
+.half__facts li { padding: 12px 0; box-shadow: inset 0 1px 0 var(--border-subtle); color: var(--text-secondary); text-wrap: pretty; }
+.half__act { display: flex; align-items: center; min-height: 46px; margin-top: 32px; }
+
+/* The install panel here: framed by theme, its .env pane under the Compose commands, the address row in its foot. */
+.half .code--tabs { box-shadow: inset 0 2px 0 -1px rgb(255 255 255 / 0.07), 0 0 0 1px light-dark(rgb(0 0 0 / 0.9), rgb(255 255 255 / 0.08)), 0 2px 4px light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.24)), 0 24px 48px -16px light-dark(rgb(20 22 30 / 0.32), rgb(0 0 0 / 0.4)); }
+.env { border-top: 1px solid rgb(255 255 255 / 0.08); }
+.code--tabs .env .code__pre { padding: 18px 24px 20px; }
+.code__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 44px; padding: 12px 24px; border-top: 1px solid rgb(255 255 255 / 0.08); background: rgb(255 255 255 / 0.024); color: var(--code-bar-text); font-size: var(--type-caption-size); line-height: 17px; }
+.code__foot code { flex: none; color: var(--code-text); font-size: 13px; letter-spacing: -0.01em; }
+
+/* ---------------------------------------------------------------- the console: a drawing, cropped at the code block's height, its foot faded to the
+   ground; the crop is 24 px wider each side, so the window keeps its ring and side shadows */
+.cns-pic { position: relative; height: 647px; margin-inline: -24px; padding-inline: 24px; overflow: clip; }
+.cns-pic::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 160px; background: linear-gradient(transparent, color-mix(in srgb, var(--bg-canvas) 55%, transparent) 40%, color-mix(in srgb, var(--bg-canvas) 90%, transparent) 70%, var(--bg-canvas)); }
+.cns { position: relative; min-height: 687px; background: var(--console-canvas); line-height: 18.12px; }
+.cns b { font-weight: var(--weight-semibold); }
+/* The bar: the workspace switcher (the mark, the name, a chevron), the crumb, Search with its key, the avatar. */
+.cns__bar { gap: 10px; height: 42px; padding: 0 24px 0 28px; background: var(--console-side); }
+.cns__ws { display: flex; align-items: center; gap: 8px; padding-right: 14px; }
+.cns__mark { width: 9.04px; height: 16px; fill: light-dark(var(--logo-ink), var(--logo-reversed)); }
+.cns__bar .pk-icon { width: 14px; height: 14px; color: var(--console-t3); }
+.cns__crumb { display: flex; align-items: center; gap: 6px; color: var(--console-t3); }
+.cns__crumb b { color: var(--console-t1); font-weight: var(--weight-medium); }
+.cns__search { display: flex; align-items: center; gap: 7px; width: 220px; height: 26px; margin-left: auto; padding: 0 9px; border-radius: 7px; background: var(--console-canvas); box-shadow: inset 0 0 0 1px var(--console-line); color: var(--console-t3); }
+.cns__search kbd { margin-left: auto; padding: 1px 5px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--console-line); font: var(--weight-medium) 10.5px / normal var(--font-mono); }
+.cns .av { width: 24px; height: 24px; border-radius: 7px; font-size: 10.5px; line-height: 16px; }
+.cns__tabs { display: flex; gap: 22px; padding: 0 28px; border-bottom: 1px solid var(--console-line); color: var(--console-t3); }
+.cns__tabs span { display: flex; align-items: center; height: 38px; }
+.cns__tabs .is-on { box-shadow: inset 0 -2px 0 var(--action-primary); color: var(--console-t1); font-weight: var(--weight-medium); }
+.cns__body { display: flex; flex-direction: column; align-items: start; gap: 20px; padding: 26px 28px; }
+.cns__head, .cns__mbh { display: flex; align-items: center; justify-content: space-between; gap: 10px; align-self: stretch; }
+.cns__head b { font-size: 20px; line-height: 26px; }
+.cns__pill, .cns__lab, .cns__dim, .cns__mbh span, .cns__msgh { font-size: 12px; line-height: 17.4px; }
+.cns__pill { display: inline-flex; align-items: center; gap: 7px; height: 24px; padding: 0 10px; border-radius: var(--radius-pill); box-shadow: inset 0 0 0 1px var(--console-line); color: var(--console-t2); }
+.cns__pill::before, .cns .tag--ok::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--action-primary); }
+.cns__tile { display: flex; flex-direction: column; align-self: stretch; padding: 16px 18px; border-radius: 12px; background: var(--console-raise); box-shadow: inset 0 0 0 1px var(--console-line), 0 1px 2px light-dark(rgb(0 0 0 / 0.04), rgb(0 0 0 / 0.4)); }
+.cns__lab, .cns__addh { display: flex; align-items: center; gap: 8px; color: var(--console-t2); }
+.cns__ti { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: var(--tag-ok-bg); color: var(--action-primary); }
+.cns__ti .pk-icon { width: 13px; height: 13px; }
+.cns__n { display: flex; align-items: baseline; gap: 5px; margin-top: 6px; color: var(--console-t3); font-size: 12px; }
+.cns__n b { color: var(--console-t1); font-size: 26px; line-height: 30px; }
+.cns__meter { width: 100%; height: 6px; margin-top: 8px; fill: var(--action-primary); }
+.cns__meter rect:first-child { fill: var(--console-hover); }
+.cns__dim { margin-top: 8px; color: var(--console-t3); }
+.cns__mb { display: flex; flex-direction: column; gap: 12px; align-self: stretch; }
+.cns__mbh { align-items: baseline; }
+.cns__mbh b { font-size: 15px; line-height: 20px; }
+.cns__mbh span, .cns__line { color: var(--console-t2); }
+.cns__row { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-block: 1px solid var(--console-line); }
+.cns__box { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: light-dark(var(--console-sunk), var(--console-raise)); box-shadow: inset 0 0 0 1px var(--console-line); color: var(--console-t2); }
+.cns__box .brand { width: 16px; height: 16px; }
+.cns__who { display: flex; flex: 1; flex-direction: column; gap: 1px; }
+.cns__who b { font-size: 13px; line-height: 18.85px; font-weight: var(--weight-medium); }
+.cns__who .cns__dim { margin-top: 0; }
+.cns__state { display: flex; align-items: center; gap: 16px; margin-left: 4px; }
+.cns .tag--ok { gap: 6px; height: 22px; padding: 0 8px; border-radius: var(--radius-pill); font-size: 11.5px; font-weight: var(--weight-medium); }
+.cns .tag--ok::before { background: currentColor; }
+.cns__state b { padding: 5px 8px; color: var(--console-t2); font-weight: var(--weight-medium); }
+.cns__add { display: flex; flex-direction: column; gap: 12px; align-self: stretch; padding: 18px; border: 1px dashed light-dark(rgb(0 0 0 / 0.16), rgb(255 255 255 / 0.16)); border-radius: 12px; }
+.cns__addh { gap: 10px; color: var(--console-t1); font-size: 14px; line-height: 20px; }
+.cns__addh .cns__ti { width: 26px; height: 26px; border-radius: 7px; }
+.cns__addh .pk-icon { width: 14px; height: 14px; }
+.cns__msg { overflow: hidden; border-radius: 10px; background: var(--console-sunk); box-shadow: inset 0 0 0 1px var(--console-line); }
+.cns__msgh { display: flex; align-items: center; justify-content: space-between; height: 40px; padding: 0 6px 0 14px; border-bottom: 1px solid var(--console-line); color: var(--console-t3); }
+.cns__copy { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: var(--radius-control-sm); box-shadow: inset 0 0 0 1px var(--console-line); color: var(--console-t1); font-weight: var(--weight-semibold); }
+.cns__copy .pk-icon { width: 13px; height: 13px; }
+.cns__msg code { display: block; padding: 12px 14px 14px; font-size: 12.5px; line-height: 18px; letter-spacing: -0.01em; }
+
+/* ---------------------------------------------------------------- the closing line: the loop line runs in from the page's edge */
+.cmp-close { display: flex; align-items: center; min-height: 220px; margin-top: 24px; }
+.cmp-close .lede { position: relative; margin-left: calc(50% + 56px); color: var(--text-primary); }
+
+/* Where the split is under 1269 px the address row takes two lines, so the crop grows by one: the Compose block stays
+   the crop's height (the split's width, unlike the viewport's, leaves out a classic scrollbar). */
+@media (min-width: 1180px) { @container (max-width: 1268px) { .cns-pic { height: 666px; } } }
+/* ---------------------------------------------------------------- below 1180 px: two bands, the 608 px column on the page margin, no .env */
+@media (max-width: 1179px) {
+  .split { display: block; }
+  .half { display: flex; flex-direction: column; padding-inline: var(--margin); }
+  .cmp-top { display: block; }
+  .cmp-top .display { margin-right: 0; }
+  .cmp-top .lede { margin-top: 20px; }
+  .half > .code, .cns-pic, .half__facts { align-self: stretch; }
+  .half--selfhost { box-shadow: inset 0 1px 0 var(--border-subtle), inset 0 -1px 0 var(--border-subtle); }
+  .env { display: none; }
+  .cmp-close { min-height: 0; margin-top: 0; padding-block: 48px 72px; }
+  .cmp-close .lede { margin-left: 0; }
+}
+@media (max-width: 599px) {
+  .cmp-top { padding-top: 40px; }
+  .cmp-top .lede { margin-top: 16px; }
+  .split { margin-top: 48px; }
+  .half { padding-block: 48px; }
+  .half__h { gap: 12px; }
+  .half__h .pk-icon { width: 20px; height: 20px; }
+  .half .lede { margin-top: 10px; }
+  .half > .code, .cns-pic, .half__facts { margin-top: 28px; }
+  .half__act { margin-top: 24px; }
+  .half .code__bar { padding-left: 16px; }
+  .half .code__pre { padding: 16px 16px 18px; font-size: 12.5px; line-height: 21px; }
+  .code__foot { flex-direction: column; align-items: start; gap: 4px; padding: 12px 16px 14px; }
+  .cns-pic { height: 580px; margin-inline: -20px; padding-inline: 20px; }
+  .cns-pic::after { height: 120px; }
+  .cns__bar { padding: 0 14px 0 18px; }
+  .cns__crumb, .cns__search, .cns__box, .cns .t-d { display: none; }
+  .cns__ws { flex: 1; }
+  .cns .t-m { display: inline; }
+  .cns__tabs { padding: 0 18px; }
+  .cns__body { gap: 18px; padding: 20px 18px; }
+  .cns__head { flex-direction: column; align-items: start; }
+  .cns__head b { font-size: 18px; }
+  .cns__row { flex-direction: column; align-items: start; gap: 10px; }
+  .cns__state { gap: 10px; margin-left: 0; }
+  .cmp-close { padding-block: 64px; border-top: 1px solid var(--border-subtle); }
+  .cmp-close .lede { color: var(--text-secondary); font-size: 15px; line-height: 22.5px; }
+}

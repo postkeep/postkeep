@@ -1,0 +1,35 @@
+# Example only: one way to run postkeep on Fly.io. Nothing in the
+# project depends on Fly.io; any host that runs a container works.
+# Steps: docs/deployment.md#flyio
+
+app = "my-postkeep"
+primary_region = "sin"
+
+[build]
+  image = "postkeep/postkeep:latest"
+
+[env]
+  POSTKEEP_PUBLIC_URL = "https://my-postkeep.fly.dev"
+  # Fly's proxy puts the real client address in this header.
+  POSTKEEP_CLIENT_IP_HEADER = "Fly-Client-IP"
+
+[[mounts]]
+  source = "postkeep_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Scale to zero when idle. If anyone enables new-mail webhooks, set
+  # auto_stop_machines = false and min_machines_running = 1 instead: the
+  # watchers only run while the machine does (see docs/deployment.md).
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"

@@ -1,0 +1,13 @@
+---
+// A link to another docs page as a card: the page's icon, the title and a short description under it.
+import Icon from "../Icon.astro";
+
+interface Props {
+  title: string;
+  href: string;
+  description?: string;
+}
+const { title, href, description } = Astro.props;
+const ICON: Record<string, string> = { "/docs/deployment/": "server", "/docs/clients/": "users", "/docs/configuration/": "list" };
+---
+<a class="card" href={href}><span class="card__top"><span class="tile"><Icon name={ICON[href] ?? "file"} /></span><Icon name="arrow" class="card__go" /></span><span class="card__t">{title}</span>{description && <span class="card__d">{description}</span>}</a>

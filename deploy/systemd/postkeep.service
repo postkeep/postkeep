@@ -1,0 +1,41 @@
+# systemd unit for running the plain binary. Install steps:
+# https://postkeep.dev/docs/deployment/#plain-binary
+
+[Unit]
+Description=postkeep (MCP server for email)
+Documentation=https://postkeep.dev/docs/deployment/#plain-binary
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/postkeep serve
+EnvironmentFile=/etc/postkeep/env
+Environment=POSTKEEP_BIND=127.0.0.1:8080
+Environment=POSTKEEP_DATABASE_URL=sqlite:///var/lib/postkeep/postkeep.db
+# The key is passed as a systemd credential, readable only by this service.
+LoadCredential=master_key:/etc/postkeep/master.key
+Environment=POSTKEEP_MASTER_KEY_FILE=%d/master_key
+Restart=on-failure
+RestartSec=5s
+
+DynamicUser=yes
+StateDirectory=postkeep
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,228 @@
+/* The site's stylesheet, on the brand's tokens (src/design/tokens.css): fonts, base and type, the header
+   and its menu, buttons and links, code blocks, the footer and the 404 page. Docs prose is in docs.css. */
+
+/* ---------------------------------------------------------------- fonts (one variable file each, with a metric-matched fallback) */
+@font-face { font-family: "Instrument Sans"; src: url("/fonts/InstrumentSans-latin.woff2") format("woff2"); font-weight: 400 700; font-stretch: 75% 100%; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("/fonts/JetBrainsMono-latin.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
+@font-face { font-family: "Instrument Sans Fallback"; src: local("Arial"), local("ArialMT"), local("Helvetica Neue"), local("Helvetica"), local("Liberation Sans"); size-adjust: 103.15%; ascent-override: 94.04%; descent-override: 24.24%; line-gap-override: 0%; }
+@font-face { font-family: "JetBrains Mono Fallback"; src: local("Courier New"), local("Liberation Mono"); size-adjust: 100%; ascent-override: 102%; descent-override: 30%; line-gap-override: 0%; }
+
+/* ---------------------------------------------------------------- base */
+:root { color-scheme: light dark; --margin: var(--grid-wide-margin); --hd-h: 76px; --type-prose-line: 24px; --type-docs-h2: var(--weight-display) 28px / 34px var(--font-sans); }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+*, *::before, *::after { box-sizing: border-box; }
+body, h1, h2, h3, h4, p, ul, ol, dl, dd, figure, pre, blockquote, fieldset { margin: 0; }
+ul, ol, fieldset, legend { padding: 0; }
+fieldset { border: 0; min-width: 0; }
+html { scroll-padding-top: calc(var(--hd-h) + 12px); -webkit-text-size-adjust: 100%; }
+body { min-height: 100vh; background: var(--bg-canvas); color: var(--text-primary); font: var(--weight-regular) var(--type-body-size) / var(--type-body-line) var(--font-sans); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; font-synthesis: none; }
+code, pre, kbd { font-family: var(--font-mono); font-variant-ligatures: none; font-feature-settings: "zero" 1, "calt" 0; }
+img, svg { display: block; max-width: 100%; }
+a { color: inherit; text-decoration: none; }
+p { text-wrap: pretty; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: var(--border-width-focus) solid var(--border-focus); outline-offset: var(--focus-offset); }
+#main:focus { outline: none; }
+.vh { position: absolute !important; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.nw { white-space: nowrap; }
+.skip { position: absolute; top: 8px; left: 8px; z-index: 50; padding: 12px; border-radius: var(--radius-control); background: var(--bg-canvas); transform: translateY(-200%); }
+.skip:focus { transform: none; }
+.pk-icon { flex: none; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: var(--icon-stroke); stroke-linecap: round; stroke-linejoin: round; }
+.brand { display: grid; flex: none; place-items: center; width: 24px; height: 24px; }
+.brand img, .brand .pk-icon { width: 100%; height: 100%; object-fit: contain; }
+.t-m, .logo__d, [data-theme="dark"] .logo__l { display: none; }
+[data-theme="dark"] .logo__d { display: block; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) .logo__l { display: none; } :root:not([data-theme]) .logo__d { display: block; } }
+
+/* The page: a frame 1328 px wide between the margins, and the soft light under the header (background only). */
+#app { position: relative; isolation: isolate; overflow-x: clip; }
+#app::before { content: ""; position: absolute; z-index: -1; top: -380px; left: 50%; width: 1500px; height: 800px; margin-left: -750px; pointer-events: none;
+  background: linear-gradient(180deg, var(--bg-canvas), transparent), radial-gradient(circle farthest-corner at 50% 0%, light-dark(#f4f5f7, rgb(225 230 240 / 0.1)), transparent 68%); }
+.wrap { width: 100%; max-width: calc(1328px + 2 * var(--margin)); margin-inline: auto; padding-inline: var(--margin); }
+
+/* ---------------------------------------------------------------- type */
+.eyebrow { color: var(--text-tertiary); font: var(--weight-regular) var(--type-eyebrow-size) / 17px var(--font-mono); letter-spacing: calc(var(--type-eyebrow-tracking) * 1em); }
+.kicker { color: var(--action-primary); font: var(--weight-medium) var(--type-kicker-size) / 17px var(--font-mono); letter-spacing: calc(var(--type-kicker-tracking) * 1em); }
+.display, .h1 { font-weight: var(--weight-display); text-wrap: balance; }
+.display { font-size: var(--type-display-size); line-height: var(--type-display-line); letter-spacing: calc(var(--type-display-tracking) * 1em); }
+.h1 { font-size: var(--type-h1-size); line-height: var(--type-h1-line); letter-spacing: calc(var(--type-h1-tracking) * 1em); }
+.lede { color: var(--text-secondary); font-size: var(--type-body-lg-size); line-height: var(--type-body-lg-line); }
+/* Identifiers in running text (tool fields, variables, paths): a plain chip. */
+.icode, .prose :not(pre) > code { padding: 1px 4px; border-radius: var(--radius-tag); background: var(--console-hover); color: var(--console-t2); }
+@media (max-width: 900px) { .display { font-size: 50px; line-height: 52px; } .h1 { font-size: 42px; line-height: 46px; } }
+
+/* ---------------------------------------------------------------- buttons and links */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 15px; border: 0; border-radius: var(--radius-control); font: var(--weight-semibold) 14px / 20px var(--font-sans); white-space: nowrap; cursor: pointer; }
+.btn--lg { height: 46px; padding: 0 20px; border-radius: var(--radius-btn-lg); font-size: 16px; word-spacing: 0.04em; }
+.btn--primary { background: var(--action-primary); color: var(--action-on-primary); }
+.btn--primary:hover { background: var(--action-primary-hover); }
+/* Whatever looks like a button presses; text links don't. */
+.btn, .copy, .code__tab, .pill__cell, .menu__btn { transition: transform var(--duration-press) var(--easing-standard); }
+.btn:active, .copy:active, .code__tab:active, .pill__cell:active, .menu__btn:active { transform: scale(0.97); }
+.tlink { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; color: var(--text-primary); font: var(--weight-semibold) 16px / 20px var(--font-sans); word-spacing: 0.04em; }
+.tlink:hover { color: var(--text-link); }
+.tlink .pk-icon { width: 16px; height: 16px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; }
+
+/* ---------------------------------------------------------------- header */
+.hd { position: sticky; top: 0; z-index: 20; }
+.hd.is-stuck { background: color-mix(in srgb, var(--bg-canvas) 82%, transparent); box-shadow: 0 1px 0 var(--border-subtle); -webkit-backdrop-filter: saturate(1.4) blur(14px); backdrop-filter: saturate(1.4) blur(14px); }
+.hd__in { display: flex; align-items: center; gap: var(--space-10); height: var(--hd-h); }
+.logo { display: flex; flex: none; align-items: center; }
+.logo img { width: 105.79px; height: 26px; }
+.nav { padding-left: var(--space-6); }
+.nav__list { display: flex; gap: 28px; list-style: none; }
+.nav__a, .ft__a { color: var(--text-secondary); }
+.nav__a { display: inline-flex; align-items: center; gap: 7px; font: var(--weight-medium) var(--type-ui-size) / 17px var(--font-sans); }
+.nav__a[aria-current="page"] { color: var(--text-primary); }
+.nav__a:hover, .ft__a:hover, .menu__a:hover { color: var(--text-link); }
+.nav__a .pk-icon { width: 15px; height: 15px; }
+.nav__a .ic--ext { width: 14px; height: 14px; margin-left: -2px; }
+.hd__end { display: flex; flex: 1; align-items: center; justify-content: end; gap: 22px; }
+
+/* The theme pill: three cells, the picked one filled. Hidden without a script; the page then follows the device. */
+.pill { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border-subtle); border-radius: var(--radius-pill); background: var(--bg-chip); }
+.pill__cell { position: relative; display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-pill); color: var(--text-secondary); cursor: pointer; }
+.pill__cell .pk-icon { width: 14px; height: 14px; }
+.pill__cell:hover { color: var(--text-primary); }
+.pill__cell:has(:checked) { background: var(--text-primary); color: var(--bg-canvas); }
+.pill__cell:has(:focus-visible) { outline: var(--border-width-focus) solid var(--border-focus); outline-offset: var(--focus-offset); }
+.pill__in { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+html:not(.js) [data-theme-toggle] { display: none; }
+
+/* The menu: a <details>, so it opens and closes without a script. Below 1024 px it replaces the nav. */
+.menu { display: none; }
+.menu__btn { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 10px; box-shadow: inset 0 0 0 1px var(--border-subtle); color: var(--text-primary); list-style: none; cursor: pointer; }
+.menu__btn::-webkit-details-marker { display: none; }
+.menu__btn .pk-icon { width: 18px; height: 18px; }
+.menu[open] .menu__open, .menu:not([open]) .menu__close { display: none; }
+.menu__panel { position: absolute; top: var(--hd-h); left: 0; right: 0; max-height: calc(100dvh - var(--hd-h)); overflow-y: auto; padding: 8px var(--margin) 40px; background: var(--bg-canvas); box-shadow: var(--elevation-menu); }
+.menu__list { list-style: none; }
+.menu__a { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 12px 10px; box-shadow: inset 0 -1px 0 var(--border-subtle); color: var(--text-primary); font: var(--weight-medium) var(--type-ui-size) / 20px var(--font-sans); }
+
+/* ---------------------------------------------------------------- code blocks: one dark surface in both themes */
+.code { position: relative; min-width: 0; overflow: hidden; border-radius: var(--radius-card); background: var(--code-bg); color: var(--code-text); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 0 1px rgb(255 255 255 / 0.1); }
+.code__bar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); height: 44px; padding: 0 6px 0 24px; border-bottom: 1px solid rgb(255 255 255 / 0.08); }
+/* The one-line form: the value in the bar, then Copy. In a card's frame the bar and the lines sit 16 in. */
+.code__bar:last-child { border-bottom: 0; }
+.code__bar > .code__pre { flex: 1; padding: 0; }
+.code--frame { border-radius: var(--radius-panel-inner); }
+.code--frame .code__bar { padding-left: 16px; }
+.code--frame > .code__pre { padding: 12px 16px; }
+.code__lang { display: inline-flex; align-items: center; height: 21px; padding: 0 6px; border-radius: var(--radius-tag); background: rgb(255 255 255 / 0.07); font: var(--weight-regular) 12.5px / 17px var(--font-mono); letter-spacing: -0.01em; }
+.code__pre { overflow-x: auto; padding: 18px 24px 20px; font-size: var(--type-code-size); line-height: var(--type-code-line); letter-spacing: calc(var(--type-code-tracking) * 1em); white-space: pre; scrollbar-width: thin; }
+.code__pre:focus-visible { outline-offset: -2px; }
+.copy { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border: 0; border-radius: var(--radius-control-sm); background: none; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.14); color: var(--code-text); font: var(--weight-semibold) var(--type-caption-size) / 16px var(--font-sans); cursor: pointer; }
+.copy::before { content: ""; position: absolute; inset: -6px 0; }
+.copy:hover { box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.3); }
+.copy .pk-icon { width: 14px; height: 14px; }
+.copy__ok, .copy__done, .copy.is-done .copy__ic, .copy.is-done .copy__t { display: none; }
+.copy.is-done .copy__ok, .copy.is-done .copy__done { display: inline; }
+html:not(.js) .copy { display: none; }
+.tk-k { color: var(--code-keyword); }
+.tk-f { color: var(--code-flag); }
+.tk-v { color: var(--code-var); }
+.tk-a { color: var(--code-placeholder); }
+.tk-c { color: var(--code-comment); }
+.tk-o { color: var(--code-muted); }
+
+/* Tabbed code (Docker, Docker Compose, Binary): the tabs in the bar, each panel's Copy over the bar's end. The bar
+   keeps Copy's width (73 px and its 6 px inset) free; on narrow screens the tabs scroll sideways in what's left. */
+.code--tabs > .code__bar { padding-right: 79px; }
+.code__tabs { display: flex; gap: 22px; overflow-x: auto; scrollbar-width: none; }
+/* A box that scrolls sideways (the tabs, a command in a bar or a frame, a table) fades its end only while it has more to
+   its right: an inactive timeline, where everything fits, applies nothing. Longhands: the shorthand can't set a timeline. */
+.code__tabs, .code__bar > .code__pre, .code--frame > .code__pre, .tbl-scroll { animation-name: more; animation-timing-function: linear; animation-fill-mode: both; animation-timeline: scroll(self inline); }
+@keyframes more { from, 99% { mask-image: linear-gradient(90deg, #000 calc(100% - var(--fade, 32px)), transparent); } to { mask-image: none; } }
+.code__bar > .code__pre, .code--frame > .code__pre { -webkit-mask-image: none; mask-image: none; } /* no phone fade where it fits */
+/* Where scroll timelines exist, every code block fades its last 48 px the same way, on phones too. */
+@supports (animation-timeline: scroll()) {
+  .code__pre { --fade: 48px; animation-name: more; animation-timing-function: linear; animation-fill-mode: both; animation-timeline: scroll(self inline); }
+}
+.code__tab { flex: none; height: 44px; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--code-bar-text); font: var(--weight-regular) var(--type-caption-size) / 16px var(--font-sans); cursor: pointer; }
+.code__tab:focus-visible { outline-offset: -2px; }
+.code__tab[aria-selected="true"] { border-bottom-color: var(--code-keyword); color: var(--code-text); font-weight: var(--weight-medium); }
+.code--tabs .code__pre { padding: 20px 24px 24px; }
+.code--tabs .copy { position: absolute; top: 6px; right: 6px; }
+.code__nojs { display: none; }
+html:not(.js) .code--tabs .code__bar { display: none; }
+html:not(.js) .code--tabs > .code__panel, html:not(.js) .code--tabs > .code__panel[hidden] { display: block; }
+html:not(.js) .code--tabs > .code__panel + .code__panel { border-top: 1px solid rgb(255 255 255 / 0.08); }
+html:not(.js) .code__nojs { display: block; padding: 16px 24px 0; color: var(--code-bar-text); font: var(--weight-medium) var(--type-caption-size) / 16px var(--font-sans); }
+
+/* ---------------------------------------------------------------- pictured windows: the home's agent window, /compare/'s console */
+:root { --chat-sunk: light-dark(var(--console-sunk), #232327); --tile-ring: light-dark(rgb(0 0 0 / 0.08), var(--console-line)); }
+.win { overflow: hidden; border-radius: var(--radius-card); background: var(--console-raise); color: var(--console-t1); font-size: var(--type-console-size); line-height: 18.75px; letter-spacing: calc(var(--type-console-tracking) * 1em);
+  box-shadow: inset 0 2px 0 -1px light-dark(rgb(255 255 255 / 0.9), rgb(255 255 255 / 0.06)), 0 0 0 1px light-dark(rgb(0 0 0 / 0.08), rgb(255 255 255 / 0.08)), 0 2px 4px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.2)), 0 16px 32px -8px light-dark(rgb(20 22 30 / 0.18), rgb(0 0 0 / 0.72)), 0 48px 96px -24px light-dark(rgb(20 22 30 / 0.28), rgb(0 0 0 / 0.85)); }
+.win__bar { display: flex; align-items: center; gap: 9px; height: 44px; padding: 0 12px 0 14px; border-bottom: 1px solid var(--console-line); }
+.tag { display: inline-flex; align-items: center; flex: none; height: 20px; padding: 0 7px; border-radius: var(--radius-tag); font: var(--weight-semibold) var(--type-tag-size) / var(--type-tag-line) var(--font-sans); letter-spacing: calc(var(--type-console-tracking) * 1em); }
+.tag--amber { background: var(--tag-amber-bg); color: var(--tag-amber-text); }
+.tag--violet { background: var(--tag-violet-bg); color: var(--tag-violet-text); }
+.tag--blue { background: var(--tag-blue-bg); color: var(--tag-blue-text); }
+.tag--ok { background: var(--tag-ok-bg); color: var(--tag-ok-text); }
+.tag--plain { background: var(--console-hover); color: var(--console-t2); }
+.av { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-tile); color: var(--neutral-0); font-size: 9.5px; font-weight: 700; line-height: 14px; }
+.av--1 { background: var(--console-avatar-1); }
+.av--2 { background: var(--console-avatar-2); }
+.av--s { width: 18px; height: 18px; border-radius: var(--radius-tag); font-size: 8.5px; line-height: 12px; }
+
+/* ---------------------------------------------------------------- footer */
+/* The lockup in a 114 px cell, so the links start where the header's nav does; below 1180 px the copyright moves to the
+   license line's row, below 600 px everything stacks with the links in two columns. */
+.ft { padding: 41px 0 56px; border-top: 1px solid var(--border-subtle); background: var(--bg-canvas); color: var(--text-secondary); }
+.ft__in { display: grid; grid-template-columns: 114px minmax(0, 1fr) auto; align-items: center; column-gap: var(--grid-wide-margin); }
+.ft__logo { min-height: 32px; }
+.ft__logo img { width: 89.52px; height: 22px; }
+.ft__links { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-6); list-style: none; }
+.ft__a, .ft__copy { font-size: var(--type-ui-size); line-height: 18px; }
+.ft__small { grid-column: 1 / -1; max-width: 460px; padding-top: var(--space-5); font-size: var(--type-caption-size); line-height: 19.5px; }
+
+/* ---------------------------------------------------------------- 404: the closing line's composition */
+.closing { position: relative; display: flex; flex-direction: column; align-items: center; padding: 139px var(--margin) 135px; text-align: center; }
+.closing .eyebrow { margin-bottom: 16px; }
+.closing .lede { margin-top: 16px; }
+.closing .actions { position: relative; justify-content: center; margin-top: 32px; }
+.loop { position: absolute; max-width: none; top: calc(50% - 49px); right: calc(100% + 29.75px); overflow: visible; fill: none; stroke: var(--action-primary); stroke-width: 2.5; stroke-linejoin: round; pointer-events: none; }
+.loop circle { fill: var(--action-primary); stroke: none; }
+
+/* ---------------------------------------------------------------- narrower screens */
+@media (max-width: 1279px) { :root { --margin: var(--grid-expanded-margin); } }
+@media (max-width: 1179px) {
+  .loop { display: none; }
+  .ft__copy { grid-area: 2 / 3; align-self: start; padding-top: var(--space-5); }
+  .ft__lic { grid-area: 2 / 1 / auto / 3; }
+}
+@media (max-width: 1023px) {
+  :root { --margin: var(--grid-medium-margin); --hd-h: 64px; }
+  .nav, .hd__ext { display: none; }
+  .hd__in { gap: 12px; }
+  .hd__end { gap: 8px; }
+  .logo { min-height: 44px; }
+  .hd .logo img { width: 81.38px; height: 20px; }
+  .pill__cell { width: 44px; height: 44px; }
+  .menu { display: block; }
+  .ft__in { grid-template-columns: minmax(0, 1fr) auto; }
+  .ft__logo, .ft__links { grid-column: 1 / -1; }
+  .ft__logo { margin-block: -11px; }
+  .ft__copy { grid-area: 3 / 2; }
+  .ft__lic { grid-area: 3 / 1; }
+  .ft__links { gap: 0 20px; margin-top: 20px; }
+  .ft__a { display: block; line-height: 44px; }
+}
+@media (max-width: 479px) { .t-d { display: none; } .t-m { display: inline; } }
+@media (max-width: 599px) {
+  :root { --margin: 20px; --type-docs-h2: var(--weight-display) 24px / 30px var(--font-sans); }
+  #app::before { width: 1700px; height: 1100px; margin-left: -850px; background: radial-gradient(circle farthest-corner at 50% 0%, light-dark(#f4f5f7, rgb(225 230 240 / 0.1)), light-dark(rgb(244 245 247 / 0.6), rgb(225 230 240 / 0.06)) 35%, transparent 70%); }
+  .display { font-size: 38px; line-height: 40px; letter-spacing: -0.04em; }
+  .h1 { font-size: 34px; line-height: 38px; letter-spacing: -0.035em; }
+  .lede { font-size: 16px; line-height: 24px; }
+  .tlink { min-height: 44px; }
+  .ft { padding: 32px 0 40px; }
+  .ft__in { grid-template-columns: minmax(0, 1fr); }
+  .ft__links { display: grid; grid-template-columns: 1fr 1fr; }
+  .ft__copy, .ft__lic { grid-area: auto; }
+  .closing { padding-block: 96px; }
+  @supports not (animation-timeline: scroll()) { .code__pre { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 48px), transparent); } }
+  .code__tabs { gap: 14px; }
+}

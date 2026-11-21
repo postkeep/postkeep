@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "Conflict",
+    "message": "A subscription with the same resource and notification URL already exists.",
+    "innerError": {
+      "date": "2026-10-08T09:05:02",
+      "request-id": "c2f0a6d1-5b3e-4a7c-8e9f-1a2b3c4d5e6f",
+      "client-request-id": "c2f0a6d1-5b3e-4a7c-8e9f-1a2b3c4d5e6f"
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "about": "The site's settings: the origin, the title formats, where links go, and the few words outside the copy deck (src/data/copy.json). See the README.",
+  "origin": "https://postkeep.dev",
+  "name": "postkeep",
+  "title": "{page} · postkeep",
+  "docsTitle": "{page} · postkeep docs",
+  "ogImage": "/assets/og-postkeep-dev-1200x630.png",
+  "asides": { "note": "Note", "tip": "Tip", "caution": "Caution", "danger": "Danger" },
+  "search": {
+    "label": "Search the docs",
+    "placeholder": "Search",
+    "none": "No pages match.",
+    "one": "1 page matches.",
+    "many": "{n} pages match."
+  },
+  "source": { "branch": "main" },
+  "cloud": { "url": "https://postkeep.ai" },
+  "image": { "name": "postkeep/postkeep", "hub": "https://hub.docker.com/r/postkeep/postkeep" }
+}

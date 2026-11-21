@@ -1,0 +1,40 @@
+---
+// Docker, Docker Compose and Binary install snippets as ARIA tabs in the code bar, each panel with its own
+// Copy. Without JavaScript the tabs hide and every panel shows under its own label (src/styles/site.css).
+// The default slot goes in the picked panel after its code; the "foot" slot after the panels, on every tab.
+import CopyButton from "./CopyButton.astro";
+import { snippet, t } from "../lib/copy";
+import { emailOff, highlight } from "../lib/highlight";
+
+const TABS = [
+  ["home.install.tabs.docker", "home.install.snippet"],
+  ["home.install.tabs.compose", "home.install.snippet.compose"],
+  ["home.install.tabs.binary", "home.install.snippet.binary"],
+] as const;
+interface Props {
+  /** Prefix for this panel's element ids. */
+  base: string;
+  /** The tab that starts selected, by its slot; the first when left out. */
+  pick?: (typeof TABS)[number][0];
+}
+const { base, pick = TABS[0][0] } = Astro.props;
+---
+<div class="code code--tabs" data-tabs>
+  <div class="code__bar">
+    <div class="code__tabs" role="tablist" aria-label={t("home.install.kicker")}>
+      {TABS.map(([tab], i) => <button class="code__tab" type="button" role="tab" id={`${base}-t${i}`} aria-controls={`${base}-p${i}`} aria-selected={tab === pick ? "true" : "false"} tabindex={tab === pick ? 0 : -1}>{t(tab)}</button>)}
+    </div>
+  </div>
+  {TABS.map(([tab, sn], i) => {
+    const s = snippet(sn);
+    return (
+      <div class="code__panel" role="tabpanel" id={`${base}-p${i}`} aria-labelledby={`${base}-t${i}`} hidden={tab !== pick}>
+        <p class="code__nojs">{t(tab)}</p>
+        <pre class="code__pre" id={`${base}-c${i}`} tabindex="0" aria-labelledby={`${base}-t${i}`}><code set:html={emailOff(highlight(s.text, s.lang))} /></pre>
+        <CopyButton of={`${base}-c${i}`} describedBy={`${base}-t${i}`} />
+        {tab === pick && <slot />}
+      </div>
+    );
+  })}
+  <slot name="foot" />
+</div>

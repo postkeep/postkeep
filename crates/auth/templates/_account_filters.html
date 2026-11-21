@@ -1,0 +1,108 @@
+{#- The Filter rules block of the "Webhook" section, included with
+    `webhook` in scope. It sits outside #alerts-form, because forms can't
+    nest. Nothing renders before a webhook is saved. #}
+        {%- match webhook.filters %}
+        {%- when crate::filters::FilterList::NoWebhook %}
+        {%- when crate::filters::FilterList::Unreadable %}
+        <details class="disclose disclose--history filters" id="filters" open>
+          <summary class="disclose__summary"><svg class="i i--sm disclose__chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>Filter rules <span class="disclose__meta">Can't be read</span></summary>
+          <div class="disclose__body">
+            {%- include "_account_filter_notice.html" %}
+            <p class="result result--bad" role="alert"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>These filter rules can't be read because the encryption key changed, so new mail waits and doesn't call the webhook. <a href="{{ crate::pages::DOCS }}/docs/webhooks/#unreadable-rules" target="_blank" rel="noopener noreferrer">What to do<span class="visually-hidden"> (opens in a new tab)</span></a></span></p>
+            <details class="confirm confirm--start">
+              <summary class="linkbtn">Remove all rules…</summary>
+              <form class="confirm__panel" method="post" action="/account/webhook/filters/remove">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="all" value="yes">
+                <p class="confirm__title">Remove every filter rule?</p>
+                <p class="confirm__text">With no rules, every new message calls the webhook.</p>
+                <div class="confirm__actions"><button class="btn btn--danger btn--sm" type="submit">Remove all rules</button></div>
+              </form>
+            </details>
+          </div>
+        </details>
+        {%- when crate::filters::FilterList::Rules with (list) %}
+        <details class="disclose disclose--history filters" id="filters"{% if webhook.filter_notice.is_some() || list.has_error() || list.unreadable_text().is_some() %} open{% endif %}>
+          <summary class="disclose__summary"><svg class="i i--sm disclose__chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>Filter rules <span class="disclose__meta">{{ list.summary() }}</span></summary>
+          <div class="disclose__body">
+            {%- include "_account_filter_notice.html" %}
+            {%- if let Some(text) = list.unreadable_text() %}
+            <p class="result result--bad" role="alert"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>{{ text }} <a href="{{ crate::pages::DOCS }}/docs/webhooks/#unreadable-rules" target="_blank" rel="noopener noreferrer">What to do<span class="visually-hidden"> (opens in a new tab)</span></a></span></p>
+            {%- endif %}
+          {% if list.rules.is_empty() %}
+            <p class="muted-line">No filter rules, so every new message calls the webhook. Add one below, or let an agent add them with its filter tools. <a href="{{ crate::pages::DOCS }}/docs/webhooks/#filter-rules" target="_blank" rel="noopener noreferrer">How filter rules work<span class="visually-hidden"> (opens in a new tab)</span></a></p>
+          {% else %}
+            <p class="muted-line">Rules you or an agent added, oldest first. <a href="{{ crate::pages::DOCS }}/docs/webhooks/#filter-rules" target="_blank" rel="noopener noreferrer">How filter rules work<span class="visually-hidden"> (opens in a new tab)</span></a></p>
+            {% if list.past_limit() %}
+            <p class="result result--warn"><svg class="i i--sm" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V13"/><path d="M12 16.5h.01"/></svg><span>Rules past this mailbox's limit of {{ list.limit }} judge nothing until older ones are removed or the limit rises.</span></p>
+            {% endif %}
+            <ul class="rows">
+              {% for rule in list.rules %}
+              <li class="row">
+                <div class="row__main">
+                  <p class="row__title row__title--wrap"><code><bdi>{% for part in rule.pattern %}{% match part %}{% when crate::filters::PatternPart::Text with (text) %}{{ text }}{% when crate::filters::PatternPart::Escape with (escape) %}<span class="esc"><span class="visually-hidden">hidden character </span>{{ escape }}</span>{% endmatch %}{% endfor %}</bdi></code></p>
+                  <p class="row__meta">Rule {{ loop.index }} · <code>{{ rule.action }}</code> · <code>{{ rule.field }}</code> · <code>{{ rule.kind }}</code> · added <time datetime="{{ rule.added.iso }}">{{ rule.added.label }}</time></p>
+                </div>
+                <span class="badge {{ rule.state_badge() }}"><span class="badge__dot" aria-hidden="true"></span>{{ rule.state_label() }}</span>
+                <form method="post" action="/account/webhook/filters/enabled">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="id" value="{{ rule.id }}">
+                  {%- if rule.enabled %}
+                  <input type="hidden" name="enabled" value="off">
+                  <button class="btn btn--secondary btn--sm" type="submit">Turn off<span class="visually-hidden"> rule {{ loop.index }}</span></button>
+                  {%- else %}
+                  <input type="hidden" name="enabled" value="on">
+                  <button class="btn btn--secondary btn--sm" type="submit">Turn on<span class="visually-hidden"> rule {{ loop.index }}</span></button>
+                  {%- endif %}
+                </form>
+                <details class="confirm" id="{{ rule.form.dom_id("form") }}"{% if rule.form.error.is_some() %} open{% endif %}>
+                  <summary class="btn btn--ghost btn--sm">Edit<span class="visually-hidden"> rule {{ loop.index }}</span></summary>
+                  <form class="confirm__panel" method="post" action="/account/webhook/filters/edit" data-busy-form novalidate>
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="id" value="{{ rule.id }}">
+                    <p class="confirm__title">Edit rule {{ loop.index }}</p>
+                    {%- let form = rule.form %}
+                    {%- include "_account_filter_fields.html" %}
+                    <div class="confirm__actions"><button class="btn btn--primary btn--sm" type="submit"><span class="btn__label">Save rule</span><span class="btn__busy"><span class="spinner" aria-hidden="true"></span>Saving…</span></button></div>
+                    <p class="form__status visually-hidden" role="status" aria-live="polite" data-busy-status="Saving the filter rule."></p>
+                  </form>
+                </details>
+                <details class="confirm">
+                  <summary class="btn btn--ghost btn--sm">Remove<span class="visually-hidden"> rule {{ loop.index }}</span></summary>
+                  <form class="confirm__panel" method="post" action="/account/webhook/filters/remove">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="id" value="{{ rule.id }}">
+                    <p class="confirm__title">Remove rule {{ loop.index }}?</p>
+                    <p class="confirm__text">It stops judging new mail right away. You or an agent can add it again.</p>
+                    <div class="confirm__actions"><button class="btn btn--danger btn--sm" type="submit">Remove rule</button></div>
+                  </form>
+                </details>
+              </li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+            <details class="disclose" id="{{ list.add_form.dom_id("form") }}"{% if list.add_form.error.is_some() %} open{% endif %}>
+              <summary class="disclose__summary"><svg class="i i--sm disclose__chev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>Add a rule</summary>
+              <form class="disclose__body" method="post" action="/account/webhook/filters/add" data-busy-form novalidate>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {%- let form = list.add_form %}
+                {%- include "_account_filter_fields.html" %}
+                <div class="actions"><button class="btn btn--primary" type="submit"><span class="btn__label">Add rule</span><span class="btn__busy"><span class="spinner" aria-hidden="true"></span>Adding…</span></button></div>
+                <p class="form__status visually-hidden" role="status" aria-live="polite" data-busy-status="Adding the filter rule."></p>
+              </form>
+            </details>
+          {% if !list.rules.is_empty() %}
+            <details class="confirm confirm--start">
+              <summary class="linkbtn">Remove all rules…</summary>
+              <form class="confirm__panel" method="post" action="/account/webhook/filters/remove">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="all" value="yes">
+                <p class="confirm__title">Remove every filter rule?</p>
+                <p class="confirm__text">With no rules, every new message calls the webhook.</p>
+                <div class="confirm__actions"><button class="btn btn--danger btn--sm" type="submit">Remove all rules</button></div>
+              </form>
+            </details>
+          {% endif %}
+          </div>
+        </details>
+        {%- endmatch %}

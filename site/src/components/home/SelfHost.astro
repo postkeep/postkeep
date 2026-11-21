@@ -1,0 +1,18 @@
+---
+// Self-host: the head on the left, five facts as rows on the right, each with its icon.
+import Code from "./Code.astro";
+import Head from "./Head.astro";
+import Icon from "../Icon.astro";
+import { pair, t } from "../../lib/copy";
+
+const ICONS = pair("home.selfhost.points", ["server", "database", "lock", "shield", "user"]);
+const RUNS = ["POSTKEEP_ALLOWED_EMAILS", "/account"];
+---
+<section class="sec" aria-labelledby="self-h">
+  <div class="wrap sh">
+    <Head id="self-h" kicker="home.selfhost.kicker" title="home.selfhost.title" lede="home.selfhost.lead" stack />
+    <ul class="facts">
+      {ICONS.map((ic, i) => <li><span class="tile tile--line"><Icon name={ic} /></span><h3 class="facts__h">{t(`home.selfhost.points[${i}].title`)}</h3><p><Code id={`home.selfhost.points[${i}].text`} runs={RUNS} /></p></li>)}
+    </ul>
+  </div>
+</section>

@@ -1,0 +1,82 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/postkeep/postkeep"
+homepage = "https://postkeep.dev"
+publish = false
+
+[workspace.dependencies]
+aes-gcm = "0.11"
+askama = "0.16"
+async-channel = "2.5"
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "matched-path", "query", "tokio"] }
+base64 = "0.23"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+clap = { version = "4.6", features = ["derive", "env", "string"] }
+encoding_rs = "0.8"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1", default-features = false, features = ["http1", "server", "server-graceful", "service", "tokio"] }
+lettre = { version = "0.11.24", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls-tls"] }
+mail-parser = { version = "0.11", default-features = false, features = ["full_encoding"] }
+postkeep-auth = { path = "crates/auth" }
+postkeep-mail = { path = "crates/mail" }
+postkeep-store = { path = "crates/store", default-features = false }
+postkeep-upstream = { path = "crates/upstream" }
+postkeep-webhook = { path = "crates/webhook" }
+proptest = "1.11"
+regex = "1.13"
+rmcp = { version = "3.9", default-features = false, features = ["macros", "server", "transport-streamable-http-server"] }
+ring = "0.17.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+schemars = "1"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+sqlx = { version = "0.9", default-features = false, features = ["any", "macros", "migrate", "runtime-tokio"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", default-features = false }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-util = "0.7"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tower-http = { version = "0.7", default-features = false, features = ["limit", "timeout"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-log = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+uuid = { version = "1", default-features = false, features = ["std", "v4"] }
+webpki-roots = "1"
+wiremock = "0.6.5"
+zeroize = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

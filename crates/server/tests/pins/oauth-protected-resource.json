@@ -1,0 +1,14 @@
+{
+  "authorization_servers": [
+    "https://mail.example.com"
+  ],
+  "bearer_methods_supported": [
+    "header"
+  ],
+  "resource": "https://mail.example.com/mcp",
+  "resource_documentation": "https://github.com/postkeep/postkeep",
+  "resource_name": "postkeep",
+  "scopes_supported": [
+    "mail"
+  ]
+}

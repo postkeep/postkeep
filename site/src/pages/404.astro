@@ -1,0 +1,24 @@
+---
+// Not found. The host serves dist/404.html with status 404 for any address it doesn't have, at any depth,
+// so every link and file here is a root path.
+import Base from "../layouts/Base.astro";
+import LoopLine from "../components/LoopLine.astro";
+import SiteFooter from "../components/SiteFooter.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+import SiteLink from "../components/SiteLink.astro";
+import { t } from "../lib/copy";
+---
+<Base title={t("meta.404.title")} description={t("meta.home.description")} page="404" noindex>
+  <SiteHeader />
+  <main id="main" tabindex="-1" class="closing">
+    <p class="eyebrow">{t("404.badge")}</p>
+    <h1 class="display">{t("404.heading")}</h1>
+    <p class="lede">{t("404.text")}</p>
+    <div class="actions">
+      <LoopLine />
+      <SiteLink id="404.primary" class="btn btn--lg btn--primary" ext={false} />
+      <SiteLink id="404.secondary" class="tlink" after="arrow" ext={false} />
+    </div>
+  </main>
+  <SiteFooter />
+</Base>
