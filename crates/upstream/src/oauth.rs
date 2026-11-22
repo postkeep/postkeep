@@ -20,7 +20,8 @@ use url::Url;
 use crate::http::{Endpoints, Http, HttpError, JSON_LIMIT, join_segments, request};
 
 /// Microsoft Graph scopes: read and change mail, send mail, refresh tokens,
-/// and read the signed-in user's id and address.
+/// read the signed-in user's id and address, and translate search hits to
+/// immutable message ids (`User.Read`).
 pub const MICROSOFT_SCOPES: &[&str] =
     &["offline_access", "User.Read", "Mail.ReadWrite", "Mail.Send"];
 

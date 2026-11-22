@@ -631,6 +631,30 @@ async fn mock_graph_folders(server: &MockServer) {
             .mount(server)
             .await;
     }
+    Mock::given(method("POST"))
+        .and(path("/graph/v1.0/me/translateExchangeIds"))
+        .respond_with(|req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&req.body).unwrap();
+            let value: Vec<Value> = body["inputIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| json!({ "sourceId": id, "targetId": id }))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({ "value": value }))
+        })
+        .mount(server)
+        .await;
+}
+
+async fn request_count(server: &MockServer, target: &str) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|req| req.url.path() == target)
+        .count()
 }
 
 /// The wire contract, independent of the production batch builder.
@@ -816,7 +840,7 @@ async fn outlook_accounts_work_through_graph() {
     drop(listing);
 
     for (name, id, calls) in [
-        ("archive", "archive-id", 12),
+        ("archive", "archive-id", 15),
         ("deleteditems", "trash-id", 5),
     ] {
         Mock::given(method("GET"))
@@ -993,7 +1017,21 @@ async fn outlook_accounts_work_through_graph() {
             json!({ "selection": encoded, "destination": "Archive" })
         };
         if matches!(name, "flag-window" | "terminal-flags") {
+            Mock::given(method("POST"))
+                .and(path("/graph/v1.0/me/translateExchangeIds"))
+                .and(body_string_contains(format!("{name}-")))
+                .respond_with(ResponseTemplate::new(500))
+                .with_priority(1)
+                .expect(0)
+                .mount(server)
+                .await;
+            let before = request_count(server, "/graph/v1.0/me/translateExchangeIds").await;
             assert_eq!(harness.call_err(&token, tool, arguments).await, expected);
+            assert_eq!(
+                request_count(server, "/graph/v1.0/me/translateExchangeIds").await,
+                before,
+                "{name} must not translate"
+            );
         } else {
             assert_eq!(
                 harness.call_ok(&token, tool, arguments).await["result"]
@@ -1049,6 +1087,149 @@ async fn outlook_accounts_work_through_graph() {
         "dry run, nothing changed: would move 4 messages to Archive"
     );
     drop(census);
+
+    // Keyword searches hand out immutable ids, so a move and a repeat stay on the same id.
+    {
+        Mock::given(method("GET"))
+            .and(path("/graph/v1.0/me/mailFolders/inbox/messages"))
+            .and(query_param("$search", "\"from:otters@example.net\""))
+            .and(|req: &wiremock::Request| !req.headers.contains_key("prefer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [{
+                "id": "AAMk-reg-9", "subject": "Otter", "receivedDateTime": "2026-01-01T00:00:00Z",
+                "from": { "emailAddress": { "address": "otters@example.net" } }
+            }] })))
+            .expect(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graph/v1.0/me/translateExchangeIds"))
+            .and(|req: &wiremock::Request| !req.headers.contains_key("prefer"))
+            .and(body_json(json!({
+                "inputIds": ["AAMk-reg-9"],
+                "sourceIdType": "restId",
+                "targetIdType": "restImmutableEntryId",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "sourceId": "AAMk-reg-9", "targetId": "AAMk-9" }]
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(server)
+            .await;
+        let found = harness
+            .call_ok(
+                &token,
+                "search_messages",
+                json!({ "from": "otters@example.net" }),
+            )
+            .await;
+        let id = found["messages"][0]["id"].as_str().unwrap();
+        assert_eq!(id, "graph.AAMk-9");
+        graph_reads(
+            server,
+            &[(0, "AAMk-9", Some(graph_state("AAMk-9", "inbox-id", false)))],
+        )
+        .await;
+        graph_batch(
+            server,
+            vec![graph_change(
+                0,
+                "AAMk-9",
+                "POST",
+                &json!({ "destinationId": "archive-id" }),
+            )],
+            vec![json!({ "id": "0", "status": 201, "body": { "id": "AAMk-9" } })],
+        )
+        .await;
+        let moved = harness
+            .call_ok(
+                &token,
+                "move_message",
+                json!({ "id": id, "destination": "Archive" }),
+            )
+            .await;
+        assert_eq!(moved["result"], "moved message graph.AAMk-9 to Archive");
+        graph_reads(
+            server,
+            &[(
+                0,
+                "AAMk-9",
+                Some(graph_state("AAMk-9", "archive-id", false)),
+            )],
+        )
+        .await;
+        let again = harness
+            .call_ok(
+                &token,
+                "move_message",
+                json!({ "id": id, "destination": "Archive" }),
+            )
+            .await;
+        assert_eq!(
+            again["result"],
+            "message graph.AAMk-9 is already in Archive"
+        );
+    }
+    // A keyword selection fails before any write if translation leaves an id out.
+    {
+        let encoded = SearchSelection {
+            folder: "INBOX".to_owned(),
+            criteria: Criteria {
+                subject: Some("untranslatable".to_owned()),
+                until: Some(Cutoff::Time(cutoff)),
+                ..Criteria::default()
+            },
+        }
+        .encode(&account.id)
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/graph/v1.0/me/mailFolders/inbox/messages"))
+            .and(query_param("$search", "\"subject:untranslatable\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [
+                { "id": "reg-a", "subject": "untranslatable", "receivedDateTime": "2026-01-01T00:00:00Z" },
+                { "id": "reg-b", "subject": "untranslatable", "receivedDateTime": "2026-01-01T00:00:00Z" },
+            ] })))
+            .expect(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graph/v1.0/me/translateExchangeIds"))
+            .and(body_json(json!({
+                "inputIds": ["reg-a", "reg-b"],
+                "sourceIdType": "restId",
+                "targetIdType": "restImmutableEntryId",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "sourceId": "reg-a", "targetId": "imm-a" }]
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graph/v1.0/$batch"))
+            .and(|req: &wiremock::Request| {
+                req.body.windows(5).any(|w| w == b"reg-a" || w == b"imm-a")
+            })
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .expect(0)
+            .mount(server)
+            .await;
+        let before = request_count(server, "/graph/v1.0/$batch").await;
+        let err = harness
+            .call_err(
+                &token,
+                "move_message",
+                json!({ "selection": encoded, "destination": "Archive" }),
+            )
+            .await;
+        assert_eq!(
+            err,
+            "Outlook gave no stable id for some of these messages: search again"
+        );
+        assert_eq!(request_count(server, "/graph/v1.0/$batch").await, before);
+    }
 
     // Keyword searches use $search on the resolved folder.
     Mock::given(method("GET"))

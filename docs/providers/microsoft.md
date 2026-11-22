@@ -85,7 +85,7 @@ Entra admin center approves the permissions listed here (see
 | `Mail.ReadWrite` | Read, search, flag, move and delete messages; create folders |
 | `Mail.Send` | Send and reply |
 | `offline_access` | A refresh token, so the connection survives without signing in again |
-| `User.Read` | The account's address and a stable account id |
+| `User.Read` | The account's address, a stable account id, and stable ids for the messages a search finds |
 
 Do not add application permissions. postkeep only ever acts as the
 signed-in user.
