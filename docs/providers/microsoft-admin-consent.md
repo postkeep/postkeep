@@ -32,7 +32,7 @@ who never signs in.
 | `Mail.ReadWrite` | Read, search, flag, move and delete messages; create folders |
 | `Mail.Send` | Send and reply |
 | `offline_access` | A refresh token, so the connection survives without signing in again |
-| `User.Read` | The account's address and a stable account id |
+| `User.Read` | The account's address, a stable account id, and stable ids for the messages a search finds |
 
 You need at least the **Cloud Application Administrator** role (an
 Application Administrator or a Privileged Role Administrator also can).

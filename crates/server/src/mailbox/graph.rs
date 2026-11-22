@@ -1,7 +1,8 @@
 //! Outlook.com and Microsoft 365 mailboxes through Microsoft Graph.
 //!
 //! * Messages are addressed by Graph's immutable ids (`Prefer:
-//!   IdType="ImmutableId"`), except that an id from `$search` can change on a move.
+//!   IdType="ImmutableId"`). `$search` answers regular ids, which `immutable`
+//!   translates before they are handed out.
 //! * Messages are read as MIME (`/messages/{id}/$value`) and parsed with
 //!   the same parser as IMAP mail. Small messages go to `sendMail` as MIME;
 //!   large messages and forwards go through a draft. Both routes store the
@@ -11,7 +12,7 @@
 //!   well-known folders.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,11 @@ const MAX_DEPTH: usize = 8;
 pub const MAX_SEARCH_WINDOW: usize = 1000;
 // The keyword listing uses its raw window's completeness for the action cap.
 const _: () = assert!(crate::tools::MOST_IDS == MAX_SEARCH_WINDOW);
+/// Graph translates at most 1,000 ids in one `translateExchangeIds` call.
+const TRANSLATE_MAX: usize = 1000;
+const _: () = assert!(MAX_SEARCH_WINDOW <= TRANSLATE_MAX);
+/// Returned when `translateExchangeIds` gives no usable immutable id for a hit.
+const NO_STABLE_ID: &str = "Outlook gave no stable id for some of these messages: search again";
 /// Pages followed while collecting a filtered `$search`. A next-link cycle
 /// stops here instead of spinning.
 const MAX_SEARCH_PAGES: usize = 20;
@@ -251,6 +257,14 @@ struct Collection<T> {
     count: Option<usize>,
     #[serde(rename = "@odata.nextLink")]
     next_link: Option<String>,
+}
+
+/// One entry in a `translateExchangeIds` response.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Translated {
+    source_id: String,
+    target_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -658,7 +672,7 @@ impl GraphMailbox {
             || mailbox.filter_url(&source, criteria, MAX_SEARCH_WINDOW, fields),
             |kql| mailbox.keyword_url(&source, kql, MAX_SEARCH_WINDOW, &keyword_fields(criteria)),
         );
-        let (messages, more) = if kql.is_some() {
+        let (mut messages, more) = if kql.is_some() {
             mailbox.collect_keyword_matches(url, criteria, most).await?
         } else {
             let mut messages = Vec::new();
@@ -687,6 +701,9 @@ impl GraphMailbox {
         }
         if messages.is_empty() && window {
             return Ok(Selected::Done(window_ending()));
+        }
+        if kql.is_some() {
+            mailbox.immutable(&mut messages).await?;
         }
         Ok(Selected::matches(
             messages
@@ -737,7 +754,9 @@ impl GraphMailbox {
         // Filtered searches keep every match inside the raw window.
         // Unfiltered searches stop at the probe.
         let target = if filtered { usize::MAX } else { probe };
-        let (matching, further) = self.collect_keyword_matches(url, criteria, target).await?;
+        let (mut matching, further) = self.collect_keyword_matches(url, criteria, target).await?;
+        let range = page_range(matching.len(), paging);
+        self.immutable(&mut matching[range]).await?;
         let at_window_edge = !filtered && page_end >= MAX_SEARCH_WINDOW;
         Ok(keyword_page(
             matching,
@@ -766,7 +785,9 @@ impl GraphMailbox {
                 return Ok((matching, true));
             }
             pages += 1;
-            let page: Collection<GraphMessage> = self.fetch_json(&url).await?;
+            // Omit `Prefer` so every hit is a `restId` for `immutable`.
+            let page: Collection<GraphMessage> =
+                self.api.get_json(&url, &[]).await.map_err(graph_error)?;
             let next = validated_next_link(&self.api.endpoints().graph, page.next_link.as_deref());
             let count = page.value.len();
             for (index, message) in page.value.into_iter().enumerate() {
@@ -856,6 +877,65 @@ impl GraphMailbox {
                     .find(|(_, folder)| folder.id == folder_id)
             })
             .map_or_else(|| folder_id.to_owned(), |(path, _)| path)
+    }
+
+    /// Translates regular `$search` ids to Graph immutable ids in place.
+    ///
+    /// Fails before changing any id if Graph leaves an id out or answers one
+    /// that cannot become a message id.
+    async fn immutable(&self, messages: &mut [GraphMessage]) -> MailboxResult<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let mut asked = HashSet::with_capacity(messages.len());
+        let input_ids: Vec<&str> = messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .filter(|id| asked.insert(*id))
+            .collect();
+        let body = json!({
+            "inputIds": input_ids,
+            "sourceIdType": "restId",
+            "targetIdType": "restImmutableEntryId",
+        });
+        drop(input_ids);
+        let response = self
+            .api
+            .send_json(
+                Method::POST,
+                &self.url(&["translateExchangeIds"]),
+                &[],
+                &body,
+            )
+            .await
+            .map_err(graph_error)?;
+        let answer: Collection<Translated> = self.api.parse(&response).map_err(graph_error)?;
+        let no_stable_id = || MailboxError::Message(NO_STABLE_ID.to_owned());
+        let mut translated = HashMap::with_capacity(asked.len());
+        for entry in answer.value {
+            let Some(target) = entry.target_id else {
+                return Err(no_stable_id());
+            };
+            if !asked.remove(entry.source_id.as_str())
+                || id::parse_provider_id(GRAPH_PREFIX, &id::provider_id(GRAPH_PREFIX, &target))
+                    .is_none()
+            {
+                return Err(no_stable_id());
+            }
+            translated.insert(entry.source_id, target);
+        }
+        if !asked.is_empty()
+            || translated.values().collect::<HashSet<_>>().len() != translated.len()
+        {
+            return Err(no_stable_id());
+        }
+        drop(asked);
+        for message in messages {
+            message
+                .id
+                .clone_from(translated.get(&message.id).ok_or_else(no_stable_id)?);
+        }
+        Ok(())
     }
 
     async fn batch(
@@ -1822,17 +1902,18 @@ fn message_matches(message: &GraphMessage, criteria: &Criteria) -> bool {
         })
 }
 
+fn page_range(len: usize, paging: Paging) -> Range<usize> {
+    let start = paging.offset.min(len);
+    start..start.saturating_add(paging.limit).min(len)
+}
+
 /// One local page of keyword matches. `has_more` is set only when this page
 /// is non-empty and another match or a further raw page follows it, so the
 /// next offset always moves forward.
-fn keyword_page(matching: Vec<GraphMessage>, paging: Paging, further: bool) -> Page {
+fn keyword_page(mut matching: Vec<GraphMessage>, paging: Paging, further: bool) -> Page {
     let total = matching.len();
-    let messages: Vec<Summary> = matching
-        .into_iter()
-        .skip(paging.offset)
-        .take(paging.limit)
-        .map(GraphMessage::summary)
-        .collect();
+    let range = page_range(total, paging);
+    let messages: Vec<Summary> = matching.drain(range).map(GraphMessage::summary).collect();
     let has_more =
         !messages.is_empty() && (total > paging.offset.saturating_add(messages.len()) || further);
     Page {
@@ -1967,7 +2048,7 @@ mod tests {
     };
     use secrecy::SecretString;
     use serde_json::json;
-    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::matchers::{body_json, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -2255,6 +2336,18 @@ mod tests {
     }
 
     const SEARCH_PATH: &str = "/graph/v1.0/me/mailFolders/inbox/messages";
+    const TRANSLATE_PATH: &str = "/graph/v1.0/me/translateExchangeIds";
+
+    fn same_ids(request: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let value: Vec<Value> = body["inputIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| json!({ "sourceId": id, "targetId": id }))
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "value": value }))
+    }
 
     fn message(id: &str, read: bool, flagged: bool) -> serde_json::Value {
         json!({
@@ -2308,6 +2401,11 @@ mod tests {
             account.id,
             UpstreamProvider::Microsoft,
         );
+        Mock::given(method("POST"))
+            .and(path(TRANSLATE_PATH))
+            .respond_with(same_ids)
+            .mount(server)
+            .await;
         (GraphMailbox::new(api, "person@example.com".to_owned()), dir)
     }
 
@@ -3012,6 +3110,7 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         let tops: Vec<_> = requests
             .iter()
+            .filter(|request| request.url.path() == SEARCH_PATH)
             .map(|request| {
                 request
                     .url
@@ -3035,6 +3134,208 @@ mod tests {
             .iter()
             .map(|message| message.id.as_str())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn keyword_pages_hand_out_immutable_ids() {
+        let server = MockServer::start().await;
+        let (mailbox, _dir) = outlook(&server).await;
+        Mock::given(method("GET"))
+            .and(path(SEARCH_PATH))
+            .and(query_param("$search", "\"subject:budget\""))
+            .and(|req: &wiremock::Request| !req.headers.contains_key("prefer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [
+                    message("reg-1", false, false),
+                    message("reg-2", false, false),
+                    message("reg-3", false, false),
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(TRANSLATE_PATH))
+            .and(|req: &wiremock::Request| !req.headers.contains_key("prefer"))
+            .and(body_json(json!({
+                "inputIds": ["reg-2", "reg-3"],
+                "sourceIdType": "restId",
+                "targetIdType": "restImmutableEntryId",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [
+                    { "sourceId": "reg-3", "targetId": "imm-3" },
+                    { "sourceId": "reg-2", "targetId": "imm-2" },
+                ]
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let criteria = Criteria {
+            subject: Some("budget".to_owned()),
+            ..Criteria::default()
+        };
+        let page = mailbox
+            .search("inbox", &criteria, Paging::new(1, 2))
+            .await
+            .unwrap();
+        assert_eq!(ids(&page), ["graph.imm-2", "graph.imm-3"]);
+    }
+
+    #[tokio::test]
+    async fn keyword_selections_translate_what_they_list() {
+        let server = MockServer::start().await;
+        let (mailbox, _dir) = outlook(&server).await;
+        for (name, id) in [("inbox", "inbox-id"), ("archive", "archive-id")] {
+            Mock::given(method("GET"))
+                .and(path(format!("/graph/v1.0/me/mailFolders/{name}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": id })))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path(SEARCH_PATH))
+            .and(query_param("$search", "\"subject:budget\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [message("reg-1", false, false), message("reg-2", false, false)]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(TRANSLATE_PATH))
+            .and(body_json(json!({
+                "inputIds": ["reg-1", "reg-2"],
+                "sourceIdType": "restId",
+                "targetIdType": "restImmutableEntryId",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [
+                    { "sourceId": "reg-1", "targetId": "imm-1" },
+                    { "sourceId": "reg-2", "targetId": "imm-2" },
+                ]
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let criteria = Criteria {
+            subject: Some("budget".to_owned()),
+            ..Criteria::default()
+        };
+        let selected = mailbox
+            .selected(
+                "inbox",
+                &criteria,
+                &Change::Move("Archive".to_owned()),
+                10,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let Selected::Matches { ids, .. } = selected else {
+            panic!("expected matches, got {selected:?}");
+        };
+        let got: Vec<_> = ids.iter().map(|s| s.id.as_deref().unwrap()).collect();
+        assert_eq!(got, ["graph.imm-1", "graph.imm-2"]);
+    }
+
+    #[tokio::test]
+    async fn untranslatable_hits_fail_the_call() {
+        let server = MockServer::start().await;
+        let (mailbox, _dir) = outlook(&server).await;
+        let pair = |s: &str, t: &str| json!({ "sourceId": s, "targetId": t });
+        let ok = pair("reg-1", "imm-1");
+        let reply = |entries: Vec<Value>| {
+            ResponseTemplate::new(200).set_body_json(json!({ "value": entries }))
+        };
+        let no_stable = "Outlook gave no stable id for some of these messages: search again";
+        let cases = [
+            (
+                "error-details",
+                reply(vec![
+                    ok.clone(),
+                    json!({ "sourceId": "reg-2", "errorDetails": { "code": "ErrorItemNotFound" } }),
+                ]),
+                no_stable,
+            ),
+            ("omitted", reply(vec![ok.clone()]), no_stable),
+            (
+                "duplicate-source",
+                reply(vec![
+                    ok.clone(),
+                    pair("reg-2", "imm-2"),
+                    pair("reg-2", "imm-3"),
+                ]),
+                no_stable,
+            ),
+            (
+                "empty-target",
+                reply(vec![ok.clone(), pair("reg-2", "")]),
+                no_stable,
+            ),
+            (
+                "duplicate-target",
+                reply(vec![ok.clone(), pair("reg-2", "imm-1")]),
+                no_stable,
+            ),
+            (
+                "space-in-target",
+                reply(vec![ok, pair("reg-2", "imm 2")]),
+                no_stable,
+            ),
+            (
+                "503",
+                ResponseTemplate::new(503).set_body_raw(
+                    include_str!("../../tests/data/graph/unavailable.json"),
+                    "application/json",
+                ),
+                "Microsoft is having trouble (503 Service Unavailable); try again shortly",
+            ),
+        ];
+        let criteria = Criteria {
+            subject: Some("budget".to_owned()),
+            ..Criteria::default()
+        };
+        let flags = Change::Flags {
+            read: Some(true),
+            flagged: None,
+        };
+        for (name, response, expected) in cases {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path(SEARCH_PATH))
+                .and(query_param("$search", "\"subject:budget\""))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": [message("reg-1", false, false), message("reg-2", false, false)]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path(TRANSLATE_PATH))
+                .respond_with(response)
+                .expect(2)
+                .mount(&server)
+                .await;
+            let page_err = mailbox
+                .search("inbox", &criteria, Paging::new(0, 10))
+                .await
+                .unwrap_err();
+            assert_eq!(page_err.to_string(), expected, "page: {name}");
+            let sel_err = mailbox
+                .selected(
+                    "inbox",
+                    &criteria,
+                    &flags,
+                    10,
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(sel_err.to_string(), expected, "selection: {name}");
+            server.verify().await;
+        }
     }
 
     /// Microsoft's throttling response and an outage read as advice to wait;
