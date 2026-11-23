@@ -23,9 +23,9 @@ use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig};
-use postkeep::mailbox::graph::MAX_SEARCH_WINDOW;
+use postkeep::mailbox::graph::{LISTING_TRUSTED, MAX_SEARCH_WINDOW};
 use postkeep::mailbox::{Criteria, Cutoff, NOTHING_LEFT, selection::SearchSelection};
-use postkeep::tools::MOST_IDS;
+use postkeep::tools::{LEFT_OUT, MOST_IDS};
 use postkeep_auth::{AuthConfig, CredentialVerifier, VerifyFuture};
 use postkeep_mail::ImapServer;
 use postkeep_store::{MasterKey, Store};
@@ -37,7 +37,9 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use wiremock::matchers::{
     body_json, body_string_contains, header as has_header, method, path, query_param,
+    query_param_is_missing,
 };
+
 use wiremock::{Match, Mock, MockServer, ResponseTemplate};
 
 const HOST: &str = "mail.example.com";
@@ -834,13 +836,34 @@ async fn outlook_accounts_work_through_graph() {
     assert_eq!(
         changed["result"].as_str().unwrap().replace(',', ""),
         format!(
-            "{MOST_IDS} messages: {MOST_IDS} marked as read; more match: call again with the same selection"
+            "{MOST_IDS} messages: {MOST_IDS} marked as read; more may match: call again with the same selection"
         )
     );
+    assert_eq!(
+        changed["counts"],
+        json!({ "changed": MOST_IDS, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+    );
     drop(listing);
+    let before = server.received_requests().await.unwrap().len();
+    let noop = harness
+        .call_ok(
+            &token,
+            "update_flags",
+            json!({ "selection": selection, "read": false }),
+        )
+        .await;
+    assert_eq!(
+        noop["result"],
+        format!("every match is already marked as asked; {NOTHING_LEFT}")
+    );
+    assert_eq!(
+        noop["counts"],
+        json!({ "changed": 0, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
 
     for (name, id, calls) in [
-        ("archive", "archive-id", 15),
+        ("archive", "archive-id", 17),
         ("deleteditems", "trash-id", 5),
     ] {
         Mock::given(method("GET"))
@@ -853,12 +876,16 @@ async fn outlook_accounts_work_through_graph() {
     }
 
     // Keyword hits cannot be server-filtered: exclude new mail locally, and refuse flags at the raw window.
-    for (name, unread, after_cutoff, full_window, linked, tool, expected) in [
+    let flag_refused = "a change of read or flagged can't be sure to reach every message Outlook finds by sender, recipient, subject or text; narrow the search with since or before";
+    let empty_window = format!(
+        "{NOTHING_LEFT} among the messages Outlook's search returned; more may match: narrow the search with since or before"
+    );
+    for (name, unread, after_cutoff, count, linked, tool, expected) in [
         (
             "cutoff",
             true,
             true,
-            false,
+            2,
             false,
             "update_flags",
             format!("1 message: 1 marked as read; {NOTHING_LEFT}"),
@@ -867,77 +894,98 @@ async fn outlook_accounts_work_through_graph() {
             "flag-window",
             true,
             false,
-            true,
+            MAX_SEARCH_WINDOW,
             true,
             "update_flags",
-            format!(
-                "a change of read or flagged can't get past the first {MAX_SEARCH_WINDOW} messages Outlook finds by sender, recipient, subject or text; narrow the search with since or before"
-            ),
+            flag_refused.to_owned(),
         ),
         (
             "move-window",
             true,
             false,
-            true,
+            MAX_SEARCH_WINDOW,
             true,
             "move_message",
             format!(
-                "{MOST_IDS} messages: {MOST_IDS} moved to Archive; more match: call again with the same selection"
+                "{MOST_IDS} messages: {MOST_IDS} moved to Archive; more may match: call again with the same selection"
             ),
         ),
         (
             "empty-window",
             false,
             false,
-            true,
+            MAX_SEARCH_WINDOW,
             true,
             "move_message",
-            format!(
-                "{NOTHING_LEFT} among the first {MAX_SEARCH_WINDOW} messages Outlook finds; more may match: narrow the search with since or before"
-            ),
+            empty_window.clone(),
         ),
         (
             "terminal-flags",
             true,
             false,
-            true,
+            MAX_SEARCH_WINDOW,
             false,
             "update_flags",
-            format!(
-                "a change of read or flagged can't get past the first {MAX_SEARCH_WINDOW} messages Outlook finds by sender, recipient, subject or text; narrow the search with since or before"
-            ),
+            flag_refused.to_owned(),
         ),
         (
             "terminal-move",
             true,
             false,
-            true,
+            MAX_SEARCH_WINDOW,
             false,
             "move_message",
             format!(
-                "{MOST_IDS} messages: {MOST_IDS} moved to Archive; more match: call again with the same selection"
+                "{MOST_IDS} messages: {MOST_IDS} moved to Archive; more may match: call again with the same selection"
             ),
         ),
         (
             "terminal-trash",
             true,
             false,
-            true,
+            MAX_SEARCH_WINDOW,
             false,
             "delete_message",
             format!(
-                "{MOST_IDS} messages: {MOST_IDS} moved to the trash; more match: call again with the same selection"
+                "{MOST_IDS} messages: {MOST_IDS} moved to the trash; more may match: call again with the same selection"
             ),
         ),
         (
             "terminal-empty",
             false,
             false,
+            MAX_SEARCH_WINDOW,
+            false,
+            "move_message",
+            empty_window.clone(),
+        ),
+        (
+            "trusted-flags",
             true,
+            false,
+            LISTING_TRUSTED,
+            false,
+            "update_flags",
+            flag_refused.to_owned(),
+        ),
+        (
+            "trusted-empty",
+            false,
+            false,
+            LISTING_TRUSTED,
+            false,
+            "move_message",
+            empty_window,
+        ),
+        (
+            "trusted-move",
+            true,
+            false,
+            LISTING_TRUSTED,
             false,
             "move_message",
             format!(
-                "{NOTHING_LEFT} among the first {MAX_SEARCH_WINDOW} messages Outlook finds; more may match: narrow the search with since or before"
+                "{LISTING_TRUSTED} messages: {LISTING_TRUSTED} moved to Archive; more may match: call again with the same selection"
             ),
         ),
     ] {
@@ -953,7 +1001,6 @@ async fn outlook_accounts_work_through_graph() {
         }
         .encode(&account.id)
         .unwrap();
-        let count = if full_window { MAX_SEARCH_WINDOW } else { 2 };
         let values: Vec<_> = (0..count).map(|i| json!({ "id": format!("{name}-{i}"), "subject": name, "isRead": !unread, "receivedDateTime": if after_cutoff && i == 1 { "2099-01-01T00:00:00Z" } else { "2026-01-01T00:00:00Z" } })).collect();
         let mut body = json!({ "value": values });
         if linked {
@@ -976,9 +1023,9 @@ async fn outlook_accounts_work_through_graph() {
             .await;
         if matches!(
             name,
-            "cutoff" | "move-window" | "terminal-move" | "terminal-trash"
+            "cutoff" | "move-window" | "terminal-move" | "terminal-trash" | "trusted-move"
         ) {
-            let changed = if name == "cutoff" { 1 } else { MOST_IDS };
+            let changed = if name == "cutoff" { 1 } else { count };
             for start in (0..changed).step_by(20) {
                 let end = (start + 20).min(changed);
                 let requests: Vec<_> = (start..end)
@@ -1016,7 +1063,7 @@ async fn outlook_accounts_work_through_graph() {
         } else {
             json!({ "selection": encoded, "destination": "Archive" })
         };
-        if matches!(name, "flag-window" | "terminal-flags") {
+        if matches!(name, "flag-window" | "terminal-flags" | "trusted-flags") {
             Mock::given(method("POST"))
                 .and(path("/graph/v1.0/me/translateExchangeIds"))
                 .and(body_string_contains(format!("{name}-")))
@@ -1087,6 +1134,108 @@ async fn outlook_accounts_work_through_graph() {
         "dry run, nothing changed: would move 4 messages to Archive"
     );
     drop(census);
+
+    // Keyword searches count the window across pages; a flag selection notes messages left out.
+    {
+        let hits: Vec<_> = (0..8)
+            .map(|i| {
+                json!({
+                    "id": format!("count-{i}"),
+                    "subject": "Otter report",
+                    "receivedDateTime": "2026-01-05T09:00:00Z",
+                    "isRead": i < 3,
+                    "isDraft": false,
+                    "flag": { "flagStatus": "notFlagged" },
+                    "from": { "emailAddress": { "address": "otters@example.net" } },
+                })
+            })
+            .collect();
+        let mount_pages = |search: String, token: &str, expected: u64| {
+            let first_hits = hits[..5].to_vec();
+            let second_hits = hits[5..].to_vec();
+            let token = token.to_owned();
+            let top = top.clone();
+            async move {
+                let first = Mock::given(method("GET"))
+                    .and(path("/graph/v1.0/me/mailFolders/inbox/messages"))
+                    .and(query_param("$search", search))
+                    .and(query_param("$top", top))
+                    .and(query_param_is_missing("$skiptoken"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "value": first_hits,
+                        "@odata.nextLink": format!(
+                            "{}/graph/v1.0/me/mailFolders/inbox/messages?$skiptoken={token}",
+                            server.uri()
+                        ),
+                    })))
+                    .expect(expected)
+                    .mount_as_scoped(server)
+                    .await;
+                let second = Mock::given(method("GET"))
+                    .and(path("/graph/v1.0/me/mailFolders/inbox/messages"))
+                    .and(query_param("$skiptoken", token))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                        "value": second_hits,
+                    })))
+                    .expect(expected)
+                    .mount_as_scoped(server)
+                    .await;
+                (first, second)
+            }
+        };
+        let from_mocks = mount_pages(
+            "\"from:otters@example.net AND received<2026-01-11\"".to_owned(),
+            "count-from-2",
+            2,
+        )
+        .await;
+        let from_page = harness
+            .call_ok(
+                &token,
+                "search_messages",
+                json!({ "from": "otters@example.net", "before": "2026-01-10", "limit": 5 }),
+            )
+            .await;
+        assert_eq!(from_page["total"], 8);
+        assert_eq!(from_page["total_is_estimate"], false);
+        assert_eq!(from_page["messages"].as_array().unwrap().len(), 5);
+        assert!(from_page["selection"].is_string());
+
+        let preview = harness
+            .call_ok(
+                &token,
+                "update_flags",
+                json!({
+                    "selection": from_page["selection"].as_str().unwrap(),
+                    "read": true,
+                    "dry_run": true,
+                }),
+            )
+            .await;
+        assert_eq!(
+            preview["result"],
+            format!("dry run, nothing changed: would mark 5 messages as read; {LEFT_OUT}")
+        );
+        assert_eq!(
+            preview["counts"],
+            json!({ "changed": 5, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+        );
+        drop(from_mocks);
+
+        let text_mocks = mount_pages("\"otter\"".to_owned(), "count-text-2", 1).await;
+        let text_page = harness
+            .call_ok(
+                &token,
+                "search_messages",
+                json!({ "text": "otter", "limit": 5 }),
+            )
+            .await;
+        assert_eq!(text_page["total"], 8);
+        assert_eq!(text_page["total_is_estimate"], false);
+        assert_eq!(text_page["messages"].as_array().unwrap().len(), 5);
+        assert!(text_page["selection"].is_string());
+        drop(text_mocks);
+    }
 
     // Keyword searches hand out immutable ids, so a move and a repeat stay on the same id.
     {
@@ -1249,7 +1398,7 @@ async fn outlook_accounts_work_through_graph() {
         )
         .await;
     assert_eq!(page["total"], 0);
-    assert_eq!(page["total_is_estimate"], true);
+    assert_eq!(page["total_is_estimate"], false);
 
     Mock::given(method("GET"))
         .and(path("/graph/v1.0/me/messages/AAMk-1/$value"))
@@ -1753,7 +1902,11 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
                 .starts_with("2 messages:"),
             "{changed}"
         );
-        assert_eq!(changed["messages"][0]["status"], "ok");
+        assert_eq!(changed["messages"][0]["status"], "changed");
+        assert_eq!(
+            changed["counts"],
+            json!({ "changed": 2, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+        );
         assert_eq!(
             changed["messages"][0]["ids"],
             json!(["graph.many-1", "graph.many-2"])
@@ -2086,7 +2239,11 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
             result["messages"][1]["reason"],
             "sent, no answer: check before repeating"
         );
-        assert_eq!(result["messages"][2]["status"], "ok");
+        assert_eq!(result["messages"][2]["status"], "changed");
+        assert_eq!(
+            result["counts"],
+            json!({ "changed": 1, "already": 0, "not_found": 0, "failed": 1, "not_reached": 1 })
+        );
     }
     {
         graph_reads(
@@ -2127,13 +2284,17 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         .expect(1)
         .mount(server)
         .await;
-    harness
+    let deleted = harness
         .call_ok(
             &token,
             "delete_message",
             json!({ "id": "graph.AAMk-1", "permanent": true }),
         )
         .await;
+    assert_eq!(
+        deleted["counts"],
+        json!({ "changed": 1, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+    );
 
     Mock::given(method("POST"))
         .and(path("/graph/v1.0/me/sendMail"))
@@ -2722,11 +2883,28 @@ async fn gmail_accounts_work_through_the_gmail_api() {
             "q",
             "from:\"friend@example.net\" after:1790812800",
         ))
-        .and(query_param("maxResults", "2"))
+        .and(query_param("maxResults", "500"))
+        .and(query_param_is_missing("pageToken"))
         .and(has_header("authorization", "Bearer g-access"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "messages": [{ "id": "18c1", "threadId": "t1" }, { "id": "18c0", "threadId": "t0" }],
             "nextPageToken": "next", "resultSizeEstimate": 12
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/gmail/v1/users/me/messages"))
+        .and(query_param("labelIds", "INBOX"))
+        .and(query_param("labelIds", "UNREAD"))
+        .and(query_param(
+            "q",
+            "from:\"friend@example.net\" after:1790812800",
+        ))
+        .and(query_param("maxResults", "500"))
+        .and(query_param("pageToken", "next"))
+        .and(has_header("authorization", "Bearer g-access"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "messages": [{ "id": "18bf", "threadId": "t2" }],
         })))
         .mount(server)
         .await;
@@ -2751,8 +2929,8 @@ async fn gmail_accounts_work_through_the_gmail_api() {
             json!({ "from": "friend@example.net", "since": "2026-10-01", "unread_only": true, "limit": 1 }),
         )
         .await;
-    assert_eq!(page["total"], 12);
-    assert_eq!(page["total_is_estimate"], true);
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["total_is_estimate"], false);
     assert_eq!(page["next_offset"], 1);
     let message = &page["messages"][0];
     assert_eq!(message["id"], "gmail.18c1");
@@ -2809,8 +2987,12 @@ async fn gmail_accounts_work_through_the_gmail_api() {
     assert_eq!(
         changed["result"].as_str().unwrap().replace(',', ""),
         format!(
-            "{MOST_IDS} messages: {MOST_IDS} marked as read; more match: call again with the same selection"
+            "{MOST_IDS} messages: {MOST_IDS} marked as read; more may match: call again with the same selection"
         )
+    );
+    assert_eq!(
+        changed["counts"],
+        json!({ "changed": MOST_IDS, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
     );
     assert_eq!(
         changed["messages"][0]["ids"].as_array().unwrap().len(),
@@ -2876,7 +3058,11 @@ async fn gmail_accounts_work_through_the_gmail_api() {
     let archived = harness.call_ok(&token, "move_message", json!({ "selection": selected.encode(&account.id).unwrap(), "destination": "All Mail" })).await;
     assert_eq!(
         archived["result"],
-        format!("1 message: 1 moved to All Mail; {NOTHING_LEFT}")
+        format!("1 message: 1 moved to All Mail; {NOTHING_LEFT}; {LEFT_OUT}")
+    );
+    assert_eq!(
+        archived["counts"],
+        json!({ "changed": 1, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
     );
     drop(modify);
     drop(guard);
@@ -2892,7 +3078,179 @@ async fn gmail_accounts_work_through_the_gmail_api() {
         own["result"],
         format!("the matches are already in INBOX; {NOTHING_LEFT}")
     );
+    assert_eq!(
+        own["counts"],
+        json!({ "changed": 0, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+    );
     assert_eq!(server.received_requests().await.unwrap().len(), before);
+
+    // Past MOST_IDS Gmail reports Google's estimate; a selection without unread_only and an archive
+    // from a kept label note messages left out; a failed second listing call fails the search.
+    {
+        let many: Vec<_> = (0..MOST_IDS).map(|i| format!("many-{i}")).collect();
+        let mut guards = Vec::new();
+        for (start, page_tok, next, est) in [
+            (0, None, "page-2", Some(4000usize)),
+            (500, Some("page-2"), "page-3", None),
+        ] {
+            let mut listing = gmail_listing("from:\"otters@example.net\"")
+                .and(query_param("labelIds", "INBOX"))
+                .and(query_param("maxResults", "500"));
+            if let Some(tok) = page_tok {
+                listing = listing.and(query_param("pageToken", tok));
+            } else {
+                listing = listing.and(query_param_is_missing("pageToken"));
+            }
+            let mut body = json!({
+                "messages": many[start..start + 500].iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
+                "nextPageToken": next,
+            });
+            if let Some(est) = est {
+                body["resultSizeEstimate"] = json!(est);
+            }
+            guards.push(
+                listing
+                    .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                    .expect(1)
+                    .mount_as_scoped(server)
+                    .await,
+            );
+        }
+        let meta = Mock::given(method("GET"))
+            .and(path("/gmail/gmail/v1/users/me/messages/many-0"))
+            .and(query_param("format", "metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "many-0", "threadId": "tm0", "labelIds": ["INBOX", "UNREAD"],
+                "internalDate": "1791450000000", "sizeEstimate": 512,
+                "payload": { "headers": [
+                    { "name": "From", "value": "Otters <otters@example.net>" },
+                    { "name": "Subject", "value": "Count" },
+                    { "name": "Date", "value": "Thu, 08 Oct 2026 09:00:00 +0000" },
+                ]}
+            })))
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let many_page = harness
+            .call_ok(
+                &token,
+                "search_messages",
+                json!({ "from": "otters@example.net", "limit": 1 }),
+            )
+            .await;
+        assert_eq!(many_page["total"], 4000);
+        assert_eq!(many_page["total_is_estimate"], true);
+        let many_selection = many_page["selection"].as_str().unwrap();
+        drop(meta);
+        drop(guards);
+
+        let decoded = SearchSelection::decode(many_selection, &account.id)
+            .ok()
+            .unwrap();
+        let Some(Cutoff::Time(many_cutoff)) = decoded.criteria.until else {
+            panic!("missing time cutoff");
+        };
+        let unread = gmail_listing(format!("from:\"otters@example.net\" before:{many_cutoff}"))
+            .and(query_param("labelIds", "INBOX"))
+            .and(query_param("labelIds", "UNREAD"))
+            .respond_with(gmail_list_page(&["many-0", "many-1"], None))
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let preview = harness
+            .call_ok(
+                &token,
+                "update_flags",
+                json!({ "selection": many_selection, "read": true, "dry_run": true }),
+            )
+            .await;
+        assert_eq!(
+            preview["result"],
+            format!("dry run, nothing changed: would mark 2 messages as read; {LEFT_OUT}")
+        );
+        assert_eq!(
+            preview["counts"],
+            json!({ "changed": 2, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+        );
+        drop(unread);
+
+        let receipts_selection = SearchSelection {
+            folder: "Receipts".to_owned(),
+            criteria: Criteria {
+                subject: Some("otter".to_owned()),
+                until: Some(Cutoff::Time(cutoff)),
+                ..Criteria::default()
+            },
+        }
+        .encode(&account.id)
+        .unwrap();
+        for (ids, expected_result, expected_changed) in [
+            (
+                &["r1"][..],
+                format!("dry run, nothing changed: would move 1 message to All Mail; {LEFT_OUT}"),
+                1,
+            ),
+            (&[][..], format!("{NOTHING_LEFT}; {LEFT_OUT}"), 0),
+        ] {
+            let listing = gmail_listing(format!("subject:\"otter\" before:{cutoff}"))
+                .and(query_param("labelIds", "Label_7"))
+                .and(query_param("labelIds", "INBOX"))
+                .respond_with(gmail_list_page(ids, None))
+                .expect(1)
+                .mount_as_scoped(server)
+                .await;
+            let answer = harness
+                .call_ok(
+                    &token,
+                    "move_message",
+                    json!({
+                        "selection": receipts_selection,
+                        "destination": "All Mail",
+                        "dry_run": true,
+                    }),
+                )
+                .await;
+            assert_eq!(answer["result"], expected_result);
+            assert_eq!(
+                answer["counts"],
+                json!({ "changed": expected_changed, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+            );
+            drop(listing);
+        }
+
+        let fail_p1 = gmail_listing("from:\"otters@example.net\" subject:\"otter\"")
+            .and(query_param("labelIds", "INBOX"))
+            .and(query_param("maxResults", "500"))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "messages": many[..500].iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
+                "nextPageToken": "broken",
+                "resultSizeEstimate": 4000,
+            })))
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let fail_p2 = gmail_listing("from:\"otters@example.net\" subject:\"otter\"")
+            .and(query_param("labelIds", "INBOX"))
+            .and(query_param("maxResults", "500"))
+            .and(query_param("pageToken", "broken"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": { "message": "bad page token" },
+            })))
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let err = harness
+            .call_err(
+                &token,
+                "search_messages",
+                json!({ "from": "otters@example.net", "subject": "otter", "limit": 5 }),
+            )
+            .await;
+        assert!(err.contains("bad page token"), "{err}");
+        drop(fail_p2);
+        drop(fail_p1);
+    }
 
     // Trash needs includeSpamTrash; user labels resolve by name.
     Mock::given(method("GET"))
@@ -3263,13 +3621,13 @@ async fn gmail_accounts_work_through_the_gmail_api() {
                     .await;
             }
             let result = harness.call_ok(&token, "move_message", json!({ "selection": selection.encode(&account.id).unwrap(), "destination": "Receipts" })).await;
-            assert!(
-                result["result"].as_str().unwrap().starts_with(if repeat {
-                    "the matches are already in Receipts; nothing left to change"
+            assert_eq!(
+                result["result"],
+                if repeat {
+                    format!("the matches are already in Receipts; {NOTHING_LEFT}")
                 } else {
-                    "1 message: 1 moved to Receipts"
-                }),
-                "{result}"
+                    format!("1 message: 1 moved to Receipts; {NOTHING_LEFT}; {LEFT_OUT}")
+                }
             );
         }
     }
@@ -3313,12 +3671,9 @@ async fn gmail_accounts_work_through_the_gmail_api() {
                 json!({ "selection": selection, "destination": "Receipts" }),
             )
             .await;
-        assert!(
-            result["result"]
-                .as_str()
-                .unwrap()
-                .starts_with("1 message: 1 moved to Receipts"),
-            "{result}"
+        assert_eq!(
+            result["result"],
+            format!("1 message: 1 moved to Receipts; {NOTHING_LEFT}; {LEFT_OUT}")
         );
     }
     {
@@ -3498,7 +3853,7 @@ async fn gmail_accounts_work_through_the_gmail_api() {
             .await
             .unwrap();
         assert!(
-            matches!(selected, Selected::Matches { ids, more: true } if ids.len() == 1 && ids[0].id.as_deref() == Some("gmail.cap1"))
+            matches!(selected, Selected::Matches { ids, more: true, .. } if ids.len() == 1 && ids[0].id.as_deref() == Some("gmail.cap1"))
         );
         drop(listing);
         // A slow label lookup must not start the listing after its deadline.

@@ -106,7 +106,7 @@ macro_rules! dry_run_doc {
 }
 macro_rules! list_all_doc {
     () => {
-        "List every message in the answer, with new ids, not only those that weren't changed."
+        "List every id the call named or its selection listed, with new ids, not only those that weren't changed."
     };
 }
 macro_rules! most_ids {
@@ -115,9 +115,12 @@ macro_rules! most_ids {
         pub const MOST_IDS: usize = $count;
         macro_rules! ids_doc { () => { concat!("Up to ", stringify!($count), " message ids from search_messages, to act on them all in one call instead of id.") }; }
         macro_rules! selection_doc { () => { concat!("Instead of id or ids: a selection from search_messages, to act on up to ", stringify!($count), " of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message.") }; }
+        macro_rules! estimate_doc { () => { concat!("Whether total is an estimate rather than an exact count, as when more than ", stringify!($count), " match or counting stopped early. On Outlook a search by sender, recipient, subject or text counts only among the newest messages it finds; narrow it with since or before to count older ones.") }; }
     };
 }
 most_ids!(1000);
+/// Sentence appended when a selection's listing excluded messages already in the asked state.
+pub const LEFT_OUT: &str = "messages already as asked aren't listed or counted";
 macro_rules! search_selection_doc { () => { "Only when more match than this page: every match of this search, not only this page, to pass as selection to update_flags, move_message or delete_message." }; }
 
 mod attachments;
@@ -1547,7 +1550,7 @@ pub struct SearchOutput {
     pub folder: String,
     /// Total number of matches.
     pub total: usize,
-    /// Whether `total` is the provider's estimate rather than an exact count.
+    #[doc = estimate_doc!()]
     pub total_is_estimate: bool,
     /// Offset of the first returned message.
     pub offset: usize,
@@ -1782,17 +1785,78 @@ fn upload_next(upload_id: &str, url: &str, token: &str, expires_at: &str) -> Str
     )
 }
 
+/// One of the five outcomes a message can get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(description = "")]
+#[allow(
+    missing_docs,
+    reason = "the schema deliberately presents a plain outcome enum"
+)]
+pub enum OutcomeKind {
+    Changed,
+    Already,
+    NotFound,
+    Failed,
+    NotReached,
+}
+
+impl OutcomeKind {
+    fn of(out: &ChangeOutcome) -> Self {
+        match out.status {
+            Status::Ok if out.changed() => Self::Changed,
+            Status::Ok => Self::Already,
+            Status::NotFound => Self::NotFound,
+            Status::Failed => Self::Failed,
+            Status::NotReached => Self::NotReached,
+        }
+    }
+}
+
+/// How many messages got each outcome.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(description = "")]
+#[allow(
+    missing_docs,
+    reason = "the schema deliberately presents plain count fields"
+)]
+pub struct Counts {
+    pub changed: usize,
+    pub already: usize,
+    pub not_found: usize,
+    pub failed: usize,
+    pub not_reached: usize,
+}
+
+impl Counts {
+    fn of(outcomes: &[ChangeOutcome]) -> Self {
+        let mut counts = Self::default();
+        for out in outcomes {
+            match OutcomeKind::of(out) {
+                OutcomeKind::Changed => counts.changed += 1,
+                OutcomeKind::Already => counts.already += 1,
+                OutcomeKind::NotFound => counts.not_found += 1,
+                OutcomeKind::Failed => counts.failed += 1,
+                OutcomeKind::NotReached => counts.not_reached += 1,
+            }
+        }
+        counts
+    }
+}
+
 /// The result of changing one or many messages.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ChangeOutput {
     /// What was done, or would be done in a dry run.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub result: String,
+    /// How many messages got each outcome (in a dry run, would get it). A selection counts only the messages it listed in this call.
+    pub counts: Counts,
     #[expect(
         clippy::doc_markdown,
         reason = "the protocol description uses plain argument names"
     )]
-    #[doc = "With ids or a selection: the messages that weren't changed, by status and reason; every message with list_all."]
+    #[doc = "With ids or a selection: the messages that failed or weren't reached, by outcome and reason; every one with list_all."]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<ChangeGroup>,
     #[expect(
@@ -1804,13 +1868,24 @@ pub struct ChangeOutput {
     pub new_ids: BTreeMap<String, String>,
 }
 
-/// Messages sharing one status and reason.
+impl ChangeOutput {
+    const fn sentence(result: String, counts: Counts) -> Self {
+        Self {
+            result,
+            counts,
+            messages: Vec::new(),
+            new_ids: BTreeMap::new(),
+        }
+    }
+}
+
+/// Messages sharing one outcome and reason.
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(description = "")]
 pub struct ChangeGroup {
     /// Outcome.
     #[schemars(description = "")]
-    pub status: Status,
+    pub status: OutcomeKind,
     /// Why, in words to relay.
     pub reason: String,
     #[expect(
@@ -1922,46 +1997,46 @@ fn change_groups(
     list_all: bool,
     selected: bool,
 ) -> (Vec<String>, Vec<ChangeGroup>) {
-    let mut groups: Vec<(Status, String, Vec<usize>)> = Vec::new();
+    let mut groups: Vec<(OutcomeKind, String, Vec<usize>)> = Vec::new();
     for (index, out) in outcomes.iter().enumerate() {
+        let status = OutcomeKind::of(out);
         if let Some((_, _, indices)) = groups
             .iter_mut()
-            .find(|(status, reason, _)| *status == out.status && *reason == out.reason)
+            .find(|(kind, reason, _)| *kind == status && *reason == out.reason)
         {
             indices.push(index);
         } else {
-            groups.push((out.status, out.reason.clone(), vec![index]));
+            groups.push((status, out.reason.clone(), vec![index]));
         }
     }
     let mut messages = Vec::new();
     let mut sentences = Vec::new();
     for (status, reason, indices) in groups {
         let n = indices.len();
-        let tail = status == Status::NotReached
+        let tail = status == OutcomeKind::NotReached
             && indices
                 .iter()
                 .copied()
                 .eq(outcomes.len() - n..outcomes.len());
-        let listed =
-            list_all || status == Status::Failed || (status == Status::NotReached && !tail);
+        let listed = list_all
+            || status == OutcomeKind::Failed
+            || (status == OutcomeKind::NotReached && !tail);
         let retry = if selected {
             "the same selection"
         } else {
             "them"
         };
         let words = match status {
-            Status::Ok if reason.is_empty() => change_words(change, dry),
-            Status::Ok if reason == ALREADY_UNSEEN && dry => format!("of them: {reason}"),
-            Status::Ok if reason == ALREADY_UNSEEN => {
-                format!("{}; {reason}", change_words(change, false))
-            }
-            Status::Ok => reason
+            OutcomeKind::Changed if reason.is_empty() => change_words(change, dry),
+            OutcomeKind::Changed if dry => format!("of them: {reason}"),
+            OutcomeKind::Changed => format!("{}; {reason}", change_words(change, false)),
+            OutcomeKind::Already => reason
                 .strip_prefix("the message is ")
                 .unwrap_or(&reason)
                 .to_owned(),
-            Status::Failed => "failed".to_owned(),
-            Status::NotFound => "not found".to_owned(),
-            Status::NotReached if tail => {
+            OutcomeKind::Failed => "failed".to_owned(),
+            OutcomeKind::NotFound => "not found".to_owned(),
+            OutcomeKind::NotReached if tail => {
                 if reason == TIME_EXHAUSTED && !listed {
                     format!("weren't reached in time: call again with {retry}")
                 } else if listed {
@@ -1970,15 +2045,16 @@ fn change_groups(
                     format!("weren't reached: {reason}; call again with {retry}")
                 }
             }
-            Status::NotReached => "not reached".to_owned(),
+            OutcomeKind::NotReached => "not reached".to_owned(),
         };
-        let detail =
-            if !listed && !reason.is_empty() && matches!(status, Status::Failed | Status::NotFound)
-            {
-                format!(": {reason}")
-            } else {
-                String::new()
-            };
+        let detail = if !listed
+            && !reason.is_empty()
+            && matches!(status, OutcomeKind::Failed | OutcomeKind::NotFound)
+        {
+            format!(": {reason}")
+        } else {
+            String::new()
+        };
         sentences.push(format!(
             "{}{} {words}{detail}",
             if tail { "the last " } else { "" },
@@ -2002,6 +2078,15 @@ fn change_groups(
     (sentences, messages)
 }
 
+fn empty_selection(left_out: bool) -> ChangeOutput {
+    let result = if left_out {
+        format!("{NOTHING_LEFT}; {LEFT_OUT}")
+    } else {
+        NOTHING_LEFT.to_owned()
+    };
+    ChangeOutput::sentence(result, Counts::default())
+}
+
 fn summary(
     outcomes: Vec<ChangeOutcome>,
     change: &Change,
@@ -2009,22 +2094,20 @@ fn summary(
     bulk: bool,
     list_all: bool,
     further: Option<bool>,
+    left_out: bool,
 ) -> Result<ChangeOutput, String> {
+    let counts = Counts::of(&outcomes);
     let dry = mode == Mode::DryRun;
     let list_all = list_all && bulk;
     if !bulk {
         let result = single_summary(&outcomes[0], change)?;
         if !dry {
-            return Ok(ChangeOutput {
-                result,
-                messages: Vec::new(),
-                new_ids: BTreeMap::new(),
-            });
+            return Ok(ChangeOutput::sentence(result, counts));
         }
     }
     let (sentences, messages) = change_groups(&outcomes, change, dry, list_all, further.is_some());
     let mut result = if dry {
-        let ok = outcomes.iter().filter(|out| out.changed()).count();
+        let ok = counts.changed;
         let rest: Vec<_> = sentences
             .into_iter()
             .filter(|text| !text.ends_with(&change_words(change, true)))
@@ -2056,7 +2139,11 @@ fn summary(
         )
     };
     if let Some(further) = further {
-        finish_selection(&mut result, &outcomes, change, mode, further);
+        finish_selection(&mut result, &outcomes, counts, change, mode, further);
+    }
+    if left_out {
+        result.push_str("; ");
+        result.push_str(LEFT_OUT);
     }
     if list_all
         && !dry
@@ -2083,6 +2170,7 @@ fn summary(
     };
     Ok(ChangeOutput {
         result,
+        counts,
         messages,
         new_ids,
     })
@@ -2091,15 +2179,16 @@ fn summary(
 fn finish_selection(
     result: &mut String,
     outcomes: &[ChangeOutcome],
+    counts: Counts,
     change: &Change,
     mode: Mode,
     further: bool,
 ) {
     let dry = mode == Mode::DryRun;
-    let reached = outcomes.iter().any(|out| out.status != Status::NotReached);
-    let failed = outcomes.iter().any(|out| out.status == Status::Failed);
-    let changed = outcomes.iter().any(ChangeOutcome::changed);
-    let pending = outcomes.iter().any(|out| out.status == Status::NotReached);
+    let reached = counts.not_reached < outcomes.len();
+    let failed = counts.failed > 0;
+    let changed = counts.changed > 0;
+    let pending = counts.not_reached > 0;
     let ending = if !reached && outcomes.iter().all(|out| out.reason == TIME_EXHAUSTED) {
         // A slow listing must not invite the same fruitless search forever.
         *result = format!(
@@ -2110,13 +2199,13 @@ fn finish_selection(
         );
         Some(SEARCH_TIME_EXHAUSTED)
     } else if dry {
-        further.then_some("more match")
+        further.then_some("more may match")
     } else if pending {
         None
     } else if further && changed {
-        Some("more match: call again with the same selection")
+        Some("more may match: call again with the same selection")
     } else if further {
-        Some("more match, but none of these could be changed: narrow the search")
+        Some("more may match, but none of these could be changed: narrow the search")
     } else if failed {
         Some("nothing left that can be changed")
     } else {
@@ -3428,45 +3517,39 @@ impl MailTools {
             .map(|value| decode_selection(value, parts))
             .transpose()?;
         let mailbox = self.mailbox(parts).await?;
-        let more = if let Some(selection) = selection {
+        let (more, left_out) = if let Some(selection) = selection {
             match mailbox
                 .selected(&selection, &change, MOST_IDS, deadline)
                 .await
                 .map_err(mailbox_error)?
             {
                 Selected::Done(result) => {
-                    return Ok(ChangeOutput {
-                        result,
-                        messages: Vec::new(),
-                        new_ids: BTreeMap::new(),
-                    });
+                    return Ok(ChangeOutput::sentence(result, Counts::default()));
                 }
                 Selected::Matches {
                     ids: selected,
                     more,
-                    ..
+                    left_out,
                 } => {
                     ids = selected;
                     if ids.is_empty() {
-                        return Ok(ChangeOutput {
-                            result: NOTHING_LEFT.to_owned(),
-                            messages: Vec::new(),
-                            new_ids: BTreeMap::new(),
-                        });
+                        return Ok(empty_selection(left_out));
                     }
-                    Some(more)
+                    (Some(more), left_out)
                 }
             }
         } else {
-            None
+            (None, false)
         };
         if permanent {
             let id = mailbox.delete(&ids[0]).await.map_err(mailbox_error)?;
-            return Ok(ChangeOutput {
-                result: format!("permanently deleted message {id}"),
-                messages: Vec::new(),
-                new_ids: BTreeMap::new(),
-            });
+            return Ok(ChangeOutput::sentence(
+                format!("permanently deleted message {id}"),
+                Counts {
+                    changed: 1,
+                    ..Counts::default()
+                },
+            ));
         }
         let ids_from = if more.is_some() {
             IdsFrom::Selection
@@ -3477,7 +3560,7 @@ impl MailTools {
             .apply(&ids, ids_from, &change, mode, deadline)
             .await
             .map_err(mailbox_error)?;
-        summary(outcomes, &change, mode, bulk, list_all, more)
+        summary(outcomes, &change, mode, bulk, list_all, more, left_out)
     }
 
     /// The extension's tools for `caller`, without names the server's own
@@ -4046,12 +4129,31 @@ mod tests {
     #[test]
     fn single_change_sentences_and_errors_keep_their_contract() {
         use super::{
-            Change, ChangeOutcome, Mode, SEARCH_TIME_EXHAUSTED, Status, mail_error, summary,
+            Change, ChangeOutcome, Counts, Mode, SEARCH_TIME_EXHAUSTED, Status, mail_error, summary,
+        };
+        let run = |id: String,
+                   status,
+                   new_id: Option<&str>,
+                   reason: &str,
+                   change: &Change,
+                   mode,
+                   list| {
+            let outcome = ChangeOutcome {
+                id,
+                status,
+                new_id: new_id.map(str::to_owned),
+                reason: reason.to_owned(),
+            };
+            summary(vec![outcome], change, mode, false, list, None, false)
         };
         assert_eq!(
             mail_error(postkeep_mail::Error::TimeExhausted),
             SEARCH_TIME_EXHAUSTED
         );
+        let one_changed = Counts {
+            changed: 1,
+            ..Counts::default()
+        };
         for (change, expected) in [
             (
                 Change::Flags {
@@ -4069,37 +4171,31 @@ mod tests {
                 "moved message id-1 to the trash; its new id is new-1",
             ),
         ] {
-            let out = summary(
-                vec![ChangeOutcome {
-                    id: "id-1".to_owned(),
-                    status: Status::Ok,
-                    new_id: Some("new-1".to_owned()),
-                    reason: String::new(),
-                }],
+            let out = run(
+                "id-1".to_owned(),
+                Status::Ok,
+                Some("new-1"),
+                "",
                 &change,
                 Mode::Act,
-                false,
                 true,
-                None,
             )
             .unwrap();
             assert_eq!(out.result, expected);
+            assert_eq!(out.counts, one_changed);
             assert!(out.messages.is_empty() && out.new_ids.is_empty());
-            let preview = summary(
-                vec![ChangeOutcome {
-                    id: "id-1".to_owned(),
-                    status: Status::Ok,
-                    new_id: None,
-                    reason: String::new(),
-                }],
+            let preview = run(
+                "id-1".to_owned(),
+                Status::Ok,
+                None,
+                "",
                 &change,
                 Mode::DryRun,
-                false,
                 true,
-                None,
             )
             .unwrap();
             assert!(preview.result.starts_with("dry run, nothing changed:"));
+            assert_eq!(preview.counts, one_changed);
             assert!(preview.messages.is_empty() && preview.new_ids.is_empty());
             for status in [Status::Failed, Status::NotFound, Status::NotReached] {
                 let reason = if status == Status::NotFound {
@@ -4107,40 +4203,30 @@ mod tests {
                 } else {
                     "provider's reason"
                 };
-                let out = summary(
-                    vec![ChangeOutcome {
-                        id: crate::mailbox::id::imap_id("INBOX", 88, Some(7)),
-                        status,
-                        new_id: None,
-                        reason: reason.to_owned(),
-                    }],
-                    &change,
-                    Mode::Act,
-                    false,
-                    false,
-                    None,
-                )
-                .unwrap_err();
-                assert_eq!(out, reason);
+                let id = crate::mailbox::id::imap_id("INBOX", 88, Some(7));
+                let err = run(id, status, None, reason, &change, Mode::Act, false).unwrap_err();
+                assert_eq!(err, reason);
             }
         }
-        let already = summary(
-            vec![ChangeOutcome {
-                id: "id-1".to_owned(),
-                status: Status::Ok,
-                new_id: None,
-                reason: "already there".to_owned(),
-            }],
+        let already = run(
+            "id-1".to_owned(),
+            Status::Ok,
+            None,
+            "already there",
             &Change::Move("Archive".to_owned()),
             Mode::Act,
             false,
-            false,
-            None,
         )
         .unwrap();
         assert_eq!(already.result, "message id-1 is already in Archive");
+        assert_eq!(
+            already.counts,
+            Counts {
+                already: 1,
+                ..Counts::default()
+            }
+        );
     }
-
     #[test]
     fn change_summary_reports_already_and_move_ids_including_trash() {
         use super::{Change, ChangeOutcome, Mode, Status, single_summary, summary};
@@ -4178,7 +4264,9 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                summary(ids, change, mode, true, true, None).unwrap().result,
+                summary(ids, change, mode, true, true, None, false)
+                    .unwrap()
+                    .result,
                 expected
             );
         }
@@ -4213,7 +4301,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                summary(vec![out(), out()], &change, mode, true, false, None)
+                summary(vec![out(), out()], &change, mode, true, false, None, false)
                     .unwrap()
                     .result,
                 expected
@@ -4225,14 +4313,103 @@ mod tests {
         );
     }
 
+    fn mix_outcome(i: usize, kind: super::OutcomeKind) -> super::ChangeOutcome {
+        use super::{ChangeOutcome, OutcomeKind, Status, TIME_EXHAUSTED};
+        let (status, reason) = match kind {
+            OutcomeKind::Changed => (Status::Ok, ""),
+            OutcomeKind::Already => (Status::Ok, "already there"),
+            OutcomeKind::Failed => (Status::Failed, "request refused"),
+            OutcomeKind::NotFound => (
+                Status::NotFound,
+                "not in INBOX any more; an earlier call may have moved them: search Archive",
+            ),
+            OutcomeKind::NotReached => (Status::NotReached, TIME_EXHAUSTED),
+        };
+        ChangeOutcome {
+            id: format!("id-{i}"),
+            status,
+            new_id: (kind == OutcomeKind::Changed).then(|| format!("new-{i}")),
+            reason: reason.to_owned(),
+        }
+    }
+
+    fn assert_mix_groups(
+        out: &super::ChangeOutput,
+        selected: &[super::OutcomeKind],
+        list_all: bool,
+        pattern: usize,
+    ) {
+        use super::{Counts, OutcomeKind};
+        let count_of = |kind| selected.iter().filter(|value| **value == kind).count();
+        let expected = Counts {
+            changed: count_of(OutcomeKind::Changed),
+            already: count_of(OutcomeKind::Already),
+            not_found: count_of(OutcomeKind::NotFound),
+            failed: count_of(OutcomeKind::Failed),
+            not_reached: count_of(OutcomeKind::NotReached),
+        };
+        assert_eq!(out.counts, expected);
+        assert_eq!(
+            expected.changed
+                + expected.already
+                + expected.not_found
+                + expected.failed
+                + expected.not_reached,
+            selected.len()
+        );
+        for group in &out.messages {
+            let matching = count_of(group.status);
+            assert_eq!(
+                group.ids.len(),
+                if matching == 4 && !list_all {
+                    0
+                } else {
+                    matching
+                }
+            );
+            if !list_all {
+                assert!(matches!(
+                    group.status,
+                    OutcomeKind::Failed | OutcomeKind::NotReached
+                ));
+            }
+        }
+        for kind in [
+            OutcomeKind::Changed,
+            OutcomeKind::Already,
+            OutcomeKind::NotFound,
+            OutcomeKind::Failed,
+            OutcomeKind::NotReached,
+        ] {
+            let n = count_of(kind);
+            let tail = selected[4 - n..]
+                .iter()
+                .all(|value| *value == OutcomeKind::NotReached);
+            let listed = n > 0
+                && (list_all
+                    || kind == OutcomeKind::Failed
+                    || (kind == OutcomeKind::NotReached && !tail));
+            assert_eq!(
+                out.messages.iter().any(|group| group.status == kind),
+                listed,
+                "{pattern} {kind:?}"
+            );
+        }
+        assert_eq!(
+            out.new_ids.len(),
+            if list_all { expected.changed } else { 0 }
+        );
+    }
+
     #[test]
     fn change_summaries_cover_every_status_mix_for_each_change() {
-        use super::{Change, ChangeOutcome, Mode, Status, TIME_EXHAUSTED, summary};
-        let statuses = [
-            Status::Ok,
-            Status::Failed,
-            Status::NotFound,
-            Status::NotReached,
+        use super::{Change, Mode, OutcomeKind, summary};
+        let kinds = [
+            OutcomeKind::Changed,
+            OutcomeKind::Already,
+            OutcomeKind::NotFound,
+            OutcomeKind::Failed,
+            OutcomeKind::NotReached,
         ];
         for change in [
             Change::Flags {
@@ -4242,72 +4419,35 @@ mod tests {
             Change::Move("Archive".to_owned()),
             Change::Trash,
         ] {
-            for pattern in 0..256 {
-                let selected: Vec<_> = (0..4).map(|i| statuses[(pattern >> (i * 2)) & 3]).collect();
+            for pattern in 0..625usize {
+                let selected: Vec<_> = (0..4)
+                    .map(|i| kinds[(pattern / 5usize.pow(i)) % 5])
+                    .collect();
                 for list_all in [false, true] {
                     for mode in [Mode::Act, Mode::DryRun] {
-                        for more in [None, Some(false), Some(true)] {
-                            let outcomes = selected.iter().enumerate().map(|(i, status)| ChangeOutcome {
-                            id: format!("id-{i}"), status: *status, new_id: (*status == Status::Ok).then(|| format!("new-{i}")),
-                            reason: match status { Status::Ok => "", Status::Failed => "request refused", Status::NotFound => "not in INBOX any more; an earlier call may have moved them: search Archive", Status::NotReached => TIME_EXHAUSTED }.to_owned(),
-                        }).collect();
+                        for (more, left_out) in [
+                            (None, false),
+                            (Some(false), false),
+                            (Some(false), true),
+                            (Some(true), false),
+                            (Some(true), true),
+                        ] {
+                            let outcomes = selected
+                                .iter()
+                                .enumerate()
+                                .map(|(i, kind)| mix_outcome(i, *kind))
+                                .collect();
                             let out =
-                                summary(outcomes, &change, mode, true, list_all, more).unwrap();
-                            for group in &out.messages {
-                                let matching = selected
-                                    .iter()
-                                    .filter(|status| **status == group.status)
-                                    .count();
-                                assert_eq!(
-                                    group.ids.len(),
-                                    if matching == 4 && !list_all {
-                                        0
-                                    } else {
-                                        matching
-                                    }
-                                );
-                                if !list_all {
-                                    assert!(matches!(
-                                        group.status,
-                                        Status::Failed | Status::NotReached
-                                    ));
-                                }
-                            }
-                            for status in statuses {
-                                let n = selected.iter().filter(|value| **value == status).count();
-                                let tail = selected[4 - n..]
-                                    .iter()
-                                    .all(|value| *value == Status::NotReached);
-                                let listed = n > 0
-                                    && (list_all
-                                        || status == Status::Failed
-                                        || (status == Status::NotReached && !tail));
-                                assert_eq!(
-                                    out.messages.iter().any(|group| group.status == status),
-                                    listed,
-                                    "{pattern} {status:?}"
-                                );
-                            }
-                            assert_eq!(
-                                out.new_ids.len(),
-                                if list_all {
-                                    selected
-                                        .iter()
-                                        .filter(|status| **status == Status::Ok)
-                                        .count()
-                                } else {
-                                    0
-                                }
-                            );
+                                summary(outcomes, &change, mode, true, list_all, more, left_out)
+                                    .unwrap();
+                            assert_mix_groups(&out, &selected, list_all, pattern);
                             assert_eq!(
                                 out.result.starts_with("dry run, nothing changed:"),
                                 mode == Mode::DryRun
                                     && !(more.is_some()
-                                        && selected
-                                            .iter()
-                                            .all(|status| *status == Status::NotReached))
+                                        && selected.iter().all(|k| *k == OutcomeKind::NotReached))
                             );
-                            assert_selection_ending(&out, &selected, mode, more);
+                            assert_selection_ending(&out, &selected, mode, more, left_out);
                         }
                     }
                 }
@@ -4315,7 +4455,6 @@ mod tests {
         }
         assert_not_found_rerun();
     }
-
     fn assert_not_found_rerun() {
         use super::{Change, ChangeOutcome, Mode, Status, summary};
         let outcomes = (0..880)
@@ -4335,6 +4474,7 @@ mod tests {
             true,
             false,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -4342,31 +4482,56 @@ mod tests {
             "880 messages: 880 not found: not in INBOX any more; an earlier call may have moved them: search Archive"
         );
         assert!(out.messages.is_empty());
+        let plain = super::empty_selection(false);
+        assert_eq!(plain.result, super::NOTHING_LEFT);
+        assert_eq!(plain.counts, super::Counts::default());
+        let noted = super::empty_selection(true);
+        assert_eq!(
+            noted.result,
+            format!("{}; {}", super::NOTHING_LEFT, super::LEFT_OUT)
+        );
+        assert_eq!(noted.counts, super::Counts::default());
     }
 
     fn assert_selection_ending(
         out: &super::ChangeOutput,
-        selected: &[super::Status],
+        selected: &[super::OutcomeKind],
         mode: super::Mode,
         further: Option<bool>,
+        left_out: bool,
     ) {
-        use super::{Mode, NOTHING_LEFT, SEARCH_TIME_EXHAUSTED, Status};
+        use super::{LEFT_OUT, Mode, NOTHING_LEFT, OutcomeKind, SEARCH_TIME_EXHAUSTED};
+        let body = if left_out {
+            out.result
+                .strip_suffix(&format!("; {LEFT_OUT}"))
+                .unwrap_or_else(|| panic!("missing left-out sentence: {}", out.result))
+        } else {
+            assert!(!out.result.contains(LEFT_OUT), "{}", out.result);
+            out.result.as_str()
+        };
         if further.is_some() {
-            assert!(!out.result.contains("call again with them"));
-            if selected.iter().all(|status| *status == Status::NotReached) {
-                assert!(out.result.ends_with(SEARCH_TIME_EXHAUSTED));
-            } else if mode == Mode::Act && !selected.contains(&Status::NotReached) {
+            assert!(!body.contains("call again with them"));
+            if selected
+                .iter()
+                .all(|status| *status == OutcomeKind::NotReached)
+            {
+                assert!(body.ends_with(SEARCH_TIME_EXHAUSTED));
+            } else if mode == Mode::DryRun && further == Some(true) {
+                assert!(body.ends_with("more may match"), "selection ending");
+            } else if mode == Mode::Act && !selected.contains(&OutcomeKind::NotReached) {
                 let ending = match further {
-                    Some(true) if selected.contains(&Status::Ok) => {
-                        "more match: call again with the same selection"
+                    Some(true) if selected.contains(&OutcomeKind::Changed) => {
+                        "more may match: call again with the same selection"
                     }
                     Some(true) => {
-                        "more match, but none of these could be changed: narrow the search"
+                        "more may match, but none of these could be changed: narrow the search"
                     }
-                    _ if selected.contains(&Status::Failed) => "nothing left that can be changed",
+                    _ if selected.contains(&OutcomeKind::Failed) => {
+                        "nothing left that can be changed"
+                    }
                     _ => NOTHING_LEFT,
                 };
-                assert!(out.result.ends_with(ending), "selection ending");
+                assert!(body.ends_with(ending), "selection ending");
             }
         }
     }
@@ -4392,6 +4557,7 @@ mod tests {
                     true,
                     true,
                     Some(more),
+                    false,
                 )
                 .unwrap();
                 assert_eq!(result.messages[0].ids, [id]);

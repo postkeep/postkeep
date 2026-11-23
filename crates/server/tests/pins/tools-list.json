@@ -363,7 +363,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every message in the answer, with new ids, not only those that weren't changed.",
+              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed.",
               "type": "boolean"
             },
             "permanent": {
@@ -408,7 +408,7 @@
                   "type": "string"
                 },
                 "status": {
-                  "$ref": "#/$defs/Status"
+                  "$ref": "#/$defs/OutcomeKind"
                 }
               },
               "required": [
@@ -417,11 +417,49 @@
               ],
               "type": "object"
             },
-            "Status": {
-              "enum": [
-                "ok",
-                "failed",
+            "Counts": {
+              "properties": {
+                "already": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "changed": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "failed": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "not_found": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "not_reached": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "changed",
+                "already",
                 "not_found",
+                "failed",
+                "not_reached"
+              ],
+              "type": "object"
+            },
+            "OutcomeKind": {
+              "enum": [
+                "changed",
+                "already",
+                "not_found",
+                "failed",
                 "not_reached"
               ],
               "type": "string"
@@ -429,8 +467,12 @@
           },
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
+            "counts": {
+              "$ref": "#/$defs/Counts",
+              "description": "How many messages got each outcome (in a dry run, would get it). A selection counts only the messages it listed in this call."
+            },
             "messages": {
-              "description": "With ids or a selection: the messages that weren't changed, by status and reason; every message with list_all.",
+              "description": "With ids or a selection: the messages that failed or weren't reached, by outcome and reason; every one with list_all.",
               "items": {
                 "$ref": "#/$defs/ChangeGroup"
               },
@@ -448,6 +490,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "counts"
+          ],
           "type": "object"
         },
         "annotations": {
@@ -1254,7 +1299,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every message in the answer, with new ids, not only those that weren't changed.",
+              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed.",
               "type": "boolean"
             },
             "selection": {
@@ -1297,7 +1342,7 @@
                   "type": "string"
                 },
                 "status": {
-                  "$ref": "#/$defs/Status"
+                  "$ref": "#/$defs/OutcomeKind"
                 }
               },
               "required": [
@@ -1306,11 +1351,49 @@
               ],
               "type": "object"
             },
-            "Status": {
-              "enum": [
-                "ok",
-                "failed",
+            "Counts": {
+              "properties": {
+                "already": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "changed": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "failed": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "not_found": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "not_reached": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "changed",
+                "already",
                 "not_found",
+                "failed",
+                "not_reached"
+              ],
+              "type": "object"
+            },
+            "OutcomeKind": {
+              "enum": [
+                "changed",
+                "already",
+                "not_found",
+                "failed",
                 "not_reached"
               ],
               "type": "string"
@@ -1318,8 +1401,12 @@
           },
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
+            "counts": {
+              "$ref": "#/$defs/Counts",
+              "description": "How many messages got each outcome (in a dry run, would get it). A selection counts only the messages it listed in this call."
+            },
             "messages": {
-              "description": "With ids or a selection: the messages that weren't changed, by status and reason; every message with list_all.",
+              "description": "With ids or a selection: the messages that failed or weren't reached, by outcome and reason; every one with list_all.",
               "items": {
                 "$ref": "#/$defs/ChangeGroup"
               },
@@ -1337,6 +1424,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "counts"
+          ],
           "type": "object"
         },
         "annotations": {
@@ -1798,7 +1888,7 @@
               "type": "integer"
             },
             "total_is_estimate": {
-              "description": "Whether `total` is the provider's estimate rather than an exact count.",
+              "description": "Whether total is an estimate rather than an exact count, as when more than 1000 match or counting stopped early. On Outlook a search by sender, recipient, subject or text counts only among the newest messages it finds; narrow it with since or before to count older ones.",
               "type": "boolean"
             }
           },
@@ -2541,7 +2631,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every message in the answer, with new ids, not only those that weren't changed.",
+              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed.",
               "type": "boolean"
             },
             "read": {
@@ -2589,7 +2679,7 @@
                   "type": "string"
                 },
                 "status": {
-                  "$ref": "#/$defs/Status"
+                  "$ref": "#/$defs/OutcomeKind"
                 }
               },
               "required": [
@@ -2598,11 +2688,49 @@
               ],
               "type": "object"
             },
-            "Status": {
-              "enum": [
-                "ok",
-                "failed",
+            "Counts": {
+              "properties": {
+                "already": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "changed": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "failed": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "not_found": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "not_reached": {
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "changed",
+                "already",
                 "not_found",
+                "failed",
+                "not_reached"
+              ],
+              "type": "object"
+            },
+            "OutcomeKind": {
+              "enum": [
+                "changed",
+                "already",
+                "not_found",
+                "failed",
                 "not_reached"
               ],
               "type": "string"
@@ -2610,8 +2738,12 @@
           },
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
+            "counts": {
+              "$ref": "#/$defs/Counts",
+              "description": "How many messages got each outcome (in a dry run, would get it). A selection counts only the messages it listed in this call."
+            },
             "messages": {
-              "description": "With ids or a selection: the messages that weren't changed, by status and reason; every message with list_all.",
+              "description": "With ids or a selection: the messages that failed or weren't reached, by outcome and reason; every one with list_all.",
               "items": {
                 "$ref": "#/$defs/ChangeGroup"
               },
@@ -2629,6 +2761,9 @@
               "type": "string"
             }
           },
+          "required": [
+            "counts"
+          ],
           "type": "object"
         },
         "annotations": {

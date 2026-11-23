@@ -31,6 +31,7 @@ use postkeep::mailbox::{
     Change, Criteria, Cutoff, Mailbox, NOTHING_LEFT, Selected,
     selection::{REFUSAL, SearchSelection},
 };
+use postkeep::tools::LEFT_OUT;
 use postkeep::watch::{WatchConfig, Watchers};
 use postkeep_auth::{AuthConfig, CredentialVerifier, MailVerifier, VerifyFuture};
 use postkeep_mail::{ImapSecurity, ImapServer, ImapServers, MailConfig, Paging, SmtpSecurity};
@@ -994,7 +995,10 @@ async fn selected_uids(mailbox: &Mailbox, criteria: Criteria) -> Vec<u32> {
         )
         .await
         .unwrap();
-    let Selected::Matches { ids, more: false } = selected else {
+    let Selected::Matches {
+        ids, more: false, ..
+    } = selected
+    else {
         panic!("{selected:?}");
     };
     ids.iter()
@@ -1664,8 +1668,13 @@ async fn greenmail_end_to_end() {
         .await;
     assert_eq!(
         preview["result"],
-        "dry run, nothing changed: would mark 2 messages as read"
+        format!("dry run, nothing changed: would mark 2 messages as read; {LEFT_OUT}")
     );
+    assert_eq!(
+        preview["counts"],
+        json!({ "changed": 2, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+    );
+    assert_eq!(preview["messages"][0]["status"], "changed");
     assert_eq!(preview["messages"][0]["ids"].as_array().unwrap().len(), 2);
     let read = harness
         .call_ok(
@@ -1676,7 +1685,11 @@ async fn greenmail_end_to_end() {
         .await;
     assert_eq!(
         read["result"],
-        format!("2 messages: 2 marked as read; {NOTHING_LEFT}")
+        format!("2 messages: 2 marked as read; {NOTHING_LEFT}; {LEFT_OUT}")
+    );
+    assert_eq!(
+        read["counts"],
+        json!({ "changed": 2, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
     );
     let repeated = harness
         .call_ok(
@@ -1685,7 +1698,11 @@ async fn greenmail_end_to_end() {
             json!({ "selection": selection, "read": true }),
         )
         .await;
-    assert_eq!(repeated["result"], NOTHING_LEFT);
+    assert_eq!(repeated["result"], format!("{NOTHING_LEFT}; {LEFT_OUT}"));
+    assert_eq!(
+        repeated["counts"],
+        json!({ "changed": 0, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+    );
     for (tool, arguments, expected) in [
         (
             "update_flags",
@@ -1847,13 +1864,17 @@ async fn greenmail_end_to_end() {
     assert_eq!(moved["total"], 1);
     let moved_id = moved["messages"][0]["id"].as_str().unwrap().to_owned();
     assert_ne!(moved_id, id);
-    harness
+    let deleted = harness
         .call_ok(
             &token,
             "delete_message",
             json!({ "id": moved_id, "permanent": true }),
         )
         .await;
+    assert_eq!(
+        deleted["counts"],
+        json!({ "changed": 1, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
+    );
     let empty = harness
         .call_ok(&token, "search_messages", json!({ "folder": folder }))
         .await;

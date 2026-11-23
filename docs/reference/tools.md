@@ -59,13 +59,15 @@ Every input schema says so with `"additionalProperties": false`.
 and has no dry run. To archive, move to the folder `list_folders` marks
 archive (All Mail on Gmail).
 
-The answer counts `ok`, `failed`, `not_found` and `not_reached` messages.
-By default it lists failed ids, with each reason once. Messages not found
-are counted, not listed. Messages not reached are normally the tail of
-your list: call again with those. `list_all` groups every status and gives
-`new_ids` for moved messages when the provider reported a new id (IMAP
-`COPYUID` or Outlook's move answer). Without `list_all`, a group holding
-every message of the call lists no ids.
+Every answer that isn't an error has `counts`, one number per outcome
+(`changed`, `already`, `not_found`, `failed`, `not_reached`). By default it
+lists failed ids, with each reason once; messages already as asked or not
+found are counted, not listed. Messages not reached are normally the tail of
+your list: call again with those. `list_all` groups every outcome under the
+same words and gives `new_ids` for moved messages when the provider reported
+a new id (IMAP `COPYUID` or Outlook's move answer). Without `list_all`, a
+group holding every message of the call lists no ids. A selection leaves out
+messages already as asked and says so in its answer.
 
 A call has a short time budget and stops starting new work when it runs
 out. Re-run the unreached ids. If a failure says "check before repeating",
@@ -75,7 +77,7 @@ one folder go fastest. Acting on Gmail ids reads each first and can cost
 about 25 quota units per message; wait when Google asks you to.
 
 `dry_run` checks the destination and reads each message an id names to
-see what would change, without changing mail.
+see what would change, without changing mail; `counts` says what would happen.
 
 ## Acting on a search
 
@@ -120,7 +122,7 @@ The tools behave the same for every provider, with these differences:
 | Sent copy | Saved to Sent unless `save_to_sent` is false; Gmail saves its own, so none is added | Saved by Outlook | Saved by Gmail |
 | Drafts | Supported | Refused | Refused |
 | Permanent delete | Supported, except on Gmail: refused; delete without `permanent` to move it to Trash | Supported | Refused: postkeep doesn't request the scope that allows it, so messages go to Trash |
-| Search totals | Exact, or, when `from`, `to`, `subject`, `since` or `before` is given and the messages to check go past the page, an upper estimate: the server's count less what postkeep dropped so far. | Exact, or estimated for text searches | Estimated |
+| Search totals | Exact, or, when `from`, `to`, `subject`, `since` or `before` is given and the messages to check go past the page, an upper estimate: the server's count less what postkeep dropped so far. | For a search by date, unread or flagged alone, exact when Microsoft gives its count. By sender, recipient, subject or text, counted among the newest messages Microsoft's search returns, which it has been seen to cut off at a few hundred: past that an estimate; below it, the count of the listing Microsoft returned. | Exact up to as many matches as `ids` takes; past that Google's estimate. |
 | Search text | The server's search, then postkeep checks each message: `from`, `to` and `subject` must hold the text anywhere in the field as results show it, ignoring case, and `since` and `before` go by the day the `Date` header is written on (none: no match). Gmail's own search matches whole words, so it can find fewer. A selection can't use `text`. | Whole words, ignoring case and punctuation; `from`, `to` and `subject` must then hold the text as given. `text` searches the sender, subject and body, and a selection can use it only as one word of letters and digits. | Whole words in the given order, ignoring case and punctuation; a selection can't use `to`, and `from`, `subject` and `text` take only one word of letters and digits; `from` also accepts one address, but not `me`. |
 
 ## `search_messages`
@@ -333,7 +335,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every message in the answer, with new ids, not only those that weren't changed. |
+| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. |
 
 ## `move_message`
 
@@ -346,7 +348,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every message in the answer, with new ids, not only those that weren't changed. |
+| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. |
 
 ## `delete_message`
 
@@ -359,7 +361,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every message in the answer, with new ids, not only those that weren't changed. |
+| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. |
 
 ## `create_folder`
 
