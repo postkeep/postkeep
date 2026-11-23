@@ -486,11 +486,19 @@ pub enum Change {
 impl Change {
     fn already_reason(&self, permanent_delete: bool) -> String {
         match self {
-            Self::Move(_) => "already there",
-            Self::Trash => already_in_trash(permanent_delete),
-            Self::Flags { .. } => "the message is already marked as asked",
+            Self::Move(_) => "already there".to_owned(),
+            Self::Trash => already_in_trash(permanent_delete).to_owned(),
+            Self::Flags { read, flagged } => {
+                let states: Vec<_> = [
+                    read.map(|read| if read { "read" } else { "unread" }),
+                    flagged.map(|on| if on { "flagged" } else { "unflagged" }),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                format!("already {}", states.join(" and "))
+            }
         }
-        .to_owned()
     }
 }
 
@@ -797,7 +805,8 @@ impl Mailbox {
     ) -> MailboxResult<Selected> {
         let Some(criteria) = selection.criteria.leaving_out(change) else {
             return Ok(Selected::Done(format!(
-                "every match is already marked as asked; {NOTHING_LEFT}"
+                "every match is {}; {NOTHING_LEFT}",
+                change.already_reason(false)
             )));
         };
         let narrowed = criteria != selection.criteria;
@@ -1174,7 +1183,7 @@ fn finish_imap(
             out.finish(
                 Status::NotFound,
                 format!(
-                    "not in {} any more; an earlier call may have moved them{}",
+                    "no such message in {}; it may have been moved{}",
                     target.folder,
                     destination.map_or_else(String::new, |d| format!(": search {d}")),
                 ),
@@ -1980,7 +1989,10 @@ mod tests {
             vec![Status::Ok, Status::NotFound, Status::Ok]
         );
         assert_eq!(outcomes[0].new_id, Some(id::imap_id("Archive", 9, Some(8))));
-        assert!(outcomes[1].reason.contains("search Archive"));
+        assert_eq!(
+            outcomes[1].reason,
+            "no such message in INBOX; it may have been moved: search Archive"
+        );
         finish_imap(
             &mut outcomes[..1],
             &target,
@@ -2038,5 +2050,20 @@ mod tests {
         );
         // A blank id falls back to folder and uid.
         assert!(selector(Some("  "), Some("INBOX"), Some(5)).imap().is_ok());
+    }
+
+    #[test]
+    fn flag_already_reason_names_requested_states() {
+        for (read, flagged, expected) in [
+            (None, Some(true), "already flagged"),
+            (None, Some(false), "already unflagged"),
+            (Some(true), Some(true), "already read and flagged"),
+            (Some(true), Some(false), "already read and unflagged"),
+            (Some(false), Some(true), "already unread and flagged"),
+            (Some(false), Some(false), "already unread and unflagged"),
+        ] {
+            let change = Change::Flags { read, flagged };
+            assert_eq!(change.already_reason(false), expected);
+        }
     }
 }

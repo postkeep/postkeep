@@ -742,6 +742,13 @@ async fn outlook_accounts_work_through_graph() {
         harness.call_err(&token, "search_messages", blanks).await,
         "these filters are empty: subject, since; leave them out to search without them"
     );
+    let missing_target = json!({ "destination": "Archive", "dry_run": true });
+    assert_eq!(
+        harness
+            .call_err(&token, "move_message", missing_target)
+            .await,
+        "give one of id, ids or selection"
+    );
 
     let folders = harness.call_ok(&token, "list_folders", json!({})).await;
     assert_eq!(
@@ -854,7 +861,7 @@ async fn outlook_accounts_work_through_graph() {
         .await;
     assert_eq!(
         noop["result"],
-        format!("every match is already marked as asked; {NOTHING_LEFT}")
+        format!("every match is already unread; {NOTHING_LEFT}")
     );
     assert_eq!(
         noop["counts"],
@@ -1409,7 +1416,8 @@ async fn outlook_accounts_work_through_graph() {
     Mock::given(method("GET"))
         .and(path("/graph/v1.0/me/messages/AAMk-1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "AAMk-1", "isRead": true, "parentFolderId": "projects-id"
+            "id": "AAMk-1", "isRead": true, "parentFolderId": "projects-id",
+            "receivedDateTime": "2026-10-08T09:00:05Z"
         })))
         .mount(server)
         .await;
@@ -1419,6 +1427,7 @@ async fn outlook_accounts_work_through_graph() {
     assert_eq!(fetched["subject"], "Plans");
     assert_eq!(fetched["folder"], "Inbox/Projects");
     assert_eq!(fetched["unread"], false);
+    assert_eq!(fetched["date"], "2026-10-08T09:00:00+00:00");
     assert!(
         fetched["body"]
             .as_str()
@@ -2163,10 +2172,7 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         )
         .await;
         let checked = harness.call_ok(&token, "update_flags", json!({ "ids": ["graph.already-read", "graph.missing-read"], "read": true, "list_all": true })).await;
-        assert_eq!(
-            checked["result"],
-            "2 messages: 1 already marked as asked, 1 failed"
-        );
+        assert_eq!(checked["result"], "2 messages: 1 already read, 1 failed");
         assert_eq!(checked["messages"][1]["ids"], json!(["graph.missing-read"]));
         assert_eq!(
             checked["messages"][1]["reason"],
@@ -3280,7 +3286,8 @@ async fn gmail_accounts_work_through_the_gmail_api() {
         .and(path("/gmail/gmail/v1/users/me/messages/18c1"))
         .and(query_param("format", "raw"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "18c1", "threadId": "t1", "labelIds": ["Label_7"], "raw": raw
+            "id": "18c1", "threadId": "t1", "labelIds": ["Label_7"],
+            "internalDate": "1791450005000", "raw": raw
         })))
         .mount(server)
         .await;
@@ -3290,6 +3297,7 @@ async fn gmail_accounts_work_through_the_gmail_api() {
     assert_eq!(fetched["subject"], "Plans");
     assert_eq!(fetched["folder"], "Receipts");
     assert_eq!(fetched["unread"], false);
+    assert_eq!(fetched["date"], "2026-10-08T09:00:00+00:00");
     assert_eq!(fetched["reply_to"], json!([]));
     assert!(fetched.get("from_unclear").is_none());
 

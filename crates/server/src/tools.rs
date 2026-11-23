@@ -106,7 +106,7 @@ macro_rules! dry_run_doc {
 }
 macro_rules! list_all_doc {
     () => {
-        "List every id the call named or its selection listed, with new ids, not only those that weren't changed."
+        "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it."
     };
 }
 macro_rules! most_ids {
@@ -1423,6 +1423,14 @@ impl ActionParams {
         {
             return Err("give one of id, ids or selection".to_owned());
         }
+        // A blank single target still counts above so it never lets a bulk target run.
+        let non_blank = |s: Option<&str>| s.is_some_and(|v| !v.trim().is_empty());
+        let named = non_blank(self.selector.id.as_deref())
+            || non_blank(self.selector.folder.as_deref())
+            || self.selector.uid.is_some();
+        if !named && self.ids.is_none() && self.selection.is_none() {
+            return Err("give one of id, ids or selection".to_owned());
+        }
         if permanent && (self.ids.is_some() || self.selection.is_some()) {
             return Err(
                 "a permanent delete takes one id a call, after the person has confirmed it"
@@ -1660,7 +1668,7 @@ pub struct MessageOutput {
     /// Subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
-    /// Date in RFC 3339 format.
+    /// The Date header in RFC 3339, with the sender's offset: when the message says it was sent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
     /// Whether the message is unread.
@@ -1966,7 +1974,10 @@ fn single_summary(out: &ChangeOutcome, change: &Change) -> Result<String, String
             }
         )
     } else if !out.changed() {
-        out.reason.clone()
+        match change {
+            Change::Flags { .. } => format!("message {} is {}", out.id, out.reason),
+            _ => out.reason.clone(),
+        }
     } else {
         let mut text = match change {
             Change::Flags { .. } => {
@@ -2397,7 +2408,8 @@ impl MailTools {
         description = "Search a folder (default INBOX) by sender, recipient, subject, text, date range, unread or \
                        flagged state. Returns summaries newest first, with message ids for the other tools. When more match than one page, it also returns a selection for acting on every match. Every filter given must match. Gmail matches whole words, \
                        ignoring case and punctuation; Outlook finds whole words, then checks from, to and subject as \
-                       given, ignoring case. A selection is refused when the account can't match one of its filters exactly as given.",
+                       given, ignoring case. A selection is refused when the account can't match one of its filters \
+                       exactly as given. There is no newsletter filter; to find one newsletter's messages, search by its sender.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -2890,7 +2902,7 @@ impl MailTools {
     /// Moves messages to another folder.
     #[tool(
         title = "Move message",
-        description = "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). A moved message can get a new id (on IMAP accounts it always does): the answer gives it for one message, or with list_all, and the old id may stop working; otherwise search the destination.",
+        description = "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). Ids from current Outlook searches and Gmail ids (Sign in with Google) stay the same; on IMAP accounts, Gmail with an app password too, a moved message's old id finds nothing. Use any new id the answer gives (for one message, or with list_all); where an IMAP move gives none, search the destination.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -4039,27 +4051,23 @@ mod tests {
             let permanent = params.permanent;
             action_params!(params).selectors(permanent)
         };
+        for value in [
+            json!({ "id": "one", "ids": ["two"] }),
+            json!({ "folder": "INBOX", "uid": 1, "ids": ["two"] }),
+            json!({ "id": "one", "selection": "placeholder" }),
+            json!({ "ids": ["one"], "selection": "placeholder" }),
+            json!({ "folder": "INBOX", "uid": 1, "selection": "placeholder" }),
+            json!({ "id": "", "ids": ["two"] }),
+            json!({ "id": "", "selection": "placeholder" }),
+            json!({}),
+            json!({ "id": " " }),
+        ] {
+            assert_eq!(
+                parse(value).unwrap_err(),
+                "give one of id, ids or selection"
+            );
+        }
         for (value, reason) in [
-            (
-                json!({ "id": "one", "ids": ["two"] }),
-                "give one of id, ids or selection",
-            ),
-            (
-                json!({ "folder": "INBOX", "uid": 1, "ids": ["two"] }),
-                "give one of id, ids or selection",
-            ),
-            (
-                json!({ "id": "one", "selection": "placeholder" }),
-                "give one of id, ids or selection",
-            ),
-            (
-                json!({ "ids": ["one"], "selection": "placeholder" }),
-                "give one of id, ids or selection",
-            ),
-            (
-                json!({ "folder": "INBOX", "uid": 1, "selection": "placeholder" }),
-                "give one of id, ids or selection",
-            ),
             (
                 json!({ "selection": "placeholder", "permanent": true }),
                 "a permanent delete takes one id a call, after the person has confirmed it",
@@ -4126,26 +4134,28 @@ mod tests {
         }
     }
 
+    fn single_change_result(
+        id: String,
+        status: super::Status,
+        new_id: Option<&str>,
+        reason: &str,
+        change: &super::Change,
+        mode: super::Mode,
+        list: bool,
+    ) -> Result<super::ChangeOutput, String> {
+        let outcome = super::ChangeOutcome {
+            id,
+            status,
+            new_id: new_id.map(str::to_owned),
+            reason: reason.to_owned(),
+        };
+        super::summary(vec![outcome], change, mode, false, list, None, false)
+    }
+
     #[test]
     fn single_change_sentences_and_errors_keep_their_contract() {
-        use super::{
-            Change, ChangeOutcome, Counts, Mode, SEARCH_TIME_EXHAUSTED, Status, mail_error, summary,
-        };
-        let run = |id: String,
-                   status,
-                   new_id: Option<&str>,
-                   reason: &str,
-                   change: &Change,
-                   mode,
-                   list| {
-            let outcome = ChangeOutcome {
-                id,
-                status,
-                new_id: new_id.map(str::to_owned),
-                reason: reason.to_owned(),
-            };
-            summary(vec![outcome], change, mode, false, list, None, false)
-        };
+        use super::{Change, Counts, Mode, SEARCH_TIME_EXHAUSTED, Status, mail_error};
+        let run = single_change_result;
         assert_eq!(
             mail_error(postkeep_mail::Error::TimeExhausted),
             SEARCH_TIME_EXHAUSTED
@@ -4199,7 +4209,7 @@ mod tests {
             assert!(preview.messages.is_empty() && preview.new_ids.is_empty());
             for status in [Status::Failed, Status::NotFound, Status::NotReached] {
                 let reason = if status == Status::NotFound {
-                    "not in INBOX any more; an earlier call may have moved them: search Archive"
+                    "no such message in INBOX; it may have been moved: search Archive"
                 } else {
                     "provider's reason"
                 };
@@ -4208,16 +4218,25 @@ mod tests {
                 assert_eq!(err, reason);
             }
         }
-        let already = run(
-            "id-1".to_owned(),
-            Status::Ok,
-            None,
-            "already there",
-            &Change::Move("Archive".to_owned()),
-            Mode::Act,
-            false,
-        )
-        .unwrap();
+        assert_single_already_and_no_new_id();
+    }
+
+    fn assert_single_already_and_no_new_id() {
+        use super::{Change, Counts, Mode, Status};
+        let ok = |id: &str, reason, change| {
+            single_change_result(
+                id.to_owned(),
+                Status::Ok,
+                None,
+                reason,
+                change,
+                Mode::Act,
+                false,
+            )
+            .unwrap()
+        };
+        let moved = Change::Move("Archive".to_owned());
+        let already = ok("id-1", "already there", &moved);
         assert_eq!(already.result, "message id-1 is already in Archive");
         assert_eq!(
             already.counts,
@@ -4226,6 +4245,18 @@ mod tests {
                 ..Counts::default()
             }
         );
+        let imap_id = crate::mailbox::id::imap_id("INBOX", 88, Some(7));
+        let no_new_id = ok(&imap_id, "", &moved);
+        assert_eq!(
+            no_new_id.result,
+            format!("moved message {imap_id} to Archive; search Archive for its new id")
+        );
+        let flag = Change::Flags {
+            read: Some(true),
+            flagged: None,
+        };
+        let already_flag = ok("id-1", "already read", &flag);
+        assert_eq!(already_flag.result, "message id-1 is already read");
     }
     #[test]
     fn change_summary_reports_already_and_move_ids_including_trash() {
@@ -4321,7 +4352,7 @@ mod tests {
             OutcomeKind::Failed => (Status::Failed, "request refused"),
             OutcomeKind::NotFound => (
                 Status::NotFound,
-                "not in INBOX any more; an earlier call may have moved them: search Archive",
+                "no such message in INBOX; it may have been moved: search Archive",
             ),
             OutcomeKind::NotReached => (Status::NotReached, TIME_EXHAUSTED),
         };
@@ -4462,9 +4493,8 @@ mod tests {
                 id: format!("id-{i}"),
                 status: Status::NotFound,
                 new_id: None,
-                reason:
-                    "not in INBOX any more; an earlier call may have moved them: search Archive"
-                        .to_owned(),
+                reason: "no such message in INBOX; it may have been moved: search Archive"
+                    .to_owned(),
             })
             .collect();
         let out = summary(
@@ -4479,7 +4509,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             out.result,
-            "880 messages: 880 not found: not in INBOX any more; an earlier call may have moved them: search Archive"
+            "880 messages: 880 not found: no such message in INBOX; it may have been moved: search Archive"
         );
         assert!(out.messages.is_empty());
         let plain = super::empty_selection(false);

@@ -1366,6 +1366,8 @@ async fn greenmail_end_to_end() {
     assert_eq!(message["id"], id.as_str());
     assert_eq!(message["uid"], uid);
     assert_eq!(message["folder"], "INBOX");
+    assert_eq!(message["date"], found["messages"][0]["date"]);
+    assert!(message["date"].is_string());
     assert!(
         message["body"]
             .as_str()
@@ -1506,7 +1508,7 @@ async fn greenmail_end_to_end() {
         .await;
     assert_eq!(
         flags["result"],
-        "2 messages: 1 marked as read, 1 already marked as asked"
+        "2 messages: 1 marked as read, 1 already read"
     );
     for destination in ["INBOX", "inbox"] {
         let own = harness
