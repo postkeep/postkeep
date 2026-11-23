@@ -363,7 +363,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed.",
+              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it.",
               "type": "boolean"
             },
             "permanent": {
@@ -739,7 +739,7 @@
               "type": "array"
             },
             "date": {
-              "description": "Date in RFC 3339 format.",
+              "description": "The Date header in RFC 3339, with the sender's offset: when the message says it was sent.",
               "type": [
                 "string",
                 "null"
@@ -1256,7 +1256,7 @@
       {
         "name": "move_message",
         "title": "Move message",
-        "description": "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). A moved message can get a new id (on IMAP accounts it always does): the answer gives it for one message, or with list_all, and the old id may stop working; otherwise search the destination.",
+        "description": "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). Ids from current Outlook searches and Gmail ids (Sign in with Google) stay the same; on IMAP accounts, Gmail with an app password too, a moved message's old id finds nothing. Use any new id the answer gives (for one message, or with list_all); where an IMAP move gives none, search the destination.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
@@ -1299,7 +1299,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed.",
+              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it.",
               "type": "boolean"
             },
             "selection": {
@@ -1681,7 +1681,7 @@
       {
         "name": "search_messages",
         "title": "Search messages",
-        "description": "Search a folder (default INBOX) by sender, recipient, subject, text, date range, unread or flagged state. Returns summaries newest first, with message ids for the other tools. When more match than one page, it also returns a selection for acting on every match. Every filter given must match. Gmail matches whole words, ignoring case and punctuation; Outlook finds whole words, then checks from, to and subject as given, ignoring case. A selection is refused when the account can't match one of its filters exactly as given.",
+        "description": "Search a folder (default INBOX) by sender, recipient, subject, text, date range, unread or flagged state. Returns summaries newest first, with message ids for the other tools. When more match than one page, it also returns a selection for acting on every match. Every filter given must match. Gmail matches whole words, ignoring case and punctuation; Outlook finds whole words, then checks from, to and subject as given, ignoring case. A selection is refused when the account can't match one of its filters exactly as given. There is no newsletter filter; to find one newsletter's messages, search by its sender.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
@@ -2631,7 +2631,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed.",
+              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it.",
               "type": "boolean"
             },
             "read": {

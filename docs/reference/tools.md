@@ -24,10 +24,12 @@ What each tool does, the parameters it takes, and how the providers differ.
 | `remove_webhook_filter` | Removes one filter rule, or all of them. |
 
 Messages are addressed by an opaque `id` that `search_messages` returns;
-pass it to the other tools unchanged. A move can give a new id in the
-destination: the answer gives it for one message, or with `list_all`, when
-the server reports it; otherwise search the destination. See the message
-ids row under Provider differences. IMAP accounts also accept the deprecated
+pass it to the other tools unchanged. Ids from current Outlook searches, and
+Gmail ids with Sign in with Google, stay the same on a move; an IMAP id, on
+Gmail with an app password too, does not, and an older Outlook id changes
+(see the message ids row under Provider differences). The answer gives the
+new id for one message, or with `list_all`, when the server reports it;
+otherwise search the destination. IMAP accounts also accept the deprecated
 `folder` plus `uid` pair, and IMAP results still include `uid`. An IMAP id
 carries the folder's UIDVALIDITY: if the server resets it (the folder was
 recreated or rebuilt), the tools refuse the id as out of date instead of
@@ -127,7 +129,10 @@ The tools behave the same for every provider, with these differences:
 
 ## `search_messages`
 
-Every filter given must match; a blank one is refused.
+Every filter given must match; a blank one is refused. Outlook and Gmail
+with Sign in with Google refuse a filter with no word to search for (only
+symbols, such as `--`); that Gmail also refuses a `since` or `before`
+earlier than 1970-01-02.
 
 | Parameter | Meaning |
 | --- | --- |
@@ -180,6 +185,11 @@ whole in `from`, as sent, with `<`, `>` and their look-alikes as escapes,
 and `from_unclear` is `true`: a mail app may show another sender.
 `search_messages` shows and marks such a sender the same way, except on
 Outlook, where Microsoft Graph names the sender's address.
+
+The result's `date` is the message's `Date` header, in RFC 3339 with the
+sender's offset: when the message says it was sent. It is absent when the
+header is missing or can't be read. A `search_messages` result's `date` has
+rules of its own: on Gmail and Outlook, when the message was received.
 
 ## `download_attachment`
 
@@ -335,7 +345,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. |
+| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it. |
 
 ## `move_message`
 
@@ -348,7 +358,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. |
+| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it. |
 
 ## `delete_message`
 
@@ -361,7 +371,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. |
+| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it. |
 
 ## `create_folder`
 
