@@ -349,7 +349,10 @@ impl GmailMailbox {
                 "Gmail searches reach the first {MAX_SEARCH_WINDOW} matches; narrow the search"
             )));
         }
-        let (ids, estimate, more) = self.list(&folder, criteria, window + 1, &[]).await?;
+        // Count up to MOST_IDS so first-page totals are exact within one selection's cap.
+        let (ids, estimate, more) = self
+            .list(&folder, criteria, window.max(crate::tools::MOST_IDS), &[])
+            .await?;
         let has_more = ids.len() > window || more;
         let wanted: Vec<String> = ids
             .iter()
@@ -464,6 +467,7 @@ impl GmailMailbox {
         if kept && more {
             return Err(Selected::kept_folder(folder, most));
         }
+        let mut left_out = !extra.is_empty();
         if kept
             && !ids.is_empty()
             && let Some(Folder::Label(label)) = &destination
@@ -490,18 +494,23 @@ impl GmailMailbox {
             ids.retain(|id| {
                 labelled.as_ref().is_some_and(|labels| !labels.contains(id)) || inbox.contains(id)
             });
+            left_out = true;
             if ids.is_empty()
                 && let Change::Move(name) = change
             {
                 return Ok(Selected::own_folder(name, change, false));
             }
         }
-        Ok(Selected::matches(
+        let mut selected = Selected::matches(
             ids.into_iter()
                 .take(most)
                 .map(|id| id::provider_id(GMAIL_PREFIX, &id)),
             more,
-        ))
+        );
+        if let Selected::Matches { left_out: flag, .. } = &mut selected {
+            *flag = left_out;
+        }
+        Ok(selected)
     }
 
     async fn metadata(&self, message: &str) -> MailboxResult<GmailMessage> {

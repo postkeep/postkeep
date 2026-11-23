@@ -270,6 +270,8 @@ pub enum Selected {
         ids: Vec<Selector>,
         /// Whether matches remain beyond these ids.
         more: bool,
+        /// Whether the listing left out messages already as asked.
+        left_out: bool,
     },
     /// Final answer, with no messages to act on.
     Done(String),
@@ -299,6 +301,7 @@ impl Selected {
                 })
                 .collect(),
             more,
+            left_out: false,
         }
     }
 }
@@ -510,17 +513,15 @@ pub enum Mode {
 }
 
 /// The result for one requested message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(description = "")]
-#[allow(
-    missing_docs,
-    reason = "the schema deliberately presents a plain status enum"
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
+    /// Changed or already in the requested state.
     Ok,
+    /// Refused, or sent without a usable answer.
     Failed,
+    /// No message matched the id in this mailbox.
     NotFound,
+    /// Not started before the call stopped.
     NotReached,
 }
 
@@ -795,8 +796,11 @@ impl Mailbox {
         deadline: Instant,
     ) -> MailboxResult<Selected> {
         let Some(criteria) = selection.criteria.leaving_out(change) else {
-            return Ok(Selected::Done(NOTHING_LEFT.to_owned()));
+            return Ok(Selected::Done(format!(
+                "every match is already marked as asked; {NOTHING_LEFT}"
+            )));
         };
+        let narrowed = criteria != selection.criteria;
         let result = match (self, criteria.until) {
             (Self::Graph(graph), Some(Cutoff::Time(_))) => {
                 graph
@@ -816,6 +820,15 @@ impl Mailbox {
         };
         match result {
             Err(MailboxError::Deadline) => Ok(Selected::Done(SEARCH_TIME_EXHAUSTED.to_owned())),
+            Ok(Selected::Matches {
+                ids,
+                more,
+                left_out,
+            }) => Ok(Selected::Matches {
+                ids,
+                more,
+                left_out: left_out || narrowed,
+            }),
             result => result,
         }
     }

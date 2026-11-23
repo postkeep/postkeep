@@ -49,8 +49,14 @@ const MAX_FOLDERS: usize = 1000;
 const MAX_DEPTH: usize = 8;
 /// Graph's largest message page; also the raw keyword window, which cannot skip.
 pub const MAX_SEARCH_WINDOW: usize = 1000;
+/// Raw `$search` hits past which an ended listing is treated as cut off.
+///
+/// Graph has been observed to end message `$search` listings near 275 hits
+/// with no `@odata.nextLink` (<https://github.com/mpalermiti/outlook-mcp/issues/134>).
+pub const LISTING_TRUSTED: usize = 250;
 // The keyword listing uses its raw window's completeness for the action cap.
 const _: () = assert!(crate::tools::MOST_IDS == MAX_SEARCH_WINDOW);
+const _: () = assert!(LISTING_TRUSTED <= MAX_SEARCH_WINDOW);
 /// Graph translates at most 1,000 ids in one `translateExchangeIds` call.
 const TRANSLATE_MAX: usize = 1000;
 const _: () = assert!(MAX_SEARCH_WINDOW <= TRANSLATE_MAX);
@@ -695,9 +701,10 @@ impl GraphMailbox {
         };
         let window = kql.is_some() && more;
         if window && matches!(change, Change::Flags { .. }) {
-            return Err(MailboxError::Message(format!(
-                "a change of read or flagged can't get past the first {MAX_SEARCH_WINDOW} messages Outlook finds by sender, recipient, subject or text; narrow the search with since or before"
-            )));
+            return Err(MailboxError::Message(
+                "a change of read or flagged can't be sure to reach every message Outlook finds by sender, recipient, subject or text; narrow the search with since or before"
+                    .to_owned(),
+            ));
         }
         if messages.is_empty() && window {
             return Ok(Selected::Done(window_ending()));
@@ -715,18 +722,11 @@ impl GraphMailbox {
 
     /// `$search` cannot be combined with `$filter`, `$skip` or `$count`.
     ///
-    /// Sender, recipient, subject, date, unread and flagged filters are also
-    /// checked on each hit. With such a filter, raw hits are read up to
-    /// [`MAX_SEARCH_WINDOW`] (following a validated next link) and then
-    /// paged locally, so a page of non-matching hits
-    /// cannot hide later matches or report a next offset that does not move.
-    /// A keyword search without those filters follows validated next links
-    /// until `offset + limit` raw matches are collected, plus one lookahead
-    /// when that still fits in [`MAX_SEARCH_WINDOW`]. The lookahead is
-    /// clamped to the window, and a page that ends on the window reports no
-    /// further offset. That walk stays inside [`MAX_SEARCH_WINDOW`] and
-    /// [`MAX_SEARCH_PAGES`], so a short or empty Graph page cannot hide
-    /// later matches or end the search early.
+    /// Raw hits are read up to [`MAX_SEARCH_WINDOW`] (following validated next
+    /// links within [`MAX_SEARCH_PAGES`]), checked against sender, recipient,
+    /// subject, date, unread and flagged filters, and paged locally so the
+    /// window's count is known and a short, empty or non-matching Graph page
+    /// cannot hide later matches.
     async fn search_keywords(
         &self,
         folder: &FolderRef,
@@ -734,43 +734,26 @@ impl GraphMailbox {
         kql: &str,
         paging: Paging,
     ) -> MailboxResult<Page> {
-        let filtered = *criteria
-            != Criteria {
-                text: criteria.text.clone(),
-                ..Criteria::default()
-            };
-        // The requested page has to sit inside the window. One extra match
-        // tells `has_more`, but that probe never goes past the window, so a
-        // page that ends exactly on it is accepted and has no next offset.
-        let page_end = paging.offset.saturating_add(paging.limit);
-        if !filtered && page_end > MAX_SEARCH_WINDOW {
+        if paging.offset >= MAX_SEARCH_WINDOW {
             return Err(MailboxError::Message(format!(
                 "keyword searches on Outlook reach the first {MAX_SEARCH_WINDOW} matches; narrow the search"
             )));
         }
-        let probe = page_end.saturating_add(1).min(MAX_SEARCH_WINDOW);
-        let top = if filtered { MAX_SEARCH_WINDOW } else { probe };
-        let url = self.keyword_url(folder, kql, top, &keyword_fields(criteria));
-        // Filtered searches keep every match inside the raw window.
-        // Unfiltered searches stop at the probe.
-        let target = if filtered { usize::MAX } else { probe };
-        let (mut matching, further) = self.collect_keyword_matches(url, criteria, target).await?;
+        let url = self.keyword_url(folder, kql, MAX_SEARCH_WINDOW, &keyword_fields(criteria));
+        let (mut matching, further) = self
+            .collect_keyword_matches(url, criteria, usize::MAX)
+            .await?;
         let range = page_range(matching.len(), paging);
         self.immutable(&mut matching[range]).await?;
-        let at_window_edge = !filtered && page_end >= MAX_SEARCH_WINDOW;
-        Ok(keyword_page(
-            matching,
-            paging,
-            !filtered && further && !at_window_edge,
-        ))
+        Ok(keyword_page(matching, paging, further))
     }
 
     /// Raw `$search` hits that pass `criteria`.
     ///
     /// Stops once `target` matches are collected, or at [`MAX_SEARCH_WINDOW`]
-    /// raw hits or [`MAX_SEARCH_PAGES`]. The bool is true at either cap, or
-    /// when an unconsumed hit or a validated next link was left behind:
-    /// a full raw window does not prove the search is complete.
+    /// raw hits or [`MAX_SEARCH_PAGES`]. The bool is true when more hits may
+    /// follow: at either cap, when an unconsumed hit or a validated next link
+    /// was left behind, or once [`LISTING_TRUSTED`] raw hits have been seen.
     async fn collect_keyword_matches(
         &self,
         mut url: Url,
@@ -799,13 +782,13 @@ impl GraphMailbox {
                     let more_on_page = index + 1 < count;
                     return Ok((
                         matching,
-                        seen >= MAX_SEARCH_WINDOW || more_on_page || next.is_some(),
+                        seen >= LISTING_TRUSTED || more_on_page || next.is_some(),
                     ));
                 }
             }
             match next {
                 Some(next) => url = next,
-                None => return Ok((matching, false)),
+                None => return Ok((matching, seen >= LISTING_TRUSTED)),
             }
         }
     }
@@ -1841,7 +1824,7 @@ pub(crate) fn validated_next_link(base: &Url, link: Option<&str>) -> Option<Url>
 
 pub(crate) fn window_ending() -> String {
     format!(
-        "{NOTHING_LEFT} among the first {MAX_SEARCH_WINDOW} messages Outlook finds; more may match: narrow the search with since or before"
+        "{NOTHING_LEFT} among the messages Outlook's search returned; more may match: narrow the search with since or before"
     )
 }
 
@@ -1907,19 +1890,17 @@ fn page_range(len: usize, paging: Paging) -> Range<usize> {
     start..start.saturating_add(paging.limit).min(len)
 }
 
-/// One local page of keyword matches. `has_more` is set only when this page
-/// is non-empty and another match or a further raw page follows it, so the
-/// next offset always moves forward.
-fn keyword_page(mut matching: Vec<GraphMessage>, paging: Paging, further: bool) -> Page {
+/// One local page of keyword matches. `has_more` counts only matches inside the
+/// window, and `estimated` reflects whether more raw hits may follow it.
+fn keyword_page(mut matching: Vec<GraphMessage>, paging: Paging, estimated: bool) -> Page {
     let total = matching.len();
     let range = page_range(total, paging);
     let messages: Vec<Summary> = matching.drain(range).map(GraphMessage::summary).collect();
-    let has_more =
-        !messages.is_empty() && (total > paging.offset.saturating_add(messages.len()) || further);
+    let has_more = !messages.is_empty() && total > paging.offset.saturating_add(messages.len());
     Page {
         cutoff: None,
         total,
-        estimated: true,
+        estimated,
         offset: paging.offset,
         has_more,
         messages,
@@ -2731,7 +2712,8 @@ mod tests {
         assert_eq!(first.messages.len(), 1);
         assert_eq!(first.messages[0].id, "graph.unread-1");
         assert!(first.has_more);
-        assert!(first.estimated);
+        assert_eq!(first.total, 2);
+        assert!(!first.estimated);
         let second = mailbox
             .search("inbox", &criteria, Paging::new(1, 1))
             .await
@@ -2807,13 +2789,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unfiltered_keyword_search_keeps_a_small_window() {
+    async fn text_searches_count_the_window() {
         let server = MockServer::start().await;
         let (mailbox, _dir) = outlook(&server).await;
         Mock::given(method("GET"))
             .and(path(SEARCH_PATH))
             .and(query_param("$search", "\"budget\""))
-            .and(query_param("$top", "2"))
+            .and(query_param("$top", "1000"))
             .and(query_param_is_missing("$skiptoken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": [message("hit-1", true, false)],
@@ -2837,7 +2819,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(SEARCH_PATH))
             .and(query_param("$search", "\"other\""))
-            .and(query_param("$top", "2"))
+            .and(query_param("$top", "1000"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": [],
                 "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=more",
@@ -2852,6 +2834,8 @@ mod tests {
             .unwrap();
         assert_eq!(hit.messages.len(), 1);
         assert_eq!(hit.messages[0].id, "graph.hit-1");
+        assert_eq!(hit.total, 2);
+        assert!(!hit.estimated);
         assert!(hit.has_more);
         let empty = mailbox
             .search(
@@ -2865,6 +2849,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(empty.messages.len(), 0);
+        assert_eq!(empty.total, 0);
+        assert!(!empty.estimated);
         assert!(!empty.has_more);
     }
 
@@ -2882,6 +2868,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(SEARCH_PATH))
             .and(query_param("$search", "\"budget\""))
+            .and(query_param("$top", "1000"))
             .and(query_param_is_missing("$skiptoken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": [message("hit-1", true, false)],
@@ -2932,20 +2919,13 @@ mod tests {
                 .is_some_and(|query| query.contains("skiptoken=page-2"))),
             "a short page must be followed"
         );
-        assert!(
-            requests.iter().all(|request| {
-                request
-                    .url
-                    .query_pairs()
-                    .all(|(key, value)| key != "$top" || value != "1000")
-            }),
-            "an unfiltered search keeps the small window"
-        );
+        assert_eq!(first.total, 3);
+        assert!(!first.estimated);
         let first_top = requests[0]
             .url
             .query_pairs()
             .find_map(|(key, value)| (key == "$top").then(|| value.into_owned()));
-        assert_eq!(first_top.as_deref(), Some("2"));
+        assert_eq!(first_top.as_deref(), Some("1000"));
     }
 
     #[tokio::test]
@@ -2955,6 +2935,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(SEARCH_PATH))
             .and(query_param("$search", "\"budget\""))
+            .and(query_param("$top", "1000"))
             .and(query_param_is_missing("$skiptoken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": [],
@@ -2973,6 +2954,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(SEARCH_PATH))
             .and(query_param("$search", "\"lone\""))
+            .and(query_param("$top", "1000"))
             .and(query_param_is_missing("$skiptoken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": [],
@@ -3028,19 +3010,44 @@ mod tests {
     async fn unfiltered_keyword_search_rejects_a_window_past_the_cap() {
         let server = MockServer::start().await;
         let (mailbox, _dir) = outlook(&server).await;
-        let err = mailbox
-            .search(
-                "inbox",
-                &budget(false, false),
-                Paging::new(MAX_SEARCH_WINDOW, 1),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains(&MAX_SEARCH_WINDOW.to_string()),
-            "{err}"
-        );
+        for criteria in [
+            budget(false, false),
+            Criteria {
+                from: Some("otters@example.net".to_owned()),
+                ..Criteria::default()
+            },
+        ] {
+            let err = mailbox
+                .search("inbox", &criteria, Paging::new(MAX_SEARCH_WINDOW, 1))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains(&MAX_SEARCH_WINDOW.to_string()),
+                "{err}"
+            );
+        }
         assert!(server.received_requests().await.unwrap().is_empty());
+
+        let matches: Vec<_> = (0..MAX_SEARCH_WINDOW)
+            .map(|index| message(&format!("m{index}"), false, false))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(SEARCH_PATH))
+            .and(query_param("$search", "\"budget\""))
+            .and(query_param("$top", "1000"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": matches })))
+            .mount(&server)
+            .await;
+        let crossing = mailbox
+            .search("inbox", &budget(false, false), Paging::new(975, 75))
+            .await
+            .unwrap();
+        assert_eq!(crossing.messages.len(), 25);
+        assert_eq!(crossing.messages[0].id, "graph.m975");
+        assert_eq!(crossing.messages[24].id, "graph.m999");
+        assert_eq!(crossing.total, MAX_SEARCH_WINDOW);
+        assert!(crossing.estimated);
+        assert!(!crossing.has_more);
     }
 
     #[tokio::test]
@@ -3085,6 +3092,8 @@ mod tests {
         assert_eq!(at_900.messages.len(), 100);
         assert_eq!(at_900.messages[0].id, "graph.m900");
         assert_eq!(at_900.messages[99].id, "graph.m999");
+        assert_eq!(at_900.total, MAX_SEARCH_WINDOW);
+        assert!(at_900.estimated);
         assert!(
             !at_900.has_more,
             "a page that ends on the window has no next offset"
@@ -3119,14 +3128,66 @@ mod tests {
                     .unwrap_or_default()
             })
             .collect();
-        assert_eq!(tops, ["901", "1000", "1000"]);
+        assert_eq!(tops, ["1000", "1000", "1000"]);
         assert!(
             requests.iter().all(|request| !request
                 .url
                 .query()
                 .is_some_and(|query| query.contains("skiptoken"))),
-            "the lookahead must not request a match past the window"
+            "the window read must not request a match past the window"
         );
+    }
+
+    #[tokio::test]
+    async fn keyword_totals_trust_short_listings_and_mark_cut_windows_estimated() {
+        let server = MockServer::start().await;
+        let (mailbox, _dir) = outlook(&server).await;
+        for (term, count, expected_estimated) in [
+            ("short", LISTING_TRUSTED - 1, false),
+            ("trusted", LISTING_TRUSTED, true),
+        ] {
+            let value: Vec<_> = (0..count)
+                .map(|i| message(&format!("{term}-{i}"), false, false))
+                .collect();
+            Mock::given(method("GET"))
+                .and(path(SEARCH_PATH))
+                .and(query_param("$search", format!("\"{term}\"")))
+                .and(query_param("$top", "1000"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": value })))
+                .mount(&server)
+                .await;
+            let page = mailbox
+                .search(
+                    "inbox",
+                    &Criteria {
+                        text: Some(term.to_owned()),
+                        ..Criteria::default()
+                    },
+                    Paging::new(0, 1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.total, count);
+            assert_eq!(page.estimated, expected_estimated, "{term}");
+        }
+
+        let cut: Vec<_> = (0..MAX_SEARCH_WINDOW)
+            .map(|i| message(&format!("cut-{i}"), i >= 2, false))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(SEARCH_PATH))
+            .and(query_param("$search", "\"budget\""))
+            .and(query_param("$top", "1000"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": cut })))
+            .mount(&server)
+            .await;
+        let page = mailbox
+            .search("inbox", &budget(true, false), Paging::new(0, 20))
+            .await
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.estimated);
+        assert!(!page.has_more);
     }
 
     fn ids(page: &Page) -> Vec<&str> {
