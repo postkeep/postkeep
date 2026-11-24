@@ -3,7 +3,7 @@
 This review covers what Phase 2 added: sign-in with Microsoft and Google,
 the Microsoft Graph and Gmail mailboxes, Graph change notifications, Gmail
 push through Cloud Pub/Sub, and the durable webhook outbox. It follows the
-[October 2026 audit](audit-2026-10.md) and extends the
+[October 2026 internal security review](audit-2026-10.md) and extends the
 [threat model](threat-model.md).
 
 ## Scope
