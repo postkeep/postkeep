@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -34,11 +35,9 @@ pub struct Authenticated {
     /// account ID. The request log writes it, so it must hold no address or
     /// secret.
     pub principal: String,
-    /// Every mailbox the caller may use, `account_id` first. With a
-    /// resolver whose [`PrincipalResolver::selects_mailboxes`] is true, a
-    /// tool call picks one of them by ID or address; otherwise only
-    /// `account_id` is used.
+    /// Every mailbox the caller may use in this tenancy, `account_id` first.
     pub mailboxes: Vec<AccountId>,
+    tenancies: Option<Arc<[Self]>>,
 }
 
 impl Authenticated {
@@ -55,6 +54,7 @@ impl Authenticated {
             tenant: DEFAULT_TENANT.to_owned(),
             principal,
             mailboxes,
+            tenancies: None,
         }
     }
 
@@ -90,6 +90,56 @@ impl Authenticated {
     pub fn with_principal(mut self, principal: impl Into<String>) -> Self {
         self.principal = principal.into();
         self
+    }
+
+    /// The caller's tenancies in order, with the connection's default first.
+    /// A caller without a list has only its own tenancy.
+    #[must_use]
+    pub fn tenancies(&self) -> &[Self] {
+        self.tenancies
+            .as_deref()
+            .unwrap_or_else(|| std::slice::from_ref(self))
+    }
+
+    /// Sets the caller's tenancies, with the first as the default.
+    ///
+    /// Provide one entry per tenant. The entries' own lists are discarded,
+    /// and the connection's client and scope stay the same. An empty list
+    /// leaves just the caller's current tenancy.
+    #[must_use]
+    pub fn with_tenancies(mut self, mut tenancies: Vec<Self>) -> Self {
+        for tenancy in &mut tenancies {
+            tenancy.tenancies = None;
+        }
+        if let Some(first) = tenancies.first() {
+            self = self.acting_as(first);
+            self.tenancies = Some(tenancies.into());
+        } else {
+            self.tenancies = None;
+        }
+        self
+    }
+
+    /// The same connection acting in `tenant`, if it is one of its
+    /// tenancies. The list and its default remain unchanged.
+    #[must_use]
+    pub fn in_tenant(&self, tenant: &str) -> Option<Self> {
+        self.tenancies()
+            .iter()
+            .find(|entry| entry.tenant == tenant)
+            .map(|entry| self.acting_as(entry))
+    }
+
+    fn acting_as(&self, tenancy: &Self) -> Self {
+        Self {
+            account_id: tenancy.account_id.clone(),
+            client_id: self.client_id.clone(),
+            scope: self.scope.clone(),
+            tenant: tenancy.tenant.clone(),
+            principal: tenancy.principal.clone(),
+            mailboxes: tenancy.mailboxes.clone(),
+            tenancies: self.tenancies.clone(),
+        }
     }
 }
 
@@ -146,14 +196,25 @@ pub trait PrincipalResolver: Send + Sync + 'static {
         request: BearerRequest<'a>,
     ) -> ResolveFuture<'a>;
 
-    /// Whether a principal may hold several mailboxes
-    /// ([`Authenticated::mailboxes`]). When true, every MCP tool takes an
-    /// optional `mailbox` argument, an ID or address among the caller's
-    /// mailboxes; anything else fails as an unknown mailbox. The server
-    /// reads this once, when it builds its router. Default: false, and the
-    /// tools act on [`Authenticated::account_id`] only.
+    /// Whether MCP tool calls can select a mailbox or tenancy.
+    ///
+    /// When true, `mailbox` names an allowed mailbox by ID or address,
+    /// scoped by [`Self::tenant_argument`] when given. An unknown tenant,
+    /// an unknown mailbox or an ambiguous address stops the call before
+    /// tool checks, usage hooks or the tool run. The server reads this once
+    /// when it builds its router. Default: false, using only
+    /// [`Authenticated::account_id`].
     fn selects_mailboxes(&self) -> bool {
         false
+    }
+
+    /// Names an optional tool argument picking a tenant by ID.
+    ///
+    /// Only used when [`Self::selects_mailboxes`] is true, and read when the server
+    /// builds its router. The embedding advertises it in its own schemas;
+    /// the server does not add it to the built-in tools. Default: none.
+    fn tenant_argument(&self) -> Option<&'static str> {
+        None
     }
 }
 
@@ -303,4 +364,48 @@ fn unauthorized(state: &AuthState, request: &Request, error: Option<&str>) -> Re
             .insert(header::WWW_AUTHENTICATE, value);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenancies_keep_the_connection_default_and_order() {
+        let tenancy = |name: &str| {
+            Authenticated::for_account(
+                AccountId(format!("mailbox-{name}")),
+                "client".to_owned(),
+                "mail".to_owned(),
+            )
+            .with_tenant(name)
+            .with_principal(format!("principal-{name}"))
+        };
+        let a = tenancy("tenant-a");
+        let b = tenancy("tenant-b").with_mailboxes([AccountId("extra".to_owned())]);
+        assert_eq!(a.tenancies(), std::slice::from_ref(&a));
+        assert_eq!(a.in_tenant("tenant-a"), Some(a.clone()));
+
+        let connection = Authenticated {
+            client_id: "connection-client".to_owned(),
+            scope: "connection-scope".to_owned(),
+            ..b.clone()
+        };
+        let expected = |entry| Authenticated {
+            client_id: connection.client_id.clone(),
+            scope: connection.scope.clone(),
+            ..entry
+        };
+        let caller = connection.clone().with_tenancies(vec![
+            a.clone().with_tenancies(vec![a.clone(), b.clone()]),
+            b.clone(),
+        ]);
+        assert_eq!(caller.tenancies(), [a.clone(), b.clone()]);
+        assert_eq!(caller.clone().with_tenancies(vec![]), expected(a));
+        assert_eq!(caller.in_tenant("tenant-a"), Some(caller.clone()));
+        assert_eq!(caller.in_tenant("not-a-tenant"), None);
+        let narrowed = caller.in_tenant("tenant-b").unwrap();
+        assert_eq!(narrowed.clone().with_tenancies(vec![]), expected(b));
+        assert_eq!(narrowed.tenancies(), caller.tenancies());
+    }
 }

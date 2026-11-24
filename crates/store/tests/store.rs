@@ -28,7 +28,7 @@ use postkeep_store::{
     MAX_CONSECUTIVE_FAILURES, MasterKey, NewClient, NewFilterRule, OAuthAccount, OutboxLimitChange,
     PIECE_TAG, Provider, PurgePolicy, Redemption, RefreshRotation, SessionTtl, Store, StoreError,
     UploadBounds, UploadLookup, UploadOwner, UpstreamTokens, WatchCursor, WebhookSettings,
-    open_piece, seal_piece,
+    open_piece, revoke_grants, seal_piece,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -3318,22 +3318,67 @@ async fn exercise_principal_grants(store: &Store) {
         )
         .await
         .unwrap();
-    let revoked_grant = store.create_grant(&grant).await.unwrap();
-    let (revoked_access, revoked_refresh) = (unique("access"), unique("refresh"));
+    let second = CodeGrant {
+        client_id: client(store).await,
+        ..grant.clone()
+    };
+    let mut pairs = Vec::new();
+    for code_grant in [&grant, &second] {
+        let id = store.create_grant(code_grant).await.unwrap();
+        let (code, access, refresh) = (unique("code"), unique("access"), unique("refresh"));
+        store
+            .save_tokens(&id, &access, MINUTE, &refresh, MINUTE)
+            .await
+            .unwrap();
+        store.save_code(&code, code_grant, MINUTE).await.unwrap();
+        pairs.push((code, access, refresh));
+    }
+    let [
+        (pending, revoked_access, revoked_refresh),
+        (kept_code, kept_access, kept_refresh),
+    ] = <[_; 2]>::try_from(pairs).unwrap();
+
+    let begin = || {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the embedding owns this transaction and revocation writes first"
+        )]
+        store.pool().begin()
+    };
+    let mut tx = begin().await.unwrap();
+    assert_eq!(
+        revoke_grants(&mut tx, &principal, Some(&client_id))
+            .await
+            .unwrap(),
+        1
+    );
+    tx.rollback().await.unwrap();
+    assert!(store.access_token(&revoked_access).await.unwrap().is_some());
+    assert!(matches!(
+        store
+            .take_refresh_token(&revoked_refresh, &client_id)
+            .await
+            .unwrap(),
+        Redemption::Valid(_)
+    ));
+    assert_eq!(
+        store.take_code(&pending).await.unwrap(),
+        Redemption::Valid(grant.clone())
+    );
+    let not_redeemed = unique("code");
     store
-        .save_tokens(
-            &revoked_grant,
-            &revoked_access,
-            MINUTE,
-            &revoked_refresh,
-            MINUTE,
-        )
+        .save_code(&not_redeemed, &grant, MINUTE)
         .await
         .unwrap();
-    let pending = unique("code");
-    store.save_code(&pending, &grant, MINUTE).await.unwrap();
 
-    assert_eq!(store.revoke_principal_grants(&principal).await.unwrap(), 1);
+    let mut tx = begin().await.unwrap();
+    assert_eq!(
+        revoke_grants(&mut tx, &principal, Some(&client_id))
+            .await
+            .unwrap(),
+        1
+    );
+    tx.commit().await.unwrap();
     assert!(store.access_token(&revoked_access).await.unwrap().is_none());
     assert_eq!(
         store
@@ -3343,9 +3388,47 @@ async fn exercise_principal_grants(store: &Store) {
         Redemption::Invalid
     );
     assert_eq!(
-        store.take_code(&pending).await.unwrap(),
+        store.take_code(&not_redeemed).await.unwrap(),
         Redemption::Invalid,
         "a code not redeemed yet is revoked too"
+    );
+    assert_eq!(
+        store.take_code(&pending).await.unwrap(),
+        Redemption::Invalid
+    );
+    assert!(store.access_token(&kept_access).await.unwrap().is_some());
+    assert!(matches!(
+        store
+            .take_refresh_token(&kept_refresh, &second.client_id)
+            .await
+            .unwrap(),
+        Redemption::Valid(_)
+    ));
+    assert_eq!(
+        store.take_code(&kept_code).await.unwrap(),
+        Redemption::Valid(second.clone())
+    );
+    let second_pending = unique("code");
+    store
+        .save_code(&second_pending, &second, MINUTE)
+        .await
+        .unwrap();
+    assert_eq!(store.revoke_principal_grants(&principal).await.unwrap(), 1);
+    assert!(store.access_token(&kept_access).await.unwrap().is_none());
+    assert_eq!(
+        store.take_code(&kept_code).await.unwrap(),
+        Redemption::Invalid
+    );
+    assert_eq!(
+        store.take_code(&second_pending).await.unwrap(),
+        Redemption::Invalid
+    );
+    assert_eq!(
+        store
+            .take_refresh_token(&kept_refresh, &second.client_id)
+            .await
+            .unwrap(),
+        Redemption::Invalid
     );
     assert!(store.access_token(&account_access).await.unwrap().is_some());
     assert!(store.access_token(&other_access).await.unwrap().is_some());

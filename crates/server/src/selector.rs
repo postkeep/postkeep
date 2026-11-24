@@ -2,14 +2,14 @@
 //! several mailboxes ([`postkeep_auth::PrincipalResolver::selects_mailboxes`]).
 //!
 //! Every tool then takes an optional `mailbox` argument: the ID or address
-//! of one of the caller's mailboxes ([`Authenticated::mailboxes`]). The
-//! [`select_mailbox`] middleware runs after the bearer check and before the
-//! per-account limit. It takes the argument out of a `tools/call` request
-//! and records the outcome as a [`Selection`], which the tools and the
-//! limit read. A name that is not one of the caller's mailboxes, does not
-//! exist, or belongs to another tenant gives the same [`UNKNOWN_MAILBOX`]
-//! error. Without the argument the request acts on
-//! [`Authenticated::account_id`], as it does when selection is off.
+//! of one of the caller's mailboxes. A resolver can also name a tenant
+//! argument. Without an explicit tenant, the selector searches the caller's
+//! tenancies for the mailbox, or uses the first tenancy if no mailbox is
+//! named. A call always acts in one tenancy.
+//! [`select_mailbox`] runs after the bearer check and before the per-account
+//! limit. It takes the selector arguments out of a `tools/call` request,
+//! narrows the caller and records the outcome as a [`Selection`], which
+//! the tools and the limit read.
 
 use std::sync::Arc;
 
@@ -24,12 +24,17 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::Tool;
 use serde_json::{Map, Value, json};
 
+use crate::request_log::Note;
+
 /// Name of the tool argument.
 pub const ARGUMENT: &str = "mailbox";
 
 /// The tool error for a mailbox the caller cannot use, whatever the reason.
-pub const UNKNOWN_MAILBOX: &str = "unknown mailbox: pass the id or address of a mailbox \
+const UNKNOWN_MAILBOX: &str = "unknown mailbox: pass the id or address of a mailbox \
 this connection can use, or leave mailbox out to use the default one";
+
+const AMBIGUOUS_MAILBOX: &str =
+    "several of this connection's mailboxes have this address: pass its id";
 
 /// Added to the server instructions when selection is on.
 pub const INSTRUCTIONS: &str = " This connection can use several mailboxes: every tool \
@@ -46,8 +51,8 @@ pub enum Selection {
     Mailbox(AccountId),
     /// None: the call acts on the caller's default mailbox.
     Default,
-    /// A mailbox the caller cannot use.
-    Unknown,
+    /// The selection failed, with a tool error explaining why.
+    Refused(String),
 }
 
 /// The mailbox a tool call acts on.
@@ -57,7 +62,7 @@ pub fn account(extensions: &Extensions) -> Result<AccountId, String> {
         .ok_or_else(|| "not authenticated".to_owned())?;
     match extensions.get::<Selection>() {
         Some(Selection::Mailbox(account)) => Ok(account.clone()),
-        Some(Selection::Unknown) => Err(UNKNOWN_MAILBOX.to_owned()),
+        Some(Selection::Refused(message)) => Err(message.clone()),
         Some(Selection::Default) | None => Ok(auth.account_id.clone()),
     }
 }
@@ -68,7 +73,7 @@ pub fn limit_key(extensions: &Extensions) -> Option<AccountId> {
     let auth = extensions.get::<Authenticated>()?;
     Some(match extensions.get::<Selection>() {
         Some(Selection::Mailbox(account)) => account.clone(),
-        Some(Selection::Default | Selection::Unknown) | None => auth.account_id.clone(),
+        Some(Selection::Default | Selection::Refused(_)) | None => auth.account_id.clone(),
     })
 }
 
@@ -98,44 +103,82 @@ pub fn advertise_tool(tool: &mut Tool) {
 pub struct MailboxSelector {
     store: Store,
     max_body_bytes: usize,
+    tenant_argument: Option<&'static str>,
 }
 
 impl MailboxSelector {
-    pub const fn new(store: Store, max_body_bytes: usize) -> Self {
+    pub const fn new(
+        store: Store,
+        max_body_bytes: usize,
+        tenant_argument: Option<&'static str>,
+    ) -> Self {
         Self {
             store,
             max_body_bytes,
+            tenant_argument,
         }
     }
 
-    async fn select(
+    async fn select<'a>(
         &self,
-        auth: &Authenticated,
-        requested: Option<Value>,
-    ) -> Result<Selection, StoreError> {
-        let name = match requested {
-            None | Some(Value::Null) => return Ok(Selection::Default),
-            Some(Value::String(name)) => name,
-            Some(_) => return Ok(Selection::Unknown),
+        auth: &'a Authenticated,
+        tenant: Option<(&str, &Value)>,
+        mailbox: Option<&Value>,
+    ) -> Result<(Selection, Option<&'a Authenticated>), StoreError> {
+        let refused = |message: &str| (Selection::Refused(message.to_owned()), None);
+        let tenancies = auth.tenancies();
+        let candidates = match tenant.map(|(name, value)| (name, argument(Some(value)))) {
+            None | Some((_, Ok(None))) => tenancies,
+            Some((name, requested)) => {
+                let Some(tenancy) = requested
+                    .ok()
+                    .flatten()
+                    .and_then(|id| tenancies.iter().find(|entry| entry.tenant == id))
+                else {
+                    return Ok((
+                        Selection::Refused(format!(
+                            "unknown {name}: pass the id of one this connection can use"
+                        )),
+                        None,
+                    ));
+                };
+                std::slice::from_ref(tenancy)
+            }
         };
-        if name.trim().is_empty() {
-            return Ok(Selection::Default);
+        let name = match argument(mailbox) {
+            Ok(Some(name)) => name,
+            Ok(None) => return Ok((Selection::Default, candidates.first())),
+            Err(()) => return Ok(refused(UNKNOWN_MAILBOX)),
+        };
+        let mut found = None;
+        for tenancy in candidates {
+            if let Some(account) = self
+                .store
+                .for_tenant(&tenancy.tenant)
+                .find_account(name)
+                .await?
+                && tenancy.may_use(&account.id)
+            {
+                if found.is_some() {
+                    return Ok(refused(AMBIGUOUS_MAILBOX));
+                }
+                found = Some((Selection::Mailbox(account.id), Some(tenancy)));
+            }
         }
-        let found = self
-            .store
-            .for_tenant(&auth.tenant)
-            .find_account(&name)
-            .await?;
-        Ok(match found {
-            Some(account) if auth.may_use(&account.id) => Selection::Mailbox(account.id),
-            _ => Selection::Unknown,
-        })
+        Ok(found.unwrap_or_else(|| refused(UNKNOWN_MAILBOX)))
     }
 }
 
-/// Middleware that resolves the `mailbox` argument of a `tools/call`
-/// request into a [`Selection`] and removes it from the arguments, so the
-/// tools never see it.
+fn argument(value: Option<&Value>) -> Result<Option<&str>, ()> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim()).filter(|value| !value.is_empty())),
+        Some(_) => Err(()),
+    }
+}
+
+/// Middleware that takes the tenant and mailbox arguments out of a
+/// `tools/call` request and records the narrowed caller and [`Selection`].
 ///
 /// Anything else, including a body that is not a JSON-RPC object, passes
 /// unchanged; the MCP service answers it.
@@ -147,10 +190,10 @@ pub async fn select_mailbox(
     if request.method() != Method::POST {
         return next.run(request).await;
     }
-    let Some(auth) = request.extensions().get::<Authenticated>().cloned() else {
-        return next.run(request).await;
-    };
     let (mut parts, body) = request.into_parts();
+    let Some(auth) = parts.extensions.get::<Authenticated>() else {
+        return next.run(Request::from_parts(parts, body)).await;
+    };
     let bytes = match axum::body::to_bytes(body, selector.max_body_bytes).await {
         Ok(bytes) => bytes,
         Err(err) => return unreadable_body(&err),
@@ -165,25 +208,47 @@ pub async fn select_mailbox(
             .run(Request::from_parts(parts, Body::from(bytes)))
             .await;
     }
-    let requested = message
+    let (tenant, mailbox) = message
         .get_mut("params")
         .and_then(Value::as_object_mut)
         .and_then(|params| params.get_mut("arguments"))
         .and_then(Value::as_object_mut)
-        .and_then(|arguments| arguments.remove(ARGUMENT));
-    let rewrite = requested.is_some();
-    let selection = match selector.select(&auth, requested).await {
-        Ok(selection) => selection,
+        .map_or((None, None), |arguments| {
+            let mailbox = arguments.remove(ARGUMENT);
+            let tenant = selector
+                .tenant_argument
+                .and_then(|name| arguments.remove(name).map(|value| (name, value)));
+            (tenant, mailbox)
+        });
+    let (selection, tenancy) = match selector
+        .select(
+            auth,
+            tenant.as_ref().map(|(name, value)| (*name, value)),
+            mailbox.as_ref(),
+        )
+        .await
+    {
+        Ok(result) => result,
         Err(err) => {
             tracing::error!(error = %err, "storage error");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if selection == Selection::Unknown {
-        tracing::info!("refused a tool call for a mailbox the caller cannot use");
+    if matches!(selection, Selection::Refused(_)) {
+        tracing::info!("refused a tool call for a tenant or mailbox the caller cannot use");
+    }
+    // A caller without a tenancy list is already its own selected tenancy.
+    if let Some(tenancy) = tenancy
+        && !std::ptr::eq(auth, tenancy)
+        && let Some(caller) = auth.in_tenant(&tenancy.tenant)
+    {
+        if let Some(note) = parts.extensions.get::<Note>() {
+            note.caller(&caller);
+        }
+        parts.extensions.insert(caller);
     }
     parts.extensions.insert(selection);
-    let body = if rewrite {
+    let body = if tenant.is_some() || mailbox.is_some() {
         let bytes = Value::Object(message).to_string().into_bytes();
         parts.headers.remove(header::TRANSFER_ENCODING);
         parts
@@ -237,8 +302,8 @@ mod tests {
         assert_eq!(account(&extensions), Ok(AccountId("b".to_owned())));
         assert_eq!(limit_key(&extensions), Some(AccountId("b".to_owned())));
 
-        extensions.insert(Selection::Unknown);
-        assert_eq!(account(&extensions), Err(UNKNOWN_MAILBOX.to_owned()));
+        extensions.insert(Selection::Refused("refused selection".to_owned()));
+        assert_eq!(account(&extensions), Err("refused selection".to_owned()));
         assert_eq!(limit_key(&extensions), Some(AccountId("a".to_owned())));
     }
 }

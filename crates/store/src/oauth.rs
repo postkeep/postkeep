@@ -634,26 +634,51 @@ impl Store {
     /// Returns an error if a query fails.
     pub async fn revoke_principal_grants(&self, principal: &str) -> Result<u64> {
         let mut tx = self.begin_write().await?;
-        // The codes, then the tokens, then the grants: the store's lock
-        // order, which a replayed code's revocation keeps too.
-        for statement in [
-            "DELETE FROM authorization_codes WHERE principal = $1",
-            "DELETE FROM access_tokens WHERE grant_id IN (SELECT id FROM grants WHERE principal = $1)",
-            "DELETE FROM refresh_tokens WHERE grant_id IN (SELECT id FROM grants WHERE principal = $1)",
-        ] {
-            sqlx::query(statement)
-                .bind(principal)
-                .execute(&mut *tx)
-                .await?;
-        }
-        let revoked = sqlx::query("DELETE FROM grants WHERE principal = $1")
-            .bind(principal)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        let revoked = revoke_grants(&mut tx, principal, None).await?;
         tx.commit().await?;
         Ok(revoked)
     }
+}
+
+/// Revokes a principal's grants, codes and tokens in the caller's transaction.
+///
+/// `client` limits the revocation to that client ID; `None` revokes them
+/// for all clients of the principal. Returns the number of grants revoked.
+/// On SQLite, use `BEGIN IMMEDIATE` or call this before the transaction reads.
+///
+/// # Errors
+///
+/// Returns an error if a query fails.
+pub async fn revoke_grants(
+    tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+    principal: &str,
+    client: Option<&str>,
+) -> Result<u64> {
+    macro_rules! for_subject {
+        ($prefix:literal $(, $suffix:literal)?) => {
+            concat!($prefix, "principal = $1 AND client_id = COALESCE($2, client_id)" $(, $suffix)?)
+        };
+    }
+    let query = |statement| sqlx::query(statement).bind(principal).bind(client);
+    // The codes, then the tokens, then the grants: the store's lock
+    // order, which a replayed code's revocation keeps too.
+    for statement in [
+        for_subject!("DELETE FROM authorization_codes WHERE "),
+        for_subject!(
+            "DELETE FROM access_tokens WHERE grant_id IN (SELECT id FROM grants WHERE ",
+            ")"
+        ),
+        for_subject!(
+            "DELETE FROM refresh_tokens WHERE grant_id IN (SELECT id FROM grants WHERE ",
+            ")"
+        ),
+    ] {
+        query(statement).execute(&mut **tx).await?;
+    }
+    Ok(query(for_subject!("DELETE FROM grants WHERE "))
+        .execute(&mut **tx)
+        .await?
+        .rows_affected())
 }
 
 /// Access and refresh tokens stored in the same transaction as a claim.

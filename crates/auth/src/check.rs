@@ -21,9 +21,10 @@ pub struct ToolCall<'a> {
     pub name: &'a str,
     /// Whether the tool says it only reads (its `readOnlyHint`).
     pub read_only: bool,
-    /// The call's arguments, without `mailbox`. The hold question gets outgoing
-    /// attachments as names, MIME types, sizes and SHA-256 digests; other hooks
-    /// get those arguments as sent, including file bytes as base64 or text.
+    /// The call's arguments, without `mailbox` or the resolver's tenant argument
+    /// when selection is on. The hold question gets outgoing attachments as
+    /// names, MIME types, sizes and SHA-256 digests; other hooks get those
+    /// arguments as sent, including file bytes as base64 or text.
     pub arguments: Option<&'a Map<String, Value>>,
     /// Who is calling.
     pub caller: &'a Authenticated,

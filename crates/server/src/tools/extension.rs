@@ -56,11 +56,11 @@ pub trait ToolExtension: Send + Sync + 'static {
         info
     }
 
-    /// Runs before every tool call, the server's tools and the extension's,
-    /// once the `mailbox` argument names one of the caller's mailboxes. A
-    /// call naming any other mailbox fails before this runs. A
-    /// [`Refusal`](postkeep_auth::Refusal) becomes the call's error and
-    /// the tool does not run. The default allows every call.
+    /// Runs before a call to the server's tools or the extension's.
+    ///
+    /// An unknown tenant or mailbox or an ambiguous address stops the call
+    /// first. A [`Refusal`](postkeep_auth::Refusal) becomes the call's error
+    /// and the tool does not run. The default allows every call.
     fn check<'a>(&'a self, call: ToolCall<'a>) -> CheckFuture<'a> {
         let _ = call;
         Box::pin(std::future::ready(Ok(())))
@@ -139,8 +139,8 @@ pub enum WebhookProblemKind {
 pub struct ExtensionCall<'a> {
     /// The tool's name.
     pub name: &'a str,
-    /// The call's arguments, without `mailbox` when the mailbox selector
-    /// is on.
+    /// The call's arguments, without `mailbox` or the resolver's tenant
+    /// argument when selection is on.
     pub arguments: Option<JsonObject>,
     /// Who is calling.
     pub caller: &'a Authenticated,

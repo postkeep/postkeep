@@ -70,11 +70,13 @@ impl CredentialVerifier for AcceptAll {
 }
 
 /// `workspace-key` may use A (the default) and B; `other-key` only A;
-/// `search-key` only D, on a scripted mail server.
+/// `search-key` only D, on a scripted mail server; `multi-key` may use
+/// A and E, which are in different tenants.
 struct Keys {
     a: AccountId,
     b: AccountId,
     d: AccountId,
+    e: AccountId,
 }
 
 impl PrincipalResolver for Keys {
@@ -93,6 +95,17 @@ impl PrincipalResolver for Keys {
             Ok(match token {
                 "workspace-key" => {
                     Resolution::Authenticated(caller("key:1").with_mailboxes([self.b.clone()]))
+                }
+                "multi-key" => {
+                    let a = caller("key:1");
+                    let e = Authenticated::for_account(
+                        self.e.clone(),
+                        "agent".to_owned(),
+                        "mail".to_owned(),
+                    )
+                    .with_tenant("tenant-b")
+                    .with_principal("key:2");
+                    Resolution::Authenticated(a.clone().with_tenancies(vec![a, e]))
                 }
                 "other-key" => Resolution::Authenticated(caller("other")),
                 "other-app" => {
@@ -123,6 +136,7 @@ impl PrincipalResolver for Keys {
 #[derive(Default)]
 struct AccountTools {
     log: Mutex<Vec<String>>,
+    callers: Mutex<Vec<(String, String)>>,
 }
 
 impl AccountTools {
@@ -136,7 +150,12 @@ impl AccountTools {
         name: &str,
         mailbox: Option<&AccountId>,
         arguments: Option<&JsonObject>,
+        caller: &Authenticated,
     ) {
+        self.callers
+            .lock()
+            .unwrap()
+            .push((caller.tenant.clone(), caller.principal.clone()));
         let mut keys: Vec<&str> = arguments
             .map(|arguments| arguments.keys().map(String::as_str).collect())
             .unwrap_or_default();
@@ -160,7 +179,7 @@ fn tool(name: &'static str, schema: Value, read_only: bool) -> Tool {
 
 impl ToolExtension for AccountTools {
     fn tools(&self, caller: &Authenticated) -> Vec<Tool> {
-        if caller.principal != "key:1" {
+        if !matches!(caller.principal.as_str(), "key:1" | "key:2") {
             return Vec::new();
         }
         vec![
@@ -183,7 +202,13 @@ impl ToolExtension for AccountTools {
     /// Answers after `wait` milliseconds, panics with `panic` and fails
     /// with `fail`.
     fn call<'a>(&'a self, call: ExtensionCall<'a>) -> ToolFuture<'a> {
-        self.record("call", call.name, call.mailbox, call.arguments.as_ref());
+        self.record(
+            "call",
+            call.name,
+            call.mailbox,
+            call.arguments.as_ref(),
+            call.caller,
+        );
         let result = CallToolResult::structured(json!({
             "tool": call.name,
             "mailbox": call.mailbox.map(|mailbox| mailbox.0.clone()),
@@ -207,7 +232,7 @@ impl ToolExtension for AccountTools {
 
     fn check<'a>(&'a self, call: ToolCall<'a>) -> CheckFuture<'a> {
         let kind = if call.read_only { "read" } else { "write" };
-        self.record(kind, call.name, call.mailbox, call.arguments);
+        self.record(kind, call.name, call.mailbox, call.arguments, call.caller);
         let verdict = match call.name {
             "delete_message" => Err(Refusal::new(
                 "deleting mail is turned off for this workspace",
@@ -241,8 +266,13 @@ impl Usage {
 
 impl UsageHook for Usage {
     fn before_call<'a>(&'a self, call: ToolCall<'a>) -> CheckFuture<'a> {
-        self.log
-            .record("usage", call.name, call.mailbox, call.arguments);
+        self.log.record(
+            "usage",
+            call.name,
+            call.mailbox,
+            call.arguments,
+            call.caller,
+        );
         let verdict = if self.over_limit.load(Ordering::SeqCst) && !call.read_only {
             Err(Refusal::new(OVER_LIMIT))
         } else {
@@ -340,6 +370,12 @@ async fn harness_with_smtp(smtp: Option<u16>) -> Harness {
     let d = tenant.upsert_imap_account("d@example.com", &password, None);
     let d = d.await.unwrap().id;
     let (a, b) = (ids[0].clone(), ids[1].clone());
+    let e = store
+        .for_tenant("tenant-b")
+        .upsert_imap_account("e@example.com", &password, Some("retired"))
+        .await
+        .unwrap()
+        .id;
     let mut mail = scripted_mail(Arc::new(AtomicU8::new(ACCEPT)), Arc::default(), None).await;
     if let Some(port) = smtp {
         mail.smtp.port = port;
@@ -374,6 +410,7 @@ async fn harness_with_smtp(smtp: Option<u16>) -> Harness {
             a: a.clone(),
             b: b.clone(),
             d: d.clone(),
+            e: e.clone(),
         });
         let mut extensions = Extensions::new().principal_resolver(resolver);
         if let Some(extension) = extension {
@@ -582,6 +619,34 @@ async fn extension_tools_get_the_mailbox_the_call_names() {
         .unwrap_err();
     assert!(error.starts_with(OPENED), "the server's tool ran: {error}");
     assert_eq!(h.tools.take(), ["read list_folders - []"]);
+}
+
+#[tokio::test]
+async fn the_extension_and_usage_hook_see_the_narrowed_caller() {
+    let h = harness().await;
+    let answer = call(
+        &h.both,
+        "multi-key",
+        "get_account",
+        json!({ "mailbox": "e@example.com" }),
+    )
+    .await
+    .unwrap();
+    let mailbox = answer["mailbox"].as_str().unwrap();
+    assert_eq!(
+        h.tools.take(),
+        [
+            format!("read get_account {mailbox} []"),
+            format!("usage get_account {mailbox} []"),
+            format!("call get_account {mailbox} []"),
+        ]
+    );
+    assert_eq!(
+        h.tools.callers.lock().unwrap().as_slice(),
+        [(); 3]
+            .map(|()| ("tenant-b".to_owned(), "key:2".to_owned()))
+            .as_slice()
+    );
 }
 
 /// Every server tool but `delete_message`, with arguments, and whether it

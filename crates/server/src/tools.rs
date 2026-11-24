@@ -462,10 +462,14 @@ impl MailTools {
 
     /// State of the middleware that resolves the `mailbox` argument, when
     /// the tools advertise it.
-    pub(crate) fn mailbox_selector(&self, max_body_bytes: usize) -> Option<MailboxSelector> {
-        self.context
-            .select_mailboxes
-            .then(|| MailboxSelector::new(self.context.store.clone(), max_body_bytes))
+    pub(crate) fn mailbox_selector(
+        &self,
+        max_body_bytes: usize,
+        tenant_argument: Option<&'static str>,
+    ) -> Option<MailboxSelector> {
+        self.context.select_mailboxes.then(|| {
+            MailboxSelector::new(self.context.store.clone(), max_body_bytes, tenant_argument)
+        })
     }
 
     /// The account a tool call acts on: the token's, or the one the
@@ -3598,7 +3602,7 @@ impl MailTools {
     /// A call with a tool extension or a usage hook installed: the tool is
     /// the server's or one the extension lists for this caller, and the
     /// extension's check and then the usage hook run first unless the call
-    /// names a mailbox the caller cannot use.
+    /// names a tenant or mailbox the caller cannot use.
     async fn call_checked(
         &self,
         request: CallToolRequestParams,
@@ -3622,8 +3626,7 @@ impl MailTools {
             note.tool(&tool.name);
         }
         let mailbox = match parts.and_then(|parts| parts.extensions.get::<Selection>()) {
-            Some(Selection::Unknown) if is_own => return self.call_own(request, context).await,
-            Some(Selection::Unknown) => return Ok(tool_error(selector::UNKNOWN_MAILBOX)),
+            Some(Selection::Refused(message)) => return Ok(tool_error(message)),
             Some(Selection::Mailbox(account)) => Some(account),
             Some(Selection::Default) | None => None,
         };
@@ -3898,7 +3901,12 @@ impl ServerHandler for MailTools {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let note = Note::of(context.extensions.get::<Parts>());
+        let parts = context.extensions.get::<Parts>();
+        let note = Note::of(parts);
+        let refused = matches!(
+            parts.and_then(|parts| parts.extensions.get::<Selection>()),
+            Some(Selection::Refused(_))
+        );
         // Before the call, so an answer the timeout cuts off still names it.
         if let Some(note) = &note
             && self.context.router.has_route(&request.name)
@@ -3908,7 +3916,7 @@ impl ServerHandler for MailTools {
         // rmcp runs the call in a task of its own: this puts the tool's own
         // lines back in the request's span.
         let answer = async {
-            if self.context.extension.is_none() && self.context.usage.is_none() {
+            if !refused && self.context.extension.is_none() && self.context.usage.is_none() {
                 return self.call_own(request, context).await;
             }
             self.call_checked(request, context).await

@@ -53,9 +53,11 @@ authorization codes and tokens.
 - **Grant subjects**: a code and the grant made from it are for a mailbox
   account or for a principal, an opaque string that an embedding approved
   (migration 0010). `revoke_principal_grants` revokes one principal's
-  grants. On SQLite, 0010 rebuilds `grants` and `authorization_codes`
-  outside sqlx's migration transaction with foreign keys off, so the
-  access and refresh tokens that point at them are kept.
+  grants. Use `postkeep_store::revoke_grants` to revoke them in your own
+  transaction, optionally for just one client. On SQLite, 0010 rebuilds
+  `grants` and `authorization_codes` outside sqlx's migration transaction
+  with foreign keys off, so the access and refresh tokens that point at
+  them are kept.
 - **Expiry**: every short-lived row has an `expires_at`; `Store::purge_expired`
   removes stale rows, including held sends. Webhook outbox rows (`mail_events`)
   are also pruned per account. Nullable `webhooks.outbox_retention_secs` and
