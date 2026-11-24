@@ -1014,7 +1014,7 @@
     },
     "docs.index.steps[5].links[2]": {
       "n": "D44",
-      "text": "Security audit, October 2026",
+      "text": "Internal security review, October 2026",
       "kind": "link",
       "to": "/docs/security/audit-2026-10/"
     },

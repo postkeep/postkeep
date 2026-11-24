@@ -22,10 +22,10 @@ Leave real credentials and app passwords out of the report. You should
 receive an acknowledgement within a few days. Once a fix is available, the
 maintainers will publish an advisory and credit you if you wish.
 
-## Design and audits
+## Design and reviews
 
 - [Threat model](docs/security/threat-model.md)
-- [Security audit, October 2026](docs/security/audit-2026-10.md)
+- [Internal security review, October 2026](docs/security/audit-2026-10.md)
 - [Security review: Outlook and Gmail support, October 2026](docs/security/providers-review-2026-10.md)
 
 ## Supported versions

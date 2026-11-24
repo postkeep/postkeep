@@ -49,5 +49,5 @@ To report a vulnerability privately, see [SECURITY.md](../../SECURITY.md).
 ## Further reading
 
 - [Threat model](threat-model.md)
-- [Security audit, October 2026](audit-2026-10.md)
+- [Internal security review, October 2026](audit-2026-10.md)
 - [Security review: Outlook and Gmail support, October 2026](providers-review-2026-10.md)
