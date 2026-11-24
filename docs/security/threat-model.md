@@ -151,17 +151,17 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
 
 ### Multi-tenant isolation
 
-- Every tool call resolves the account from the bearer token, never from
-  input. An embedding whose principal resolver grants several mailboxes
-  lets a call name one with a `mailbox` argument; it is honored only if it
-  is one of the token's mailboxes in the token's tenant, and any other
-  value fails with the same unknown-mailbox error. An embedding's tool
-  extension gets the same checked mailbox: a call naming another one fails
-  before the extension's check or tools run, and an extension tool cannot
-  take the name of one of the server's. The per-account concurrency limit
-  counts the mailbox actually used. IMAP sessions are pooled per account
-  **and** per credential fingerprint, so they can't cross accounts or
-  outlive a password change.
+- The bearer token determines which tenancies and mailboxes a tool call
+  may use. With mailbox selection enabled, the call acts in one tenancy:
+  the one named by the resolver's optional tenant argument, the one holding
+  the named `mailbox`, or the default when neither is named. A mailbox must
+  be allowed in that tenancy. An address matching several of the caller's
+  mailboxes requires an ID. A refused selection stops the call before checks,
+  usage hooks or tools run. An embedding's extension gets the same checked
+  caller and mailbox, and cannot take the name of one of the server's tools.
+  The per-account concurrency limit counts the mailbox actually used.
+  IMAP sessions are pooled per account **and** per credential fingerprint,
+  so they can't cross accounts or outlive a password change.
 - Account page and webhook queries are scoped by the session's account ID.
   Deleting an account removes its tokens, sessions, codes, webhooks and
   delivery history. Filter rule queries are scoped by the account too, so

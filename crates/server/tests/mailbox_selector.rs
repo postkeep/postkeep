@@ -1,9 +1,9 @@
 //! The mailbox selector: with a principal resolver whose callers hold
 //! several mailboxes, each of the 18 tools takes a `mailbox` argument,
 //! acts on the mailbox it names, and refuses any other mailbox with the
-//! same unknown-mailbox error. Runs in process on SQLite, without network
-//! access: the two mailboxes fail in different, recognisable ways before
-//! any connection is made, which shows which one a tool opened.
+//! same unknown-mailbox error. Mailboxes fail in different, recognisable
+//! ways before any connection is made, which shows which one a tool opened.
+//! SQLite covers distinct addresses; PostgreSQL covers a shared address.
 
 #![allow(
     clippy::unwrap_used,
@@ -13,6 +13,7 @@
 )]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -25,7 +26,8 @@ use postkeep_auth::{
 };
 use postkeep_mail::ImapServer;
 use postkeep_store::{
-    AccountId, MasterKey, OAuthAccount, Provider, Store, UpstreamTokens, WebhookSettings,
+    AccountId, MasterKey, OAuthAccount, Provider, Store, UploadLookup, UploadOwner, UpstreamTokens,
+    WebhookSettings,
 };
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -36,6 +38,12 @@ mod bucket;
 
 const HOST: &str = "mail.example.com";
 const TENANT: &str = "tenant-a";
+const OTHER_TENANT: &str = "tenant-b";
+const OTHER_PRINCIPAL: &str = "other-key";
+const TWO_TENANTS: &str = "two-tenants";
+const TENANT_ARGUMENT: &str = "tenant";
+const UNKNOWN_TENANT: &str = "unknown tenant: pass the id of one this connection can use";
+const D_EMAIL: &str = "d@example.com";
 const UNKNOWN: &str = "unknown mailbox: pass the id or address of a mailbox this connection can \
 use, or leave mailbox out to use the default one";
 /// What opening mailbox A (IMAP, on a preset this server no longer offers)
@@ -60,6 +68,7 @@ impl CredentialVerifier for AcceptAll {
 
 /// `two-mailboxes` may use A (the default) and B, and is also handed D,
 /// which lives in another tenant. `one-mailbox` may use A only.
+/// `two-tenants` may use A and D in their respective tenants.
 struct FakeResolver {
     a: AccountId,
     b: AccountId,
@@ -85,6 +94,16 @@ impl PrincipalResolver for FakeResolver {
                     caller().with_mailboxes([self.b.clone(), self.d.clone()]),
                 ),
                 "one-mailbox" => Resolution::Authenticated(caller()),
+                TWO_TENANTS => {
+                    let other = Authenticated::for_account(
+                        self.d.clone(),
+                        "agent".to_owned(),
+                        "mail".to_owned(),
+                    )
+                    .with_tenant(OTHER_TENANT)
+                    .with_principal(OTHER_PRINCIPAL);
+                    Resolution::Authenticated(caller().with_tenancies(vec![caller(), other]))
+                }
                 _ => Resolution::Refused("unknown key"),
             })
         })
@@ -92,6 +111,10 @@ impl PrincipalResolver for FakeResolver {
 
     fn selects_mailboxes(&self) -> bool {
         self.selects
+    }
+
+    fn tenant_argument(&self) -> Option<&'static str> {
+        Some(TENANT_ARGUMENT)
     }
 }
 
@@ -122,45 +145,31 @@ fn webhook(url: &str) -> WebhookSettings {
     }
 }
 
-async fn harness() -> Harness {
+async fn harness(postgres_url: Option<&str>) -> Harness {
     let dir = tempfile::tempdir().unwrap();
-    let url = format!("sqlite://{}", dir.path().join("server.db").display());
+    let sqlite_url = format!("sqlite://{}", dir.path().join("server.db").display());
     let key = MasterKey::parse(&MasterKey::generate_encoded().unwrap()).unwrap();
-    let store = Store::connect(&url, &key).await.unwrap();
+    let store = Store::connect(postgres_url.unwrap_or(&sqlite_url), &key)
+        .await
+        .unwrap();
     let tenant = store.for_tenant(TENANT);
     let a = tenant
         .upsert_imap_account("a@example.com", &password(), Some("retired"))
         .await
         .unwrap()
         .id;
-    let b = tenant
-        .upsert_oauth_account(
-            &OAuthAccount {
-                provider: Provider::Graph,
-                subject: "subject-b",
-                email: "b@example.com",
-            },
-            &UpstreamTokens {
-                refresh_token: SecretString::from("refresh-b".to_owned()),
-                access_token: None,
-                access_expires_at: None,
-                scope: "Mail.ReadWrite".to_owned(),
-            },
-        )
-        .await
-        .unwrap()
-        .id;
+    let b = graph_account(&tenant, "b@example.com").await;
     let c = tenant
         .upsert_imap_account("c@example.com", &password(), Some("retired"))
         .await
         .unwrap()
         .id;
-    let d = store
-        .for_tenant("tenant-b")
-        .upsert_imap_account("d@example.com", &password(), Some("retired"))
-        .await
-        .unwrap()
-        .id;
+    let d_email = if postgres_url.is_some() {
+        "a@example.com"
+    } else {
+        D_EMAIL
+    };
+    let d = graph_account(&store.for_tenant(OTHER_TENANT), d_email).await;
     store
         .save_webhook(&b, &webhook("https://hooks.example.com/b"))
         .await
@@ -210,6 +219,26 @@ async fn harness() -> Harness {
         _dir: dir,
         _bucket: bucket_server,
     }
+}
+
+async fn graph_account(store: &Store, email: &str) -> AccountId {
+    store
+        .upsert_oauth_account(
+            &OAuthAccount {
+                provider: Provider::Graph,
+                subject: email,
+                email,
+            },
+            &UpstreamTokens {
+                refresh_token: SecretString::from("test-refresh".to_owned()),
+                access_token: None,
+                access_expires_at: None,
+                scope: "Mail.ReadWrite".to_owned(),
+            },
+        )
+        .await
+        .unwrap()
+        .id
 }
 
 async fn rpc(app: &Router, token: &str, method: &str, params: Value) -> Value {
@@ -327,7 +356,7 @@ async fn instructions(app: &Router) -> String {
 
 #[tokio::test]
 async fn every_schema_takes_mailbox_only_when_the_resolver_selects() {
-    let h = harness().await;
+    let h = harness(None).await;
     let selecting = listed_tools(&h.selecting).await;
     let plain = listed_tools(&h.plain).await;
     assert_eq!(selecting.len(), 18);
@@ -371,7 +400,7 @@ argument, the id or address of one of them, and uses the default mailbox without
 
 #[tokio::test]
 async fn every_tool_refuses_a_mailbox_the_caller_cannot_use() {
-    let h = harness().await;
+    let h = harness(None).await;
     let refused = [
         // In the tenant, not the caller's.
         json!(h.c.0),
@@ -425,7 +454,7 @@ async fn every_tool_refuses_a_mailbox_the_caller_cannot_use() {
 
 #[tokio::test]
 async fn every_tool_acts_on_the_selected_mailbox() {
-    let h = harness().await;
+    let h = harness(None).await;
     let all = tools();
     for (tool, arguments) in &all[..MAIL_TOOLS] {
         for (mailbox, opened) in [
@@ -526,7 +555,16 @@ async fn every_tool_acts_on_the_selected_mailbox() {
 /// argument it does not take, rather than act on the token's mailbox.
 #[tokio::test]
 async fn without_selection_the_tools_refuse_a_mailbox_argument() {
-    let h = harness().await;
+    let h = harness(None).await;
+    let error = call(
+        &h.plain,
+        TWO_TENANTS,
+        "list_folders",
+        json!({ (TENANT_ARGUMENT): OTHER_TENANT }),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("unknown field `tenant`"), "{error}");
     for (tool, arguments) in &tools() {
         let error = call(
             &h.plain,
@@ -537,5 +575,135 @@ async fn without_selection_the_tools_refuse_a_mailbox_argument() {
         .await
         .unwrap_err();
         assert!(error.contains("unknown field `mailbox`"), "{tool}: {error}");
+    }
+}
+
+#[tokio::test]
+async fn every_tool_can_select_a_mailbox_in_another_tenant() {
+    let h = harness(None).await;
+    h.store
+        .save_webhook(&h.d, &webhook("https://hooks.example.com/d"))
+        .await
+        .unwrap();
+    for (index, (tool, arguments)) in tools().into_iter().enumerate() {
+        for mailbox in [json!(h.d.0), json!(D_EMAIL)] {
+            let result = call(
+                &h.selecting,
+                TWO_TENANTS,
+                tool,
+                with_mailbox(&arguments, mailbox.clone()),
+            )
+            .await;
+            if index < MAIL_TOOLS {
+                let error = result.unwrap_err();
+                assert!(
+                    error.starts_with(OPENED_B),
+                    "{tool} with {mailbox}: {error}"
+                );
+            } else {
+                let result =
+                    result.unwrap_or_else(|error| panic!("{tool} with {mailbox}: {error}"));
+                match tool {
+                    "get_webhook_status" => assert_eq!(result["configured"], true),
+                    "upload_attachment" => {
+                        let owner = UploadOwner {
+                            account: &h.d,
+                            principal: OTHER_PRINCIPAL,
+                            app: "agent",
+                        };
+                        let id = result["upload_id"].as_str().unwrap();
+                        let upload = h.store.upload_for(owner, id, Duration::ZERO).await.unwrap();
+                        assert!(
+                            matches!(upload, UploadLookup::Arriving),
+                            "{mailbox}: {upload:?}"
+                        );
+                    }
+                    _ => {} // Other webhook tools only succeed on the configured mailbox.
+                }
+            }
+        }
+    }
+    let d = h.store.webhook(&h.d).await.unwrap().unwrap();
+    assert!(!d.settings.enabled);
+    assert_eq!(
+        h.store.webhook_outbox_overrides(&h.d).await.unwrap(),
+        Some((None, Some(50)))
+    );
+}
+
+#[tokio::test]
+async fn the_tenant_argument_limits_the_mailbox_and_picks_its_default() {
+    let h = harness(None).await;
+    for (arguments, expected) in [
+        (json!({}), OPENED_A),
+        (json!({ "tenant": null, "mailbox": null }), OPENED_A),
+        (json!({ "tenant": "  " }), OPENED_A),
+        (json!({ "tenant": null, "mailbox": D_EMAIL }), OPENED_B),
+        (
+            json!({ "tenant": "  ", "mailbox": " D@Example.com " }),
+            OPENED_B,
+        ),
+        (json!({ "tenant": OTHER_TENANT }), OPENED_B),
+        (json!({ "tenant": " tenant-b ", "mailbox": "  " }), OPENED_B),
+        (
+            json!({ "tenant": OTHER_TENANT, "mailbox": h.d.0 }),
+            OPENED_B,
+        ),
+        (
+            json!({ "tenant": OTHER_TENANT, "mailbox": "a@example.com" }),
+            UNKNOWN,
+        ),
+        (json!({ "tenant": TENANT, "mailbox": h.d.0 }), UNKNOWN),
+        (json!({ "tenant": OTHER_TENANT, "mailbox": false }), UNKNOWN),
+        (json!({ "tenant": 7, "mailbox": D_EMAIL }), UNKNOWN_TENANT),
+        (json!({ "tenant": [OTHER_TENANT] }), UNKNOWN_TENANT),
+        (json!({ "tenant": {"id": OTHER_TENANT} }), UNKNOWN_TENANT),
+        (json!({ "tenant": "not-a-tenant" }), UNKNOWN_TENANT),
+    ] {
+        let result = call(&h.selecting, TWO_TENANTS, "list_folders", arguments.clone())
+            .await
+            .unwrap_err();
+        if expected == OPENED_A || expected == OPENED_B {
+            assert!(result.starts_with(expected), "{arguments}: {result}");
+        } else {
+            assert_eq!(result, expected, "{arguments}");
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires TEST_POSTGRES_URL"]
+async fn postgres_a_mailbox_address_in_two_tenants_needs_an_id_or_tenant() {
+    let url = std::env::var("TEST_POSTGRES_URL").expect("set TEST_POSTGRES_URL");
+    let h = harness(Some(&url)).await;
+    let ambiguous = call(
+        &h.selecting,
+        TWO_TENANTS,
+        "list_folders",
+        json!({ "mailbox": " A@Example.com " }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        ambiguous,
+        "several of this connection's mailboxes have this address: pass its id"
+    );
+    for (arguments, expected) in [
+        (json!({ "mailbox": h.a.0 }), OPENED_A),
+        (json!({ "mailbox": h.d.0 }), OPENED_B),
+        (
+            json!({ "tenant": TENANT, "mailbox": "a@example.com" }),
+            OPENED_A,
+        ),
+        (
+            json!({ "tenant": OTHER_TENANT, "mailbox": "a@example.com" }),
+            OPENED_B,
+        ),
+    ] {
+        let result = call(&h.selecting, TWO_TENANTS, "list_folders", arguments.clone())
+            .await
+            .unwrap_err();
+        assert!(result.starts_with(expected), "{arguments}: {result}");
     }
 }

@@ -212,8 +212,8 @@ pub trait UsageHook: Send + Sync + 'static {
 
     /// Runs before every tool call on the MCP endpoint, the server's tools
     /// and an embedding's own, after the embedding's tool extension checked
-    /// it. A call naming a mailbox the caller can't use fails before this
-    /// runs. A [`Refusal`] becomes the call's error and the tool doesn't
+    /// it. An unknown tenant or mailbox or an ambiguous address stops the
+    /// call first. A [`Refusal`] becomes the call's error and the tool doesn't
     /// run. The default allows every call.
     fn before_call<'a>(&'a self, call: ToolCall<'a>) -> CheckFuture<'a> {
         let _ = call;
@@ -239,8 +239,7 @@ pub trait UsageHook: Send + Sync + 'static {
     /// Runs once for each tool call that the tool extension's check and
     /// [`before_call`](Self::before_call) allowed, the server's tools and an
     /// embedding's own: after the tool ends and before its answer goes. It
-    /// never runs for a call they refused, or for one naming a mailbox the
-    /// caller can't use.
+    /// never runs for a call refused by a check or the mailbox selector.
     ///
     /// `end` says [`Outcome::Done`]; [`Outcome::Refused`] when
     /// [`before_send`](Self::before_send) refused the call's message, a

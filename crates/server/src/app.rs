@@ -271,6 +271,10 @@ impl Extensions {
             .is_some_and(|resolver| resolver.selects_mailboxes())
     }
 
+    fn tenant_argument(&self) -> Option<&'static str> {
+        self.principal_resolver.as_ref()?.tenant_argument()
+    }
+
     /// Serves or leaves out the default pages: the landing page at `/` and
     /// the account page under `/account`. The sign-in page at `/authorize`,
     /// the OAuth endpoints, the MCP endpoint, `/healthz` and `/readyz`
@@ -332,9 +336,8 @@ pub fn router_with(
         middleware::from_fn_with_state(extensions.metrics.clone(), crate::request_log::log);
     let probes = probe_routes(&store, &mut extensions);
     let hosts = allowed_hosts(config.auth.issuer(), &config.extra_allowed_hosts);
-    let host_check = AllowedHosts::new(hosts.iter().map(String::as_str));
     let origins = allowed_origins(config.auth.issuer(), &config.extra_allowed_origins);
-    config.auth.allowed_hosts = host_check.clone();
+    config.auth.allowed_hosts = AllowedHosts::new(hosts.iter().map(String::as_str));
     if extensions.per_request_resources {
         config.auth.per_request_resources = true;
     }
@@ -344,6 +347,7 @@ pub fn router_with(
     let limits = config.limits;
     let servers = config.auth.imap_servers.clone();
     let selecting = extensions.selects_mailboxes();
+    let tenant_arg = extensions.tenant_argument();
     let auth = AuthState::new(store.clone(), config.auth, verifier);
     install_auth_extensions(&auth, &extensions);
 
@@ -408,7 +412,7 @@ pub fn router_with(
     let tools = MailTools::new(store, servers, pool, tokens, webhook_control, selecting)
         .with_uploads(upload_url, config.bucket);
     let tools = install_tool_extensions(tools, &extensions);
-    let protected = mcp_routes(tools, &auth, hosts, host_check, origins, limits, cancel);
+    let protected = mcp_routes(tools, &auth, hosts, origins, limits, cancel, tenant_arg);
 
     let limited = Router::new()
         .merge(protected)
@@ -503,12 +507,13 @@ fn mcp_routes(
     tools: MailTools,
     auth: &AuthState,
     allowed_hosts: Vec<String>,
-    host_check: AllowedHosts,
     allowed_origins: Vec<String>,
     limits: RequestLimits,
     cancel: CancellationToken,
+    tenant_argument: Option<&'static str>,
 ) -> Router {
-    let selector = tools.mailbox_selector(limits.max_body_bytes);
+    let host_check = auth.config().allowed_hosts.clone();
+    let selector = tools.mailbox_selector(limits.max_body_bytes, tenant_argument);
     // rmcp only compares exact names; with a `*.` pattern the check below
     // is the only one.
     let mcp_config = if host_check.has_patterns() {

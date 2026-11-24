@@ -132,9 +132,20 @@ A principal resolver answers with an `Authenticated`: the `principal`
 default (`account_id`) and all it may use (`mailboxes`). Build one with
 `Authenticated::for_account` and its `with_*` methods. With
 `selects_mailboxes`, tools take a `mailbox` argument naming one of those.
-The request log writes `principal` and `tenant` on every MCP request
-([configuration](configuration.md)), so keep addresses and secrets out of
-both: ids are enough.
+
+For a connection that can act in several tenants, enable `selects_mailboxes`,
+build one `Authenticated` per tenant and give them to `with_tenancies`, default
+first. A resolver can name a `tenant_argument`, an optional tenant ID on tool
+calls; the embedding advertises it in its own tool schemas, not the server's.
+With a tenant ID, `mailbox` is looked up only there. Otherwise an address
+matching in several of the caller's tenants needs a mailbox ID instead.
+With neither argument the call uses the first tenancy's default mailbox.
+Tools and hooks see the selected tenancy's caller; `tenancies()` still
+lists the full connection, default first.
+
+The request log writes `principal` and `tenant` on authenticated MCP requests
+([configuration](configuration.md)), using the pair from the selected tenancy
+when a call narrows it. Keep addresses and secrets out of both: IDs are enough.
 
 An address can be connected once per tenant. `Store::for_tenant` scopes
 address lookups and new accounts (lookups by ID are not scoped). The

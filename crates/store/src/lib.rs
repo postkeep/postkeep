@@ -107,6 +107,7 @@ pub use filters::{AddedFilterRule, ChangedFilterRule, FilterRule, NewFilterRule}
 pub use held::{HeldSend, HeldSendMatch};
 pub use oauth::{
     AuthorizationRequest, CodeGrant, GrantSubject, Redemption, RefreshRotation, TokenGrant,
+    revoke_grants,
 };
 pub use push::PushSubscription;
 pub use rotation::Reencrypted;

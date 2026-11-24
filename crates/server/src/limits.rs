@@ -233,7 +233,10 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(send(None).await, StatusCode::OK);
-        assert_eq!(send(Some(Selection::Unknown)).await, StatusCode::OK);
+        assert_eq!(
+            send(Some(Selection::Refused("unknown mailbox".to_owned()))).await,
+            StatusCode::OK
+        );
         drop(busy_b);
         let busy_a = limit.acquire(&AccountId("a".to_owned())).await.unwrap();
         assert_eq!(

@@ -59,8 +59,9 @@ impl CredentialVerifier for AcceptAll {
     }
 }
 
-/// `workspace-key` is `key:1` in `tenant-a`; every other token is refused.
-struct Keys(AccountId);
+/// `workspace-key` is `key:1` in `tenant-a`, and with selection on, also
+/// `key:2` in `tenant-b`.
+struct Keys(AccountId, Option<AccountId>);
 
 impl PrincipalResolver for Keys {
     fn resolve<'a>(
@@ -70,19 +71,31 @@ impl PrincipalResolver for Keys {
         _request: BearerRequest<'a>,
     ) -> ResolveFuture<'a> {
         Box::pin(async move {
+            let caller = |account: &AccountId, tenant, principal| {
+                Authenticated::for_account(account.clone(), "agent".to_owned(), "mail".to_owned())
+                    .with_tenant(tenant)
+                    .with_principal(principal)
+            };
             Ok(match token {
-                "workspace-key" => Resolution::Authenticated(
-                    Authenticated::for_account(
-                        self.0.clone(),
-                        "agent".to_owned(),
-                        "mail".to_owned(),
-                    )
-                    .with_tenant("tenant-a")
-                    .with_principal("key:1"),
-                ),
+                "workspace-key" => {
+                    let a = caller(&self.0, "tenant-a", "key:1");
+                    let Some(other) = &self.1 else {
+                        return Ok(Resolution::Authenticated(a));
+                    };
+                    let b = caller(other, "tenant-b", "key:2");
+                    Resolution::Authenticated(a.clone().with_tenancies(vec![a, b]))
+                }
                 _ => Resolution::Refused("unknown key"),
             })
         })
+    }
+
+    fn selects_mailboxes(&self) -> bool {
+        self.1.is_some()
+    }
+
+    fn tenant_argument(&self) -> Option<&'static str> {
+        Some("tenant")
     }
 }
 
@@ -131,12 +144,18 @@ struct Harness {
 }
 
 async fn harness(limits: RequestLimits) -> Harness {
-    harness_with(limits, true, None).await
+    harness_with(limits, true, None, false).await
 }
 
 /// With `extension` false, no tool extension: a tool call skips its check.
 /// With `mail`, the account uses that IMAP server instead of a retired preset.
-async fn harness_with(limits: RequestLimits, extension: bool, mail: Option<MailConfig>) -> Harness {
+/// With `selects`, the caller can also act in a second tenant.
+async fn harness_with(
+    limits: RequestLimits,
+    extension: bool,
+    mail: Option<MailConfig>,
+    selects: bool,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}", dir.path().join("server.db").display());
     let key = MasterKey::parse(&MasterKey::generate_encoded().unwrap()).unwrap();
@@ -170,7 +189,19 @@ async fn harness_with(limits: RequestLimits, extension: bool, mail: Option<MailC
         upstream: None,
         google_push: None,
     };
-    let mut extensions = Extensions::new().principal_resolver(Arc::new(Keys(account.id)));
+    let other = if selects {
+        Some(
+            store
+                .for_tenant("tenant-b")
+                .upsert_imap_account("b@example.com", &password, Some("retired"))
+                .await
+                .unwrap()
+                .id,
+        )
+    } else {
+        None
+    };
+    let mut extensions = Extensions::new().principal_resolver(Arc::new(Keys(account.id, other)));
     if extension {
         extensions = extensions.tool_extension(Arc::new(AccountTools));
     }
@@ -651,8 +682,65 @@ async fn an_answer_of_the_limits_is_logged() {
 }
 
 #[tokio::test]
+async fn the_request_line_keeps_the_principal_and_tenant_together() {
+    let h = harness_with(RequestLimits::default(), false, None, true).await;
+    let log = capture();
+    let request = call(
+        "workspace-key",
+        "get_webhook_status",
+        &json!({ "tenant": "tenant-b" }),
+    );
+    assert_eq!(send(&h.app, request).await, StatusCode::OK);
+    let mut broken = call("workspace-key", "get_webhook_status", &json!({}));
+    *broken.body_mut() = Body::from_stream(futures::stream::once(async {
+        Err::<axum::body::Bytes, _>(io::Error::other("interrupted body"))
+    }));
+    assert_eq!(send(&h.app, broken).await, StatusCode::BAD_REQUEST);
+
+    // With no hooks or bucket, the selector's refusal still comes before
+    // the tool can answer that uploads are off.
+    let refused = call(
+        "workspace-key",
+        "upload_attachment",
+        &json!({ "tenant": "unknown" }),
+    );
+    let response = h.app.clone().oneshot(refused).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let reply: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        "unknown tenant: pass the id of one this connection can use"
+    );
+
+    let requests = log.requests();
+    assert_eq!(requests.len(), 3, "{}", log.text());
+    assert_line(
+        &requests[0],
+        &json!({
+            "method": "POST", "route": "/mcp", "status": 200,
+            "principal": "key:2", "tenant": "tenant-b", "tool": "get_webhook_status", "outcome": "ok",
+        }),
+    );
+    assert_line(
+        &requests[1],
+        &json!({
+            "method": "POST", "route": "/mcp", "status": 400,
+            "principal": "key:1", "tenant": "tenant-a",
+        }),
+    );
+    assert_line(
+        &requests[2],
+        &json!({
+            "method": "POST", "route": "/mcp", "status": 200,
+            "principal": "key:1", "tenant": "tenant-a", "tool": "upload_attachment", "outcome": "tool_error",
+        }),
+    );
+}
+
+#[tokio::test]
 async fn without_an_extension_server_tools_are_named_and_unknown_names_are_not() {
-    let h = harness_with(RequestLimits::default(), false, None).await;
+    let h = harness_with(RequestLimits::default(), false, None, false).await;
     let log = capture();
     let mail = json!({ "to": ["x@example.test"], "subject": "s", "body": "b" });
     for (name, arguments) in [("send_message", mail), ("no-such-tool", json!({}))] {
@@ -700,7 +788,7 @@ async fn a_server_tool_cut_off_by_the_timeout_is_still_named() {
         request_timeout: Duration::from_millis(300),
         ..RequestLimits::default()
     };
-    let h = harness_with(limits, false, Some(mail)).await;
+    let h = harness_with(limits, false, Some(mail), false).await;
     let log = capture();
     let request = call("workspace-key", "list_folders", &json!({}));
     assert_eq!(send(&h.app, request).await, StatusCode::SERVICE_UNAVAILABLE);

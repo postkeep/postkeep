@@ -20,7 +20,7 @@
 //!   it runs carries its `request_id`, also with `postkeep::request_log=off`
 //!   or a `warn` filter.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use axum::extract::{MatchedPath, Request, State};
@@ -35,14 +35,14 @@ use tracing::{Instrument as _, Span};
 
 use crate::metrics::Metrics;
 
-/// What the layers inside learn about a request: the first write wins.
+/// What the layers inside learn about a request. The caller can narrow;
+/// for other facts the first write wins.
 #[derive(Clone)]
 pub struct Note(Arc<Noted>);
 
 struct Noted {
     span: Span,
-    principal: OnceLock<String>,
-    tenant: OnceLock<String>,
+    caller: Mutex<Option<(String, String)>>,
     tool: OnceLock<String>,
     outcome: OnceLock<&'static str>,
     /// The usage hook refused the message the tool call was to send.
@@ -66,8 +66,7 @@ pub async fn log(State(metrics): State<Metrics>, mut request: Request, next: Nex
         tracing::error_span!(target: "postkeep::request", "request", request_id = id.as_str());
     let note = Note(Arc::new(Noted {
         span: span.clone(),
-        principal: OnceLock::new(),
-        tenant: OnceLock::new(),
+        caller: Mutex::new(None),
         tool: OnceLock::new(),
         outcome: OnceLock::new(),
         send_refused: OnceLock::new(),
@@ -84,6 +83,7 @@ pub async fn log(State(metrics): State<Metrics>, mut request: Request, next: Nex
     if let Some(outcome) = noted.outcome.get().copied() {
         metrics.tool_call(noted.tool.get().map(String::as_str), outcome);
     }
+    let caller = noted.caller.lock().unwrap_or_else(PoisonError::into_inner);
     tracing::info!(
         target: "postkeep::request_log",
         request_id = id.as_str(),
@@ -91,8 +91,8 @@ pub async fn log(State(metrics): State<Metrics>, mut request: Request, next: Nex
         route = route.as_deref(),
         status,
         ms,
-        principal = noted.principal.get().map(String::as_str),
-        tenant = noted.tenant.get().map(String::as_str),
+        principal = caller.as_ref().map(|(principal, _)| principal.as_str()),
+        tenant = caller.as_ref().map(|(_, tenant)| tenant.as_str()),
         tool = noted.tool.get().map(String::as_str),
         outcome = noted.outcome.get().copied(),
         "answered a request"
@@ -107,13 +107,18 @@ pub async fn note_caller(request: Request, next: Next) -> Response {
     if let (Some(note), Some(caller)) =
         (extensions.get::<Note>(), extensions.get::<Authenticated>())
     {
-        let _ = note.0.principal.set(caller.principal.clone());
-        let _ = note.0.tenant.set(caller.tenant.clone());
+        note.caller(caller);
     }
     next.run(request).await
 }
 
 impl Note {
+    /// Records the caller's principal and tenant together.
+    pub fn caller(&self, caller: &Authenticated) {
+        *self.0.caller.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((caller.principal.clone(), caller.tenant.clone()));
+    }
+
     /// The note of the request whose parts rmcp hands a tool call.
     pub fn of(parts: Option<&Parts>) -> Option<Self> {
         parts?.extensions.get::<Self>().cloned()
