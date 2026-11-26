@@ -2,7 +2,7 @@
 # Installs one binary from a pinned release archive into /usr/local/bin after
 # checking the archive's SHA-256, unless the image already has that version.
 #
-# Usage: install-tool.sh <https url of a .tar.gz> <sha256> <path inside the archive>
+# Usage: install-tool.sh <https url of a .tar.gz or .zip> <sha256> <path inside the archive>
 #                        [<version> [<version command>]]
 #        install-tool.sh --self-test
 #
@@ -54,7 +54,7 @@ self_test() {
   # A private PATH holding only what the script needs, so a real cargo-deny or
   # curl on this machine cannot leak into a case.
   local t p
-  for t in basename cat chmod cp gzip head install mkdir mktemp rm sha256sum tar; do
+  for t in basename cat chmod cp gzip head install mkdir mktemp rm sha256sum tar unzip; do
     p=$(command -v "$t") && ln -s "$p" "$bin/$t"
   done
 
@@ -166,6 +166,15 @@ EOF
   run "$url" "$good_sum" "$member" 1.2.3 "faketool --version" extra
   check "too many arguments: usage error" test "$rc" = 2
 
+  archive=$work/good.zip
+  url=https://example.invalid/tool-1.2.3.zip
+  (cd "$work/src" && zip -q "$archive" "$member")
+  good_sum=$(sha256sum "$archive" | cut -d' ' -f1)
+  run "$url" "$good_sum" "$member"
+  check 'a verified ZIP installs the requested binary' downloaded
+  run "$url" "$bad_sum" "$member"
+  check 'a wrong ZIP checksum fails and installs nothing' refused
+
   if [ "$failures" -ne 0 ]; then
     echo "install-tool self-test: $failures check(s) failed" >&2
     exit 1
@@ -196,15 +205,25 @@ if [ -n "$version" ]; then
   echo "$name $version not on PATH, downloading it"
 fi
 
-if ! command -v curl >/dev/null; then
+missing=()
+command -v curl >/dev/null || missing+=(curl)
+if [[ "$url" == *.zip ]] && ! command -v unzip >/dev/null; then
+  missing+=(unzip)
+fi
+if [ "${#missing[@]}" -gt 0 ]; then
   apt-get update -qq
-  apt-get install -y -qq --no-install-recommends curl >/dev/null
+  apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null
 fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "$tmp/archive.tar.gz" "$url"
-echo "$sum  $tmp/archive.tar.gz" | sha256sum -c --quiet -
-tar -xzf "$tmp/archive.tar.gz" -C "$tmp" "$member"
-install -m 0755 "$tmp/$member" "$dest/"
+curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "$tmp/archive" "$url"
+echo "$sum  $tmp/archive" | sha256sum -c --quiet -
+if [[ "$url" == *.zip ]]; then
+  unzip -p "$tmp/archive" "$member" > "$tmp/binary"
+  install -m 0755 "$tmp/binary" "$dest/$name"
+else
+  tar -xzf "$tmp/archive" -C "$tmp" "$member"
+  install -m 0755 "$tmp/$member" "$dest/"
+fi
 echo "installed $(basename "$member") from $url"

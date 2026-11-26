@@ -78,7 +78,6 @@ set -- \
   --builder postkeep \
   --provenance=false \
   --sbom=false \
-  --build-arg "RUST_VERSION=${RUST_VERSION}" \
   --build-arg "POSTKEEP_VERSION=${postkeep_version}" \
   --build-arg "IMAGE_SOURCE=${source}" \
   --build-arg "IMAGE_REVISION=${GITHUB_SHA}" \

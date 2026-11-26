@@ -26,13 +26,17 @@ jobs:
     outputs:
       rust: ${{ steps.paths.outputs.rust }}
       site: ${{ steps.paths.outputs.site }}
+      site_node_image: ${{ steps.paths.outputs.site_node_image }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 2
           persist-credentials: false
       - id: paths
-        run: .github/ci/changes.sh >> "$GITHUB_OUTPUT"
+        run: |
+          .github/ci/changes.sh >> "$GITHUB_OUTPUT"
+          . .github/ci/versions.sh
+          printf 'site_node_image=%s\n' "$SITE_NODE_IMAGE" >> "$GITHUB_OUTPUT"
   lint:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -60,6 +64,7 @@ jobs:
           .github/ci/install-tool.sh --self-test
           .github/ci/tag-prerelease.sh --self-test
           .github/ci/changes.sh --self-test
+          .github/ci/check-site-dist.sh --self-test
           tools/stamp-workspace-version.sh --self-test
       - run: cargo fmt --all -- --check
       - name: Check dependencies
@@ -135,7 +140,7 @@ jobs:
     if: needs.changes.outputs.site == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    container: node:22-bookworm
+    container: ${{ needs.changes.outputs.site_node_image }}
     permissions:
       contents: read
     steps:
@@ -143,10 +148,10 @@ jobs:
         with:
           persist-credentials: false
       - run: |
-          . .github/ci/versions.sh
-          npm install -g "bun@$BUN_VERSION"
-          cd site
-          bun install --frozen-lockfile && bun run check
+          .github/ci/bun.sh
+          .github/ci/site-node.sh site bun run check
+          .github/ci/check-site-dist.sh site/dist
+          .github/ci/site-node.sh site/deploy node_modules/.bin/wrangler --version
   checks:
     needs: [changes, lint, test, site]
     if: always()

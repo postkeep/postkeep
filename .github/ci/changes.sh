@@ -36,13 +36,15 @@ self_test() {
   check 'tool pin' 'true true true true'
   commit docs/guide.md
   check 'docs feed site and deploy' 'false true false true'
-  commit Dockerfile
+  commit .dockerignore
   check 'image-only input' 'false false true false'
+  commit Dockerfile
+  check 'Dockerfile pins the Rust version for CI' 'true false true false'
   for path in .github/workflows/checks.yml .github/paths .github/ci/changes.sh; do
     commit "$path"
     check 'CI inputs run every list' 'true true true true'
   done
-  git mv Dockerfile 'old image file' && git commit -qm 'test: move a build input'
+  git mv .dockerignore 'old image file' && git commit -qm 'test: move a build input'
   check 'renamed build input' 'false false true false'
   git rm -q docs/guide.md && git commit -qm 'test: delete docs'
   check 'deleted input' 'false true false true'

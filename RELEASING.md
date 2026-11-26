@@ -123,7 +123,8 @@ A build input is anything the image is compiled or published from. The
 `image` section of `.github/paths` is the only list of them: add a new
 input there. `main.yml`'s `changes` job reads it. CI changes are inputs to
 every list, so changing a workflow, `.github/paths` or `.github/ci/`
-publishes too, including a change to the pinned CI/image Rust version.
+publishes too. Changing the Rust pin in `Dockerfile` publishes the image and
+runs the Rust checks on the pull request.
 A docs-only change outside those inputs publishes no branch image and
 `latest` stays where it was; every merge still gets its dev-tag image.
 
@@ -152,7 +153,9 @@ No local Docker Hub login is required. CI logs in with `DOCKERHUB_USERNAME`
 and `DOCKERHUB_TOKEN` only for the push, after loading an amd64 image and
 checking `docker run --rm … --version`. It uses a local `docker-container`
 buildx builder; its BuildKit image is digest-pinned in
-`.github/ci/versions.sh`. Cross-compiling needs no emulation. All publish
+`.github/ci/versions.sh`. CI and a local `docker build .` both use the Rust
+builder pinned in `Dockerfile`; update its tag and multi-arch digest together.
+Cross-compiling needs no emulation. All publish
 jobs share the `publish-image` concurrency group with `queue: max`, including
 final releases and dev tags. They queue by when they began waiting, not dispatch
 time; execution order is not guaranteed. Newer merges do not cancel them.
