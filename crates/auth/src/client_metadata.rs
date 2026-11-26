@@ -85,11 +85,24 @@ struct Document {
     client_name: Option<String>,
     #[serde(default)]
     redirect_uris: Vec<String>,
-    token_endpoint_auth_method: Option<String>,
+    #[expect(clippy::option_option, reason = "a null method is not a missing one")]
+    #[serde(default, deserialize_with = "present")]
+    token_endpoint_auth_method: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present")]
+    token_endpoint_auth_methods_supported: Option<Vec<String>>,
     grant_types: Option<Vec<String>>,
     response_types: Option<Vec<String>>,
     client_secret: Option<serde_json::Value>,
     client_secret_expires_at: Option<serde_json::Value>,
+}
+
+/// Reads a present field as `Some`, so that `null` is not read as a missing
+/// field: it is refused where `T` is a list and kept as `Some(None)` where
+/// `T` is an `Option`.
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Checks the client ID URL itself, before anything is fetched.
@@ -158,11 +171,37 @@ fn validate(
         ));
     }
     // A shared secret cannot be published, and private_key_jwt is not
-    // supported, so only public clients (PKCE) are accepted.
-    if !matches!(
-        document.token_endpoint_auth_method.as_deref(),
-        None | Some("none")
-    ) {
+    // supported, so only public clients (PKCE) are accepted. A client that
+    // lists the methods it can use (draft-03 section 5) must list none, and
+    // a single method it also gives, even null, must be one of them.
+    let preferred = document
+        .token_endpoint_auth_method
+        .as_ref()
+        .map(Option::as_deref);
+    if let Some(methods) = &document.token_endpoint_auth_methods_supported {
+        if let Some(preferred) = preferred
+            && !methods
+                .iter()
+                .any(|method| Some(method.as_str()) == preferred)
+        {
+            return Err(MetadataError::Invalid(
+                "token_endpoint_auth_method is not in token_endpoint_auth_methods_supported",
+            ));
+        }
+        if methods
+            .iter()
+            .any(|method| method.starts_with("client_secret_"))
+        {
+            return Err(MetadataError::Invalid(
+                "token_endpoint_auth_methods_supported must not list a client secret method",
+            ));
+        }
+        if !methods.iter().any(|method| method == "none") {
+            return Err(MetadataError::Invalid(
+                "token_endpoint_auth_methods_supported must include none",
+            ));
+        }
+    } else if !matches!(preferred, None | Some(None | Some("none"))) {
         return Err(MetadataError::Invalid(
             "token_endpoint_auth_method must be none",
         ));
@@ -395,7 +434,6 @@ mod tests {
             "client_id": ID,
             "client_name": "Example \u{202E}App",
             "redirect_uris": ["https://app.example.com/callback", "http://127.0.0.1/cb"],
-            "token_endpoint_auth_method": "none",
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"]
         });
@@ -425,6 +463,51 @@ mod tests {
         assert!(refused(
             serde_json::json!({ "token_endpoint_auth_method": "private_key_jwt" })
         ));
+        // Without a list, the single method must be none, null or missing.
+        assert!(!refused(
+            serde_json::json!({ "token_endpoint_auth_method": "none" })
+        ));
+        assert!(!refused(
+            serde_json::json!({ "token_endpoint_auth_method": null })
+        ));
+        // With the list of methods a client can use (draft-03 section 5),
+        // the single method is only its preference, as in ChatGPT's document.
+        assert!(!refused(serde_json::json!({
+            "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+            "token_endpoint_auth_method": "private_key_jwt"
+        })));
+        assert!(!refused(serde_json::json!({
+            "token_endpoint_auth_methods_supported": ["private_key_jwt", "none"]
+        })));
+        for patch in [
+            serde_json::json!({ "token_endpoint_auth_methods_supported": [] }),
+            serde_json::json!({ "token_endpoint_auth_methods_supported": ["private_key_jwt"] }),
+            serde_json::json!({
+                "token_endpoint_auth_methods_supported": ["none"],
+                "token_endpoint_auth_method": "private_key_jwt"
+            }),
+            serde_json::json!({
+                "token_endpoint_auth_methods_supported": ["none"],
+                "token_endpoint_auth_method": null
+            }),
+            serde_json::json!({
+                "token_endpoint_auth_methods_supported": ["none", "client_secret_basic"]
+            }),
+        ] {
+            assert!(refused(patch.clone()), "{patch}");
+        }
+        // A list that is null or not a list is refused, never read as missing.
+        for malformed in [
+            serde_json::Value::Null,
+            serde_json::json!("none"),
+            serde_json::json!(["none", null]),
+        ] {
+            let field = serde_json::json!({ "token_endpoint_auth_methods_supported": malformed });
+            assert!(
+                serde_json::from_value::<Document>(field).is_err(),
+                "{malformed}"
+            );
+        }
         assert!(refused(serde_json::json!({ "redirect_uris": [] })));
         assert!(refused(
             serde_json::json!({ "redirect_uris": ["javascript:alert(1)"] })

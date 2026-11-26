@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{OAuthError, no_store};
 use crate::state::AuthState;
-use crate::{random, redirect};
+use crate::{client_metadata, random, redirect};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct TokenRequest {
@@ -25,6 +25,7 @@ pub struct TokenRequest {
     resource: Option<String>,
     client_id: Option<String>,
     client_secret: Option<String>,
+    client_assertion: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +49,7 @@ pub async fn token(
         &headers,
         request.client_id.as_deref(),
         request.client_secret.as_deref(),
+        request.client_assertion.as_deref(),
     )
     .await?;
     match request.resource.as_deref() {
@@ -253,6 +255,7 @@ pub struct RevokeRequest {
     token: Option<String>,
     client_id: Option<String>,
     client_secret: Option<String>,
+    client_assertion: Option<String>,
 }
 
 /// `POST /revoke`. Revoking either token of a grant revokes the grant,
@@ -269,6 +272,7 @@ pub async fn revoke(
         &headers,
         request.client_id.as_deref(),
         request.client_secret.as_deref(),
+        request.client_assertion.as_deref(),
     )
     .await?;
     let token = request
@@ -284,12 +288,14 @@ pub async fn revoke(
 }
 
 /// Identifies the client from HTTP Basic credentials or form fields and
-/// checks its secret if it is confidential.
+/// checks its secret if it is confidential. A metadata document client
+/// uses none, so any credential it sends is refused (draft-03 section 5).
 async fn authenticate_client(
     state: &AuthState,
     headers: &HeaderMap,
     form_id: Option<&str>,
     form_secret: Option<&str>,
+    form_assertion: Option<&str>,
 ) -> Result<Client, OAuthError> {
     let basic = basic_credentials(headers)?;
     let used_basic = basic.is_some();
@@ -323,6 +329,10 @@ async fn authenticate_client(
         {
             return Err(OAuthError::invalid_client(used_basic));
         }
+    } else if client_metadata::is_document_url(&client.id)
+        && (secret.is_some() || form_assertion.is_some())
+    {
+        return Err(OAuthError::invalid_client(used_basic));
     }
     Ok(client)
 }
