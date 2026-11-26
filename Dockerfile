@@ -10,10 +10,8 @@
 # user. Configure it entirely through POSTKEEP_* environment variables; see
 # docs/configuration.md.
 
-ARG RUST_VERSION=1
-ARG DEBIAN_SUITE=bookworm
-
-FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-${DEBIAN_SUITE} AS build
+# CI also reads its Rust version from this pin.
+FROM --platform=$BUILDPLATFORM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS build
 ARG TARGETARCH
 ARG BUILDARCH
 WORKDIR /src

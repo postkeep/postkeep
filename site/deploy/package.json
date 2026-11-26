@@ -1,0 +1,7 @@
+{
+  "name": "postkeep-site-deploy",
+  "private": true,
+  "dependencies": {
+    "wrangler": "4.149.0"
+  }
+}

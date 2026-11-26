@@ -6,10 +6,10 @@ Cloud or self-host at `/compare/`, and a 404 page. Built with Astro, TypeScript 
 
 ## Commands
 
-From this directory, with [Bun](https://bun.sh) 1.4.2 (`packageManager` in `package.json`):
+From this directory, with the [Bun](https://bun.sh) version pinned by `packageManager` in `package.json`:
 
 ```sh
-bun install --frozen-lockfile
+bun install --frozen-lockfile --ignore-scripts
 bun run dev            # Astro dev server
 bun run build          # static site in dist/
 bun run preview        # serve dist/
@@ -23,10 +23,16 @@ bun run check:design   # fail if a copied brand file has drifted
 
 ## Deploying
 
-The `deploy-site` job in the repository's `.github/workflows/main.yml` runs on every push to `main` that changes
-`site/**` or a file the build reads (`site-deploy` in `.github/paths`); a hand dispatch deploys it too. It runs
-`bun install --frozen-lockfile && bun run build` here and uploads `dist/` to the Cloudflare Pages project
-behind postkeep.dev.
+`.github/workflows/main.yml` builds and deploys the site when a push to `main` changes a
+`site-deploy` input in `.github/paths`, or on a hand dispatch from `main`. `build-site` uses
+SHA-256-verified Bun and a frozen install with lifecycle scripts disabled. It checks that
+`dist/` contains only regular files and directories, with no `_worker.js`, then uploads it
+as an artifact. It does not receive deployment credentials.
+
+`deploy-site` installs Wrangler from the separate `deploy/bun.lock`, also with lifecycle
+scripts disabled, downloads the artifact, and repeats the static check. Only the final
+Wrangler step receives Cloudflare credentials. It deploys the artifact to the Pages project
+named by the `CLOUDFLARE_PAGES_PROJECT` variable.
 
 The build writes `dist/_headers` (the CSP and the other security headers, and long caching for `/_astro/`
 and `/fonts/`), `dist/sitemap.xml` (every page that is not `noindex`) and `dist/robots.txt`. Pages are

@@ -442,8 +442,8 @@ are signed with HMAC-SHA256 over `timestamp.body`.
 ### Supply chain and container
 
 `cargo-deny` (advisories, licences, sources, bans) in CI; `Cargo.lock`
-committed and builds `--locked`; the runtime base image pinned by digest
-and bumped by hand. CI runs on GitHub-hosted runners. The image is
+committed and builds `--locked`; the build and runtime base images pinned
+by digest and bumped by hand. CI runs on GitHub-hosted runners. The image is
 distroless, runs as a non-root user, and holds only the binary.
 
 ## Assumptions and residual risks

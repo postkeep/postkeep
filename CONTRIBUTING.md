@@ -91,7 +91,8 @@ filter can leave a required check waiting forever.
   and PostgreSQL integration tests against `greenmail/standalone:2.1.14` and
   `postgres:17`, then the doc tests. It fails if any test is skipped and
   uploads `nextest.log` and the JUnit report for 14 days, also on failure;
-- `site`: `bun run check` in `site/` ([site/README.md](site/README.md));
+- `site`: `bun run check` in `site/`, the static artifact guard, and a smoke test
+  of the pinned deploy tool ([site/README.md](site/README.md));
 - `checks`: always reports, failing if a needed job failed or was cancelled.
   A path-skipped job passes this gate.
 
@@ -121,9 +122,10 @@ or holds a secret. Never change these workflows to use `pull_request_target`
 or `workflow_run` to run a fork's code with secrets. A new head needs its own
 review and successful checks before merging.
 
-Rust jobs use the CI version in `.github/ci/versions.sh`, which also pins
-the downloaded tools by version and SHA-256; contributors keep the stable
-channel in `rust-toolchain.toml`. Bun comes from `site/package.json`.
+Rust jobs use the Rust version pinned in `Dockerfile`; contributors keep the
+stable channel in `rust-toolchain.toml`. `.github/ci/versions.sh` pins the
+other CI tools, including the SHA-256 of each Bun archive. The Bun version
+comes from `site/package.json`.
 All actions are pinned by commit. Rust caches are restored in pull requests
 but saved only by scheduled or hand-started checks on `main`, never by a
 pull request. A newer pull request commit cancels its older run; publishing
