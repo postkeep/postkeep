@@ -358,18 +358,22 @@ sends are limited to one per 10 s per account. Fuzzed (`webhook_target`).
 
 Client ID Metadata Documents use the same client and rules, with a 5 s limit
 and a 64 KiB body cap. The URL must already be in normal form and the
-document must name it as its `client_id`. Only public clients are accepted
-(no `client_secret`, `token_endpoint_auth_method` `none`). Redirect URIs
-pass the registration rules and must then match exactly, with no loopback
-port leeway. A valid document is reused for its `Cache-Control: max-age`,
-clamped to 5 minutes to 24 hours, which limits how often `/authorize` can
-make the server fetch. Errors are never cached. Fetches count against the
-per-IP request limit; a new client counts against the per-IP registration
-limit and the client limit, like a registration. The sign-in page shows the
-host that published the document next to the self-asserted name. Because
-`/authorize` needs no sign-in, anyone can make the server fetch a public
-HTTPS URL once per cache lifetime; the error page then shows only the HTTP
-status, never the body.
+document must name it as its `client_id`. Only public clients are accepted:
+no `client_secret`; a `token_endpoint_auth_methods_supported` list must
+include `none`, name no shared-secret method and hold any
+`token_endpoint_auth_method` given (null included); without the list, that
+method must be `none`, null or absent. At `/token` and `/revoke`, such a
+client's secret, Basic credentials or `client_assertion` gets
+`invalid_client`. Redirect URIs pass the registration rules and must then
+match exactly, with no loopback port leeway. A valid document is reused for
+its `Cache-Control: max-age`, clamped to 5 minutes to 24 hours, which limits
+how often `/authorize` can make the server fetch. Errors are never cached.
+Fetches count against the per-IP request limit; a new client counts against
+the per-IP registration limit and the client limit, like a registration. The
+sign-in page shows the host that published the document next to the
+self-asserted name. Because `/authorize` needs no sign-in, anyone can make
+the server fetch a public HTTPS URL once per cache lifetime; the error page
+then shows only the HTTP status, never the body.
 
 ### Denial of service
 

@@ -10,6 +10,8 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use http_body_util::BodyExt;
 use postkeep_auth::{AuthConfig, AuthState, CredentialVerifier, VerifyFuture, router};
 use postkeep_mail::ImapServer;
@@ -160,13 +162,14 @@ impl Setup {
     }
 }
 
-#[tokio::test]
-async fn a_metadata_document_client_signs_in_and_gets_tokens() {
+/// Signs in through the client that `body` describes and exchanges the code
+/// with only the PKCE verifier, as a public client.
+async fn signs_in_and_gets_tokens(body: impl FnOnce(&str) -> Value) {
     let mut setup = setup(|_| {}).await;
     let client_id = setup.client_id.clone();
     setup
         .documents
-        .reply_with([serve(&document(&client_id), "public, max-age=600")]);
+        .reply_with([serve(&body(&client_id), "public, max-age=600")]);
 
     let page = setup.authorize(&client_id, REDIRECT).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
@@ -208,17 +211,43 @@ async fn a_metadata_document_client_signs_in_and_gets_tokens() {
         .unwrap()
         .1
         .into_owned();
-    let token = setup
-        .form(
-            "/token",
-            &[
-                ("grant_type", "authorization_code"),
-                ("code", &code),
-                ("client_id", &client_id),
-                ("code_verifier", VERIFIER),
-            ],
+    let exchange = [
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("client_id", client_id.as_str()),
+        ("code_verifier", VERIFIER),
+    ];
+    // A client using none must not authenticate (draft-03 section 5): a
+    // secret, an assertion or Basic credentials are refused before the code
+    // is used.
+    let id: String = url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect();
+    let form = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(exchange)
+        .finish();
+    let basic = Request::post("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(
+            header::AUTHORIZATION,
+            format!("Basic {}", STANDARD.encode(format!("{id}:placeholder"))),
         )
-        .await;
+        .body(Body::from(form))
+        .unwrap();
+    let mut refused = vec![setup.send(basic).await];
+    for credential in [
+        ("client_secret", "placeholder"),
+        ("client_assertion", "placeholder"),
+    ] {
+        refused.push(
+            setup
+                .form("/token", &[&exchange[..], &[credential]].concat())
+                .await,
+        );
+    }
+    for page in refused {
+        assert_eq!(page.status, StatusCode::UNAUTHORIZED, "{}", page.body);
+        assert!(page.body.contains("invalid_client"), "{}", page.body);
+    }
+    let token = setup.form("/token", &exchange).await;
     assert_eq!(token.status, StatusCode::OK, "{}", token.body);
     let token: Value = serde_json::from_str(&token.body).unwrap();
     assert!(token["access_token"].is_string());
@@ -228,6 +257,24 @@ async fn a_metadata_document_client_signs_in_and_gets_tokens() {
     let again = setup.authorize(&client_id, REDIRECT).await;
     assert_eq!(again.status, StatusCode::OK, "{}", again.body);
     assert_eq!(setup.fetches(), 0);
+}
+
+#[tokio::test]
+async fn a_metadata_document_client_signs_in_and_gets_tokens() {
+    signs_in_and_gets_tokens(document).await;
+}
+
+#[tokio::test]
+async fn a_client_that_lists_none_among_its_methods_signs_in_as_a_public_client() {
+    // ChatGPT's shape: private_key_jwt is only its preference, and this
+    // server does not offer it, so the client uses none.
+    signs_in_and_gets_tokens(|client_id| {
+        let mut body = document(client_id);
+        body["token_endpoint_auth_methods_supported"] = json!(["none", "private_key_jwt"]);
+        body["token_endpoint_auth_method"] = json!("private_key_jwt");
+        body
+    })
+    .await;
 }
 
 #[tokio::test]
