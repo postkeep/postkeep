@@ -262,6 +262,7 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
   they reach a single part. `body_format: html` returns the HTML part
   alone.
   Content hidden by an inline style is left out too: `display:none`,
+  `display:table-column` or `table-column-group`,
   `visibility:hidden` or `collapse`, `content-visibility:hidden`, or zooms
   that multiply down the tree to 0.1 or less. An element 1 px or less wide
   or high is left out under overflow that isn't visible, on the element or
@@ -272,9 +273,24 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
   size of 1 px or less, sizes and line-heights in em and the other font
   units count as 0. A style with a CSS comment, with an entity the
   converter can't decode, or with a hiding property whose value it can't
-  read, such as var() or calc(), counts as hiding. Nothing inside `<svg>`,
-  `<math>` or `<select>` is written, and when their markup isn't plainly
-  nested, the rest of the message is left out. Content with an opacity,
+  read, such as var() or calc(), counts as a hiding bound. A declaration
+  in the established syntax (such as CSS 2.1 lengths and CSS Color 3
+  colours) can clear a bound for the same property only if the style's
+  declaration boundaries are unambiguous and it outranks the bound:
+  `!important` beats normal, and the later declaration wins at equal
+  priority. This models established browser-engine rendering; legacy mail
+  renderers with smaller subsets, such as Word-based Outlook, may differ.
+  A client that lacks a newer property such as
+  `content-visibility` or `inline-size` drops both declarations of that
+  property; separately supported spellings still count independently.
+  Flex and grid display, percentage opacity, and drop-prone resets such
+  as `unset` cannot clear earlier bounds. Both overflow axes must win to
+  clear an uncertain shorthand, and a `font` shorthand never removes the
+  independent bounds from direct size, line-height or size-adjust values.
+  An override does not clear a separate or inherited hiding condition.
+  Nothing inside `<svg>`, `<math>` or `<select>` is written, and when their
+  markup isn't plainly nested, the rest of the message is left out.
+  Content with an opacity,
   an opacity() filter, or a text color whose alpha is below 0.1 is left
   out too; opacities multiply down the tree, and the faintest color of an
   element and its parents counts. `all` other than a reset counts as
