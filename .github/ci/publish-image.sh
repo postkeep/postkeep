@@ -91,7 +91,7 @@ set -- \
   --label "org.opencontainers.image.version=${version}" \
   --label "org.opencontainers.image.licenses=${licenses}"
 
-echo "smoke test: linux/amd64 --version"
+echo "smoke test: linux/amd64 --version and OCI label"
 docker buildx build \
   "$@" \
   --platform linux/amd64 \
@@ -114,6 +114,13 @@ else
       exit 1
       ;;
   esac
+fi
+
+expected_label='"io.github.postkeep/postkeep"'
+reported_label=$(docker image inspect --format '{{json (index .Config.Labels "io.modelcontextprotocol.server.name")}}' "$smoke")
+if [ "$reported_label" != "$expected_label" ]; then
+  echo "smoke: expected io.modelcontextprotocol.server.name=${expected_label}, got '${reported_label}'" >&2
+  exit 1
 fi
 
 echo "logging in to the registry"

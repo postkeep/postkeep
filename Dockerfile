@@ -78,7 +78,8 @@ LABEL org.opencontainers.image.title="postkeep" \
       org.opencontainers.image.created="${IMAGE_CREATED}" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.vendor="postkeep" \
-      org.opencontainers.image.licenses="${IMAGE_LICENSES}"
+      org.opencontainers.image.licenses="${IMAGE_LICENSES}" \
+      io.modelcontextprotocol.server.name="io.github.postkeep/postkeep"
 
 COPY --from=build /out/postkeep /usr/local/bin/postkeep
 COPY --from=build --chown=65532:65532 /out/data /data

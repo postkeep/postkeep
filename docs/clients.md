@@ -60,6 +60,36 @@ Copilot agent mode.
 - An app that only runs local (stdio) servers can use a bridge such as
   `mcp-remote`: `npx mcp-remote https://mail.example.com/mcp`.
 
+Replace `mail.example.com` with your server's host. If you already have a
+`mcpServers` object, add the `postkeep` entry to it.
+
+### Claude Code
+
+Run this in your project, then use `/mcp` in Claude Code to sign in:
+
+```sh
+claude mcp add --transport http postkeep https://mail.example.com/mcp
+```
+
+### Cline
+
+Open *MCP Servers → Configure → Configure MCP Servers* and add:
+
+```json
+{ "mcpServers": { "postkeep": { "type": "streamableHttp", "url": "https://mail.example.com/mcp" } } }
+```
+
+Select *Authenticate* for postkeep, then finish in your browser.
+
+### Devin Desktop (formerly Windsurf)
+
+Open *Agents → Customize → MCPs* and select *This computer*. Add the entry
+in `~/.config/devin/mcp_config.json` (`%APPDATA%\devin\mcp_config.json` on Windows):
+
+```json
+{ "mcpServers": { "postkeep": { "url": "https://mail.example.com/mcp", "transport": "http" } } }
+```
+
 ### Attaching large files
 
 A file too large to write into a call goes by
