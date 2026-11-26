@@ -121,6 +121,8 @@ async fn the_default_pages_can_be_turned_off() {
         (Method::POST, "/account/webhook/filters/edit"),
         (Method::POST, "/account/webhook/filters/remove"),
         (Method::POST, "/account/webhook/filters/enabled"),
+        (Method::POST, "/oauth/microsoft/start"),
+        (Method::POST, "/oauth/google/start"),
     ] {
         assert_eq!(
             status(&app, method.clone(), path, Vec::new()).await.0,

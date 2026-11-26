@@ -207,10 +207,11 @@ impl MailClient {
     ///
     /// Returns [`Error::StaleId`](crate::Error::StaleId) if the UIDVALIDITY
     /// differs, [`Error::MessageNotFound`](crate::Error::MessageNotFound) if
-    /// the original does not exist, [`Error::InvalidInput`](crate::Error::InvalidInput)
+    /// the original does not exist, [`Error::MessageTooLarge`](crate::Error::MessageTooLarge)
+    /// if it exceeds [`crate::IMAP_MESSAGE_LIMIT`], or [`Error::InvalidInput`](crate::Error::InvalidInput)
     /// if the original's addresses do not allow the reply, in the cases that
-    /// [`mime::compose_reply`](crate::mime::compose_reply) lists, or an IMAP or
-    /// SMTP error. Returns [`Error::SubmissionUnconfirmed`](crate::Error::SubmissionUnconfirmed)
+    /// [`mime::compose_reply`](crate::mime::compose_reply) lists. IMAP or SMTP can also
+    /// fail. Returns [`Error::SubmissionUnconfirmed`](crate::Error::SubmissionUnconfirmed)
     /// when the server may have accepted the reply but did not confirm it.
     pub async fn reply(
         &self,

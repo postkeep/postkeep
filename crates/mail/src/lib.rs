@@ -51,6 +51,9 @@ mod smtp;
 mod tls;
 mod utf7;
 
+/// Maximum raw MIME size in bytes for a full-message IMAP read (48 MiB).
+pub const IMAP_MESSAGE_LIMIT: usize = 48 * 1024 * 1024;
+
 pub use chrono::NaiveDate;
 pub use secrecy::SecretString;
 

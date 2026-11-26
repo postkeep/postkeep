@@ -21,8 +21,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http_body_util::BodyExt;
 use postkeep_auth::{
     AuthConfig, AuthState, Authenticated, CallbackPage, CheckFuture, ContinuationHook,
-    ContinuedSignIn, CredentialVerifier, InvalidRequestPage, NewMailbox, Refusal, SignInFuture,
-    SignInHook, SignInRequest, UsageHook, VerifyFuture, require_bearer, router,
+    ContinuedSignIn, CredentialVerifier, InvalidRequestPage, NewMailbox, Refusal, RouterOptions,
+    SignInFuture, SignInHook, SignInRequest, UsageHook, VerifyFuture, require_bearer, router,
+    router_with,
 };
 use postkeep_mail::ImapServer;
 use postkeep_store::{MasterKey, OAuthAccount, Provider, Store, StoreError, UpstreamTokens};
@@ -357,6 +358,41 @@ async fn buttons_show_only_for_configured_providers() {
             .status,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn disabling_account_pages_removes_upstream_starts_but_not_callbacks() {
+    let server = MockServer::start().await;
+    let mut app = app(Some(&server), true, true, |_| {}).await;
+    let mut options = RouterOptions::default();
+    options.account_pages = false;
+    app.app = router_with(app.state.clone(), options);
+    for provider in ["microsoft", "google"] {
+        let start = format!("/oauth/{provider}/start");
+        assert_eq!(
+            app.post(&start, &[], None).await.status,
+            StatusCode::NOT_FOUND
+        );
+        let callback = format!("/oauth/{provider}/callback");
+        assert_eq!(
+            app.get(&callback, None).await.status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let client = app.client().await;
+    let page = app.sign_in_page(&client).await;
+    let retry = app
+        .post(
+            "/authorize",
+            &[("request_id", &request_id(&page))],
+            Some(ISSUER),
+        )
+        .await;
+    assert_eq!(retry.status, StatusCode::BAD_REQUEST);
+    for html in [page, retry.body] {
+        assert!(html.contains("name=\"password\""));
+        assert!(!html.contains("/oauth/"));
+    }
 }
 
 #[tokio::test]

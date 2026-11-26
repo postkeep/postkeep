@@ -150,8 +150,9 @@ impl ImapSession {
     /// # Errors
     ///
     /// Returns [`Error::StaleId`] if the UIDVALIDITY differs,
-    /// [`Error::MessageNotFound`] if no message has this UID, or a protocol
-    /// error.
+    /// [`Error::MessageNotFound`] if no message has this UID,
+    /// [`Error::MessageTooLarge`] if the raw message exceeds [`crate::IMAP_MESSAGE_LIMIT`],
+    /// or a protocol error.
     pub async fn fetch_message(
         &mut self,
         folder: &str,
@@ -176,8 +177,9 @@ impl ImapSession {
     /// # Errors
     ///
     /// Returns [`Error::StaleId`] if the UIDVALIDITY differs,
-    /// [`Error::MessageNotFound`] if no message has this UID, or a protocol
-    /// error.
+    /// [`Error::MessageNotFound`] if no message has this UID,
+    /// [`Error::MessageTooLarge`] if the raw message exceeds [`crate::IMAP_MESSAGE_LIMIT`],
+    /// or a protocol error.
     pub async fn fetch_attachment(
         &mut self,
         folder: &str,
@@ -215,8 +217,8 @@ impl ImapSession {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::MessageTooLarge`] before fetching the body if the reported size exceeds
-    /// `max`, or after the fetch if the actual size exceeds it. Either read can also fail.
+    /// Returns [`Error::MessageTooLarge`] if the reported or actual size exceeds the smaller
+    /// of `max` and [`crate::IMAP_MESSAGE_LIMIT`]. Either read can also fail.
     pub async fn fetch_raw(
         &mut self,
         folder: &str,

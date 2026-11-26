@@ -156,6 +156,11 @@ fn busy(message: &'static str) -> Response {
 mod tests {
     use super::*;
 
+    #[test]
+    fn imap_and_http_message_limits_match() {
+        assert_eq!(postkeep_mail::IMAP_MESSAGE_LIMIT, LARGE_MESSAGE_LIMIT);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn large_forwards_wait_for_room_then_refuse_when_busy() {
         let budget = Semaphore::new(LARGE_MESSAGE_LIMIT);
