@@ -801,7 +801,11 @@ fn attribute(attributes: &str, wanted: &str) -> Option<String> {
             };
         }
         if name.eq_ignore_ascii_case(wanted) {
-            return Some(decode_entities(value));
+            return Some(if wanted == "style" {
+                decode_entities_with_nbsp(value, '\u{a0}')
+            } else {
+                decode_entities(value)
+            });
         }
     }
 }
@@ -956,8 +960,8 @@ struct Style {
     /// Whether it lays out its children in a way a table cell can't grow
     /// in: a fixed table layout, or a flex or grid display.
     layout: bool,
-    /// Its own opacity, 0-1: the lowest `opacity` times the lowest
-    /// `opacity()` filter.
+    /// Its own opacity, 0-1: the surviving `opacity` times the
+    /// surviving `opacity()` filter, each bounded by uncertain values.
     opacity: f64,
     /// The lowest alpha of its text colours, 0-1.
     color: f64,
@@ -1118,9 +1122,293 @@ const FONT_UNITS: [&str; 12] = [
     "em", "ex", "ch", "cap", "ic", "lh", "rem", "rex", "rch", "rcap", "ric", "rlh",
 ];
 
-/// Reads an inline style (entities already decoded). Every declaration
-/// counts, even one a later one would override, and a value it can't read
-/// in a property that can hide counts as hiding. `clipped` says that the
+const FONT: &str = "font";
+const FONT_SIZE: &str = "font-size";
+const LINE_HEIGHT: &str = "line-height";
+const OVERFLOW_AXES: [&str; 2] = ["overflow-x", "overflow-y"];
+const DISPLAY_HIDES: [&str; 3] = ["none", "table-column", "table-column-group"];
+
+/// Properties grouped by how they are read and how they affect hiding.
+/// A declaration separately keeps its exact spelling for the cascade.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StyleProperty {
+    FontSize,
+    Font,
+    LineHeight,
+    FontAdjust,
+    TextAdjust,
+    OtherAdjust,
+    All,
+    Display,
+    Visibility,
+    ContentVisibility,
+    Boxed,
+    TableLayout,
+    Size,
+    MaxSize,
+    OverflowShorthand,
+    Overflow,
+    Zoom,
+    Opacity,
+    Filter,
+    Color,
+    Other,
+}
+
+impl StyleProperty {
+    fn read(name: &str) -> Self {
+        match name {
+            FONT_SIZE => Self::FontSize,
+            FONT => Self::Font,
+            LINE_HEIGHT => Self::LineHeight,
+            "font-size-adjust" => Self::FontAdjust,
+            "text-size-adjust"
+            | "-webkit-text-size-adjust"
+            | "-ms-text-size-adjust"
+            | "-moz-text-size-adjust" => Self::TextAdjust,
+            name if name.ends_with("size-adjust") => Self::OtherAdjust,
+            "all" => Self::All,
+            "display" => Self::Display,
+            "visibility" => Self::Visibility,
+            "content-visibility" => Self::ContentVisibility,
+            "float" | "position" => Self::Boxed,
+            "table-layout" => Self::TableLayout,
+            "width" | "height" | "inline-size" | "block-size" => Self::Size,
+            "max-width" | "max-height" | "max-inline-size" | "max-block-size" => Self::MaxSize,
+            "overflow" => Self::OverflowShorthand,
+            name if OVERFLOW_AXES.contains(&name) => Self::Overflow,
+            "overflow-block" | "overflow-inline" => Self::Overflow,
+            "zoom" => Self::Zoom,
+            "opacity" => Self::Opacity,
+            "filter" | "-webkit-filter" => Self::Filter,
+            "color" | "-webkit-text-fill-color" => Self::Color,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// A shorthand's size and line-height bounds. An unreadable shorthand
+/// bounds both, but a definite longhand may override just one.
+#[derive(Clone, Copy, Default)]
+struct FontBounds<'a> {
+    size: Option<&'a str>,
+    height: Option<&'a str>,
+}
+
+impl<'a> FontBounds<'a> {
+    fn read(value: &'a str) -> Self {
+        let Some((size, height)) = font_words(value) else {
+            return Self {
+                size: Some("("),
+                height: Some("("),
+            };
+        };
+        // A system font, standard or prefixed, is at least 9 px.
+        let system = matches!(
+            value,
+            "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
+        ) || value.starts_with('-');
+        Self {
+            size: size.or_else(|| system.then_some("9px")),
+            height,
+        }
+    }
+}
+
+/// One inline declaration and its place in the cascade.
+#[derive(Clone, Copy)]
+struct Declaration<'a> {
+    name: &'a str,
+    property: StyleProperty,
+    value: &'a str,
+    priority: (bool, usize),
+    font: FontBounds<'a>,
+}
+
+impl<'a> Declaration<'a> {
+    fn read((order, piece): (usize, &'a str)) -> Option<Self> {
+        let (name, value) = piece.split_once(':')?;
+        let name = name.trim_ascii();
+        let property = StyleProperty::read(name);
+        let value = value.trim_ascii();
+        let important = value
+            .strip_suffix("important")
+            .and_then(|value| value.trim_ascii_end().strip_suffix('!'));
+        let value = important.map_or(value, str::trim_ascii_end);
+        (!value.is_empty()).then(|| Self {
+            name,
+            property,
+            value,
+            priority: (important.is_some(), order),
+            font: if property == StyleProperty::Font {
+                FontBounds::read(value)
+            } else {
+                FontBounds::default()
+            },
+        })
+    }
+
+    /// A definite declaration uses established syntax, not just the
+    /// permissive hiding predicates. The modern size, overflow-axis and
+    /// content-visibility spellings compete only with the same spelling:
+    /// clients that drop the property drop both declarations.
+    fn definite(self) -> bool {
+        let Self {
+            property,
+            value,
+            font,
+            ..
+        } = self;
+        match property {
+            StyleProperty::FontSize => standard_font_size(value) || value == "inherit",
+            StyleProperty::LineHeight => standard_line_height(value) || value == "inherit",
+            StyleProperty::Font => standard_font(value, font.size, font.height),
+            StyleProperty::FontAdjust => {
+                value == "none" || nonnegative(value).is_some_and(|(_, unit)| unit.is_empty())
+            }
+            StyleProperty::TextAdjust => {
+                matches!(value, "auto" | "none")
+                    || nonnegative(value).is_some_and(|(_, unit)| unit == "%")
+            }
+            // Unlike older longhands, `all` came with `initial` and `inherit`.
+            StyleProperty::All => matches!(value, "initial" | "inherit"),
+            StyleProperty::Display => {
+                DISPLAY_HIDES.contains(&value)
+                    || matches!(
+                        value,
+                        "block"
+                            | "inline"
+                            | "inline-block"
+                            | "table"
+                            | "inline-table"
+                            | "table-row"
+                            | "table-cell"
+                            | "table-row-group"
+                            | "table-header-group"
+                            | "table-footer-group"
+                            | "table-caption"
+                            | "list-item"
+                    )
+            }
+            StyleProperty::Visibility => matches!(value, "visible" | "hidden" | "collapse"),
+            StyleProperty::ContentVisibility => matches!(value, "visible" | "hidden" | "auto"),
+            StyleProperty::TableLayout => matches!(value, "auto" | "fixed"),
+            StyleProperty::Size => value == "auto" || standard_length(value),
+            StyleProperty::MaxSize => value == "none" || standard_length(value),
+            // Two shorthand values and `clip` may be dropped by some clients.
+            StyleProperty::OverflowShorthand | StyleProperty::Overflow => {
+                matches!(value, "visible" | "hidden" | "scroll" | "auto")
+            }
+            // The numeric and percentage forms predate standardization.
+            StyleProperty::Zoom => {
+                value == "normal"
+                    || nonnegative(value).is_some_and(|(_, unit)| matches!(unit, "" | "%"))
+            }
+            StyleProperty::Opacity => {
+                standard_number(value).is_some_and(|(_, unit)| unit.is_empty())
+            }
+            StyleProperty::Filter => standard_filter(value),
+            StyleProperty::Color => standard_color(value),
+            StyleProperty::Boxed | StyleProperty::OtherAdjust | StyleProperty::Other => false,
+        }
+    }
+}
+
+/// Only definite declarations can remove lower-ranked bounds. Each alias
+/// stays independent; the shorthand `overflow` is the two physical axes.
+fn cascade_declarations<'a>(
+    declarations: impl Iterator<Item = Declaration<'a>>,
+) -> Vec<Declaration<'a>> {
+    let mut winners = HashMap::<&str, Declaration<'a>>::new();
+    let mut retained = Vec::new();
+    let mut compete = |declaration: Declaration<'a>| {
+        let winner = winners.entry(declaration.name).or_insert(declaration);
+        if declaration.priority > winner.priority {
+            *winner = declaration;
+        }
+    };
+    for declaration in declarations {
+        if !declaration.definite() {
+            retained.push(declaration);
+        } else if declaration.property == StyleProperty::OverflowShorthand {
+            for name in OVERFLOW_AXES {
+                compete(Declaration {
+                    name,
+                    property: StyleProperty::Overflow,
+                    ..declaration
+                });
+            }
+        } else {
+            compete(declaration);
+        }
+    }
+    // Keep a separate longhand-only bound: some clients drop `font`.
+    let font = winners.get(FONT).copied();
+    retained.extend(font);
+    retained.retain_mut(|declaration| {
+        let outranked = |name| {
+            winners
+                .get(name)
+                .is_some_and(|winner| winner.priority > declaration.priority)
+        };
+        match declaration.property {
+            StyleProperty::OverflowShorthand => !OVERFLOW_AXES.into_iter().all(outranked),
+            StyleProperty::Font if outranked(FONT) => false,
+            StyleProperty::Font => {
+                if outranked(FONT_SIZE) {
+                    declaration.font.size = None;
+                }
+                if outranked(LINE_HEIGHT) {
+                    declaration.font.height = None;
+                }
+                true
+            }
+            _ => !outranked(declaration.name),
+        }
+    });
+    let _ = winners.remove(FONT);
+    retained.extend(winners.into_values());
+    retained
+}
+
+/// Finite CSS 2.1 number syntax (without scientific notation).
+fn standard_number(value: &str) -> Option<(f64, &str)> {
+    let (number, unit) = plain_number(value)?;
+    (number.is_finite() && !value[..value.len() - unit.len()].contains('e'))
+        .then_some((number, unit))
+}
+
+fn nonnegative(value: &str) -> Option<(f64, &str)> {
+    standard_number(value).filter(|(number, _)| !number.is_sign_negative())
+}
+
+/// Lengths and percentages in the established subset; unitless only at zero.
+fn standard_length(value: &str) -> bool {
+    nonnegative(value).is_some_and(|(number, unit)| match unit {
+        "" => number == 0.0,
+        "px" | "pt" | "pc" | "in" | "cm" | "mm" | "em" | "ex" | "%" => true,
+        _ => false,
+    })
+}
+
+fn standard_font_size(value: &str) -> bool {
+    standard_length(value)
+        || size_keyword(value).is_some()
+            && !matches!(
+                value,
+                "xxx-large" | "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+            )
+}
+
+fn standard_line_height(value: &str) -> bool {
+    standard_length(value)
+        || value == "normal"
+        || nonnegative(value).is_some_and(|(_, unit)| unit.is_empty())
+}
+
+/// Reads an inline style (entities already decoded). Only unambiguous
+/// declarations can clear earlier ones; a hiding value it can't read
+/// still counts as hiding. `clipped` says that the
 /// element clips by default, `font` that a tiny font size is in force
 /// above it, and `adjust` is the size adjustment in force above it.
 fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
@@ -1164,15 +1452,16 @@ fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
         .any(|name| style.contains(name));
         // `all` may set `inherit`; a longer name only holds the letters.
         let bytes = style.as_bytes();
-        let name_byte = |byte: Option<&u8>| {
-            byte.is_some_and(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') || !byte.is_ascii()
-            })
-        };
         let word = |name: &str| {
             style.match_indices(name).any(|(at, _)| {
-                !name_byte(at.checked_sub(1).and_then(|before| bytes.get(before)))
-                    && !name_byte(bytes.get(at + name.len()))
+                !at.checked_sub(1)
+                    .and_then(|before| bytes.get(before))
+                    .copied()
+                    .is_some_and(css_name_byte)
+                    && !bytes
+                        .get(at + name.len())
+                        .copied()
+                        .is_some_and(css_name_byte)
             })
         };
         if word("all") {
@@ -1191,26 +1480,29 @@ fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
     }
     // At least every boundary browsers see: a declaration they read is at
     // most cut short here, and a cut value isn't plain, so it hides.
-    let declarations: Vec<(&str, &str)> = style
+    let ambiguous = escaped || nests(&style);
+    let declarations = style
         .split([';', '{', '}'])
-        .filter_map(|piece| {
-            let (property, value) = piece.split_once(':')?;
-            let value = value.trim_ascii();
-            let value = value
-                .strip_suffix("important")
-                .and_then(|value| value.trim_ascii_end().strip_suffix('!'))
-                .unwrap_or(value)
-                .trim_ascii();
-            (!value.is_empty()).then_some((property.trim_ascii(), value))
-        })
-        .collect();
+        .enumerate()
+        .filter_map(Declaration::read);
+    let declarations = if ambiguous {
+        declarations.collect()
+    } else {
+        cascade_declarations(declarations)
+    };
     (read.opacity, read.color) = faintness(&declarations);
     let font_size = |value: &str| tiny_length(value, true, 100.0, false);
     // A size adjustment scales the parent's x-height and the like.
     let ex = adjust.min(0.5);
-    for &(property, value) in &declarations {
+    for &Declaration {
+        property,
+        value,
+        font: bounds,
+        ..
+    } in &declarations
+    {
         match property {
-            "font-size" => {
+            StyleProperty::FontSize => {
                 read.tiny_font |= font_size(value);
                 // Where browsers may drop the value, the size without it stays.
                 if sure_size(value) {
@@ -1219,32 +1511,19 @@ fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
                     read.cap.read(value, ex);
                 }
             }
-            "font" => {
-                let words = font_words(value);
-                read.tiny_font |= words.is_none_or(|(size, _)| size.is_some_and(font_size));
-                // The size only caps the element's own size, which browsers
-                // keep when they drop the shorthand (`look`). A system font,
-                // standard or prefixed such as `-webkit-mini-control`, is at
-                // least 9 px, and an unreadable `(` counts as 0.
-                let system = matches!(
-                    value,
-                    "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
-                ) || value.starts_with('-');
-                let size = match words {
-                    Some((None, _)) if system => Some("9px"),
-                    None => Some("("),
-                    Some((size, _)) => size,
-                };
-                if let Some(size) = size {
+            StyleProperty::Font => {
+                if let Some(size) = bounds.size {
+                    read.tiny_font |= font_size(size);
+                    // A client that drops the shorthand keeps its own size.
                     read.cap.read(size, ex);
                 }
             }
-            _ if property.ends_with("size-adjust") => {
+            StyleProperty::FontAdjust | StyleProperty::TextAdjust | StyleProperty::OtherAdjust => {
                 read.adjust = read.adjust.min(text_scale(value));
             }
             // `all` can set `initial`, `unset` or `revert`: at least the lowest of
             // medium, half the parent's size and the element's own size.
-            "all" => {
+            StyleProperty::All => {
                 read.cap.read("medium", ex);
                 read.cap.read("50%", ex);
             }
@@ -1253,7 +1532,7 @@ fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
     }
     // Browsers may read such a style otherwise, or drop its sizes, which
     // keeps the element's own size: they only cap it.
-    if escaped || nests(&style) {
+    if ambiguous {
         read.cap = read.cap.lower(std::mem::take(&mut read.size));
     }
     let zero = font || read.tiny_font;
@@ -1262,37 +1541,43 @@ fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
         zero && plain_number(value).is_some_and(|(number, unit)| unit == "%" && number >= 0.0)
             || tiny_length(value, false, 100.0, zero)
     };
-    for &(property, value) in &declarations {
+    for &Declaration {
+        property,
+        value,
+        font: bounds,
+        ..
+    } in &declarations
+    {
         let keyword = plain_keyword(value);
         let words = || value.split_ascii_whitespace();
         match property {
-            "display" => {
-                read.hides |= !keyword || words().any(|word| word == "none");
+            StyleProperty::Display => {
+                read.hides |= !keyword || words().any(|word| DISPLAY_HIDES.contains(&word));
                 read.boxed = true;
                 read.layout |= !keyword
                     || ["flex", "grid", "box"]
                         .iter()
                         .any(|name| value.contains(name));
             }
-            "visibility" => {
+            StyleProperty::Visibility => {
                 read.hides |= !keyword || words().any(|word| matches!(word, "hidden" | "collapse"));
             }
-            "content-visibility" => {
+            StyleProperty::ContentVisibility => {
                 read.hides |= !keyword || value == "hidden";
                 read.clips |= value != "visible";
             }
-            "float" | "position" => read.boxed = true,
-            "table-layout" => read.layout |= value != "auto",
-            "width" | "height" | "inline-size" | "block-size" => read.tiny |= size(value),
-            "max-width" | "max-height" | "max-inline-size" | "max-block-size" => {
+            StyleProperty::Boxed => read.boxed = true,
+            StyleProperty::TableLayout => read.layout |= value != "auto",
+            StyleProperty::Size => read.tiny |= size(value),
+            StyleProperty::MaxSize => {
                 let tiny = size(value);
                 read.tiny |= tiny;
                 read.tiny_max |= tiny;
             }
-            "overflow" | "overflow-x" | "overflow-y" | "overflow-block" | "overflow-inline" => {
+            StyleProperty::OverflowShorthand | StyleProperty::Overflow => {
                 read.clips |= !words().all(|word| word == "visible");
             }
-            "zoom" => {
+            StyleProperty::Zoom => {
                 // Above 1 it could undo a parent's zoom on an entry that
                 // browsers have closed.
                 let zoom = match plain_number(value) {
@@ -1303,10 +1588,9 @@ fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
                 };
                 read.zoom = read.zoom.min(zoom.clamp(0.0, 1.0));
             }
-            "line-height" => read.tiny_line |= line(value),
-            "font" => {
-                read.tiny_line |=
-                    font_words(value).is_none_or(|(_, height)| height.is_some_and(line));
+            StyleProperty::LineHeight => read.tiny_line |= line(value),
+            StyleProperty::Font => {
+                read.tiny_line |= bounds.height.is_some_and(line);
             }
             _ => {}
         }
@@ -1314,48 +1598,73 @@ fn read_style(style: &str, clipped: bool, font: bool, adjust: f64) -> Style {
     read
 }
 
-/// Whether browsers may read this style's declarations otherwise than
-/// `read_style` splits them: it has a `{` or `}`, or a `;` inside
-/// brackets or a string, which browsers keep in the value. A `(` ends
-/// only at its `)` and a `[` only at its `]`. A string ends at its
-/// quote or at a line break (`css_unescape` made every line break a
-/// `\n`), and an unclosed one runs to the end.
+/// A byte that may be part of a CSS name after preprocessing.
+const fn css_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'\0') || !byte.is_ascii()
+}
+
+/// Whether the style may have a different declaration split in a browser:
+/// a brace, CDO or CDC token, unmatched delimiter, bad string, semicolon
+/// in a string or block, or a URL that might tokenize as a bad URL.
 fn nests(style: &str) -> bool {
-    if style.contains(['{', '}']) {
+    if style.contains(['{', '}']) || style.contains("<!--") || style.contains("-->") {
         return true;
     }
     let mut closers = Vec::new();
     let mut quote = None;
-    for character in style.chars() {
+    for (at, character) in style.char_indices() {
         match (quote, character) {
-            (Some(open), _) if character == open || character == '\n' => quote = None,
+            (Some(_), '\n') => return true,
+            (Some(open), _) if character == open => quote = None,
             (_, ';') if quote.is_some() || !closers.is_empty() => return true,
             (None, '"' | '\'') => quote = Some(character),
-            (None, '(') => closers.push(')'),
-            (None, '[') => closers.push(']'),
-            (None, ')' | ']') if closers.last() == Some(&character) => {
-                closers.pop();
+            (None, '(') => {
+                if style[..at].ends_with("url") && !plain_url(&style[at + 1..]) {
+                    return true;
+                }
+                closers.push(')');
             }
+            (None, '[') => closers.push(']'),
+            (None, ')' | ']') if closers.pop() != Some(character) => return true,
             _ => {}
         }
     }
-    false
+    quote.is_some() || !closers.is_empty()
+}
+
+/// Quoted URLs follow normal function and string rules. An unquoted URL
+/// with a bad token ends at the first `)`, regardless of quotes inside it.
+fn plain_url(after_open: &str) -> bool {
+    let tail = after_open.trim_ascii_start();
+    tail.starts_with(['"', '\''])
+        || tail.split_once(')').is_some_and(|(url, _)| {
+            !url.trim_ascii_end().chars().any(|ch| {
+                ch.is_ascii_whitespace()
+                    || ch.is_ascii_control()
+                    || matches!(ch, '"' | '\'' | '(' | '[' | ']' | ';')
+            })
+        })
 }
 
 /// The opacity (`opacity` times `filter`) and the text colour alpha that
-/// declarations give, each the lowest over its declarations, 0-1. `all`
+/// retained declarations give, each the lowest for its property, 0-1. `all`
 /// with any value but a reset counts as opacity 0.
-fn faintness(declarations: &[(&str, &str)]) -> (f64, f64) {
+fn faintness(declarations: &[Declaration<'_>]) -> (f64, f64) {
     let (mut opacity, mut filter, mut color) = (1.0_f64, 1.0_f64, 1.0_f64);
-    for &(property, value) in declarations {
+    for &Declaration {
+        property, value, ..
+    } in declarations
+    {
         match property {
-            "opacity" => opacity = opacity.min(alpha(value).unwrap_or(0.0)),
-            "filter" | "-webkit-filter" => filter = filter.min(filter_opacity(value)),
+            StyleProperty::Opacity => opacity = opacity.min(alpha(value).unwrap_or(0.0)),
+            StyleProperty::Filter => filter = filter.min(filter_opacity(value)),
             // Every other value can take the parent's opacity again.
-            "all" if !matches!(value, "initial" | "unset" | "revert" | "revert-layer") => {
+            StyleProperty::All
+                if !matches!(value, "initial" | "unset" | "revert" | "revert-layer") =>
+            {
                 opacity = 0.0;
             }
-            "color" | "-webkit-text-fill-color" => color = color.min(color_alpha(value)),
+            StyleProperty::Color => color = color.min(color_alpha(value)),
             _ => {}
         }
     }
@@ -1371,9 +1680,8 @@ fn alpha(value: &str) -> Option<f64> {
     }
 }
 
-/// Function names a filter may hold without counting as 0: filters and
-/// the colours in their arguments.
-const FILTER_NAMES: [&str; 19] = [
+/// Function names a filter may hold without counting as 0.
+const FILTER_NAMES: [&str; 10] = [
     "opacity",
     "blur",
     "brightness",
@@ -1384,15 +1692,11 @@ const FILTER_NAMES: [&str; 19] = [
     "invert",
     "saturate",
     "sepia",
-    "rgb",
-    "rgba",
-    "hsl",
-    "hsla",
-    "hwb",
-    "lab",
-    "lch",
-    "oklab",
-    "oklch",
+];
+
+/// Color functions recognized by the conservative filter and color bounds.
+const COLOR_FUNCTIONS: [&str; 9] = [
+    "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch",
 ];
 
 /// The opacity a `filter` value gives: 1 for `none`, the product of its
@@ -1408,10 +1712,11 @@ fn filter_opacity(value: &str) -> f64 {
     let mut product = 1.0;
     for (index, _) in value.match_indices('(') {
         let before = &value[..index];
-        let name = &before[before
-            .rfind(|character: char| !character.is_ascii_alphabetic() && character != '-')
-            .map_or(0, |at| at + 1)..];
-        if !FILTER_NAMES.contains(&name) {
+        let name = before
+            .rsplit(|character: char| !character.is_ascii_alphabetic() && character != '-')
+            .next()
+            .unwrap_or_default();
+        if !FILTER_NAMES.contains(&name) && !COLOR_FUNCTIONS.contains(&name) {
             return 0.0;
         }
         if name == "opacity" {
@@ -1427,6 +1732,108 @@ fn filter_opacity(value: &str) -> f64 {
     product
 }
 
+/// A filter list made up of established functions with simple arguments.
+/// Other filters still contribute their old conservative opacity bound.
+fn standard_filter(mut value: &str) -> bool {
+    if value == "none" {
+        return true;
+    }
+    while !value.is_empty() {
+        let Some((name, rest)) = value.split_once('(') else {
+            return false;
+        };
+        let Some((argument, tail)) = rest.split_once(')') else {
+            return false;
+        };
+        let argument = argument.trim_ascii();
+        let valid = match name {
+            "blur" => !argument.ends_with('%') && standard_length(argument),
+            "hue-rotate" => standard_number(argument).is_some_and(|(number, unit)| {
+                matches!(unit, "deg" | "grad" | "rad") || unit.is_empty() && number == 0.0
+            }),
+            _ if name != "drop-shadow" && FILTER_NAMES.contains(&name) => {
+                nonnegative(argument).is_some_and(|(_, unit)| matches!(unit, "" | "%"))
+            }
+            _ => false,
+        };
+        if !valid {
+            return false;
+        }
+        value = tail.trim_ascii_start();
+    }
+    true
+}
+
+/// The named colours through CSS Color 3, excluding platform-specific names.
+#[rustfmt::skip]
+const NAMED_COLORS: [&str; 147] = [
+    "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black",
+    "blanchedalmond", "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse",
+    "chocolate", "coral", "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue",
+    "darkcyan", "darkgoldenrod", "darkgray", "darkgreen", "darkgrey", "darkkhaki", "darkmagenta",
+    "darkolivegreen", "darkorange", "darkorchid", "darkred", "darksalmon", "darkseagreen",
+    "darkslateblue", "darkslategray", "darkslategrey", "darkturquoise", "darkviolet", "deeppink",
+    "deepskyblue", "dimgray", "dimgrey", "dodgerblue", "firebrick", "floralwhite", "forestgreen",
+    "fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod", "gray", "green", "greenyellow",
+    "grey", "honeydew", "hotpink", "indianred", "indigo", "ivory", "khaki", "lavender",
+    "lavenderblush", "lawngreen", "lemonchiffon", "lightblue", "lightcoral", "lightcyan",
+    "lightgoldenrodyellow", "lightgray", "lightgreen", "lightgrey", "lightpink", "lightsalmon",
+    "lightseagreen", "lightskyblue", "lightslategray", "lightslategrey", "lightsteelblue",
+    "lightyellow", "lime", "limegreen", "linen", "magenta", "maroon", "mediumaquamarine",
+    "mediumblue", "mediumorchid", "mediumpurple", "mediumseagreen", "mediumslateblue",
+    "mediumspringgreen", "mediumturquoise", "mediumvioletred", "midnightblue", "mintcream",
+    "mistyrose", "moccasin", "navajowhite", "navy", "oldlace", "olive", "olivedrab", "orange",
+    "orangered", "orchid", "palegoldenrod", "palegreen", "paleturquoise", "palevioletred",
+    "papayawhip", "peachpuff", "peru", "pink", "plum", "powderblue", "purple", "red",
+    "rosybrown", "royalblue", "saddlebrown", "salmon", "sandybrown", "seagreen", "seashell",
+    "sienna", "silver", "skyblue", "slateblue", "slategray", "slategrey", "snow", "springgreen",
+    "steelblue", "tan", "teal", "thistle", "tomato", "turquoise", "violet", "wheat", "white",
+    "whitesmoke", "yellow", "yellowgreen",
+];
+
+fn color_hex(value: &str) -> Option<&str> {
+    value
+        .strip_prefix('#')
+        .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// Only CSS Color 3 forms can clear an earlier colour. Newer forms can
+/// still lower alpha through `color_alpha`, but may be dropped by a client.
+fn standard_color(value: &str) -> bool {
+    if let Some(hex) = color_hex(value) {
+        return matches!(hex.len(), 3 | 6);
+    }
+    let Some((name, arguments)) = value.split_once('(') else {
+        return matches!(value, "transparent" | "currentcolor" | "inherit")
+            || NAMED_COLORS.binary_search(&value).is_ok();
+    };
+    let Some(arguments) = arguments.strip_suffix(')') else {
+        return false;
+    };
+    let mut channels = arguments.split(',').map(str::trim_ascii);
+    let [Some(first), Some(second), Some(third)] = std::array::from_fn(|_| channels.next()) else {
+        return false;
+    };
+    let number = |value, unit| standard_number(value).is_some_and(|(_, suffix)| suffix == unit);
+    let valid = match name {
+        "rgb" | "rgba" => {
+            let rgb = [first, second, third];
+            rgb.iter().all(|&value| number(value, "%"))
+                || rgb
+                    .iter()
+                    .all(|&value| number(value, "") && !value.contains('.'))
+        }
+        "hsl" | "hsla" => number(first, "") && number(second, "%") && number(third, "%"),
+        _ => return false,
+    };
+    valid
+        && match (name, channels.next()) {
+            ("rgba" | "hsla", Some(alpha)) => number(alpha, "") && channels.next().is_none(),
+            ("rgb" | "hsl", None) => true,
+            _ => false,
+        }
+}
+
 /// The alpha a `color` value gives, 0-1: 1 for identifiers (named and
 /// system colours, `currentcolor` and the like), whose look the parent's or
 /// an opaque colour gives, and 0 for any function but the plain colour
@@ -1435,9 +1842,7 @@ fn color_alpha(value: &str) -> f64 {
     if value == "transparent" {
         return 0.0;
     }
-    if let Some(hex) = value.strip_prefix('#')
-        && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    if let Some(hex) = color_hex(value) {
         let last = |digits: usize| {
             f64::from(u8::from_str_radix(&hex[hex.len() - digits..], 16).unwrap_or(0))
         };
@@ -1450,13 +1855,9 @@ fn color_alpha(value: &str) -> f64 {
     let Some((name, arguments)) = value.split_once('(') else {
         return 1.0;
     };
-    let colour_function = [
-        "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch",
-    ]
-    .contains(&name);
     let Some(arguments) = arguments
         .strip_suffix(')')
-        .filter(|arguments| colour_function && !arguments.contains('('))
+        .filter(|arguments| COLOR_FUNCTIONS.contains(&name) && !arguments.contains('('))
         .filter(|arguments| {
             arguments.bytes().all(|byte| {
                 byte.is_ascii_digit() || byte.is_ascii_whitespace() || b".%+-e,/".contains(&byte)
@@ -1519,6 +1920,97 @@ fn font_words(value: &str) -> Option<(Option<&str>, Option<&str>)> {
     })
 }
 
+/// The CSS 2.1 size/family form of `font`; reject newer optional prefixes
+/// and incomplete shorthands. Read the same size and height as the bounds.
+fn standard_font(mut value: &str, size: Option<&str>, height: Option<&str>) -> bool {
+    let Some(size) = size.filter(|size| standard_font_size(size)) else {
+        return false;
+    };
+    let word = |text: &str| {
+        text.find(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+            .unwrap_or(text.len())
+    };
+    let mut slots = 0;
+    for _ in 0..=3 {
+        let (token, rest) = value.split_at(word(value));
+        value = rest.trim_ascii_start();
+        if token == size {
+            if let Some(height) = height {
+                let Some(rest) = value.strip_prefix('/') else {
+                    return false;
+                };
+                let rest = rest.trim_ascii_start();
+                let (token, tail) = rest.split_at(word(rest));
+                if token != height || !standard_line_height(height) {
+                    return false;
+                }
+                value = tail.trim_ascii_start();
+            }
+            return font_families(value);
+        }
+        let slot = match token {
+            "normal" => continue,
+            "italic" | "oblique" => 1,
+            "small-caps" => 2,
+            "bold" | "bolder" | "lighter" | "100" | "200" | "300" | "400" | "500" | "600"
+            | "700" | "800" | "900" => 4,
+            _ => return false,
+        };
+        if slots & slot != 0 {
+            return false;
+        }
+        slots |= slot;
+    }
+    false
+}
+
+/// A nonempty comma-separated list of quoted names, CSS 2.1 generics
+/// or known unquoted family names.
+fn font_families(mut value: &str) -> bool {
+    loop {
+        value = value.trim_ascii_start();
+        if let Some(quote @ ('"' | '\'')) = value.chars().next() {
+            let Some((name, tail)) = value[1..].split_once(quote) else {
+                return false;
+            };
+            if name.is_empty() || name.contains('\n') {
+                return false;
+            }
+            value = tail.trim_ascii_start();
+        } else {
+            let end = value.find(',').unwrap_or(value.len());
+            let words = value[..end].split_ascii_whitespace();
+            if BARE_FONT_FAMILIES
+                .binary_search_by(|family| family.split(' ').cmp(words.clone()))
+                .is_err()
+            {
+                return false;
+            }
+            value = &value[end..];
+        }
+        if value.is_empty() {
+            return true;
+        }
+        let Some(rest) = value.strip_prefix(',') else {
+            return false;
+        };
+        value = rest;
+    }
+}
+
+/// Known bare names and CSS 2.1 generics, sorted by word. Other family
+/// names must be quoted to displace a bound: CSS can reserve new bare words.
+#[rustfmt::skip]
+const BARE_FONT_FAMILIES: [&str; 45] = [
+    "arial", "arial black", "arial narrow", "bookman", "calibri", "cambria", "candara",
+    "comic sans ms", "consolas", "courier", "courier new", "cursive", "fantasy", "garamond",
+    "geneva", "georgia", "gill sans", "helvetica", "helvetica neue", "impact", "inter", "lato",
+    "lucida", "lucida console", "lucida grande", "lucida sans", "lucida sans unicode", "menlo",
+    "monaco", "monospace", "noto sans", "open sans", "optima", "palatino", "palatino linotype",
+    "roboto", "sans-serif", "segoe ui", "serif", "tahoma", "times", "times new roman",
+    "trebuchet ms", "ubuntu", "verdana",
+];
+
 /// The factor that a `font-size-adjust` or `text-size-adjust` value
 /// gives the font size, 0-1: a number or percentage, clamped; 1 for a
 /// keyword such as `none`, `auto` or `from-font`; else 0. Real fonts'
@@ -1545,12 +2037,30 @@ fn plain_keyword(value: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte.is_ascii_whitespace())
 }
 
-/// Whether `text` holds `&`, ASCII letters, then `;`: a named reference
-/// that the entity decoder didn't know, but a browser might.
+/// A reference the HTML decoder left intact. Browsers may consume its
+/// semicolon, decode a numeric prefix, or decode a legacy name into CSS
+/// punctuation or whitespace. None can be trusted as a token boundary.
 fn leftover_reference(text: &str) -> bool {
     text.split('&').skip(1).any(|after| {
-        let letters = after.bytes().take_while(u8::is_ascii_alphabetic).count();
-        letters > 0 && after.as_bytes().get(letters) == Some(&b';')
+        let (numeric, reference) = after
+            .strip_prefix('#')
+            .map_or((false, after), |number| (true, number));
+        let bytes = reference.as_bytes();
+        let end = bytes
+            .iter()
+            .take_while(|byte| byte.is_ascii_alphanumeric())
+            .count();
+        let next = bytes.get(end);
+        if numeric {
+            matches!(bytes, [b'0'..=b'9', ..])
+                || matches!(bytes, [b'x', hex, ..] if hex.is_ascii_hexdigit())
+                || end > 0 && next == Some(&b';')
+        } else {
+            bytes.first().is_some_and(u8::is_ascii_alphabetic)
+                && (next == Some(&b';')
+                    || next != Some(&b'=')
+                        && matches!(&reference[..end], "quot" | "amp" | "lt" | "gt" | "nbsp"))
+        }
     })
 }
 
@@ -3551,6 +4061,10 @@ const fn c1_reference(number: u32) -> u32 {
 }
 
 fn decode_entities(text: &str) -> String {
+    decode_entities_with_nbsp(text, ' ')
+}
+
+fn decode_entities_with_nbsp(text: &str, nbsp: char) -> String {
     if !text.contains('&') {
         return text.to_owned();
     }
@@ -3567,7 +4081,7 @@ fn decode_entities(text: &str) -> String {
                 "gt" => '>',
                 "quot" => '"',
                 "apos" => '\'',
-                "nbsp" => ' ',
+                "nbsp" => nbsp,
                 "colon" => ':',
                 "semi" => ';',
                 "sol" => '/',
@@ -4637,6 +5151,276 @@ mod tests {
         );
     }
 
+    fn assert_inline_cascade(styles: &[&str], expected: &str) {
+        for style in styles {
+            let html = format!(r#"<span style="{style}">Label</span>"#);
+            assert_eq!(md(&html), expected, "{style}");
+            assert_eq!(
+                html_to_readable_text(&html, &[], None, 200).body,
+                expected,
+                "{style}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_style_cascade() {
+        let table = "<table><tr><td style='font-size:1px;font-size:14px'>Cell</td></tr></table>";
+        assert!(md(table).contains("Cell"));
+        assert_eq!(html_to_readable_text(table, &[], None, 200).body, "Cell");
+
+        assert_inline_cascade(
+            &[
+                "font-size:1px;font-size:14px",
+                "font-size:14px !important;font-size:1px",
+                "font-size:1px!important;font-size:14px ! IMPORTANT",
+                "font-size:0;font-size:14px",
+                "font-size:calc(10px + 2px);font-size:14px",
+                "font-size:14px !important;font-size:calc(0px)",
+                "font-size:1px;line-height:150%;overflow:hidden;font-size:14px",
+                "font:1px Arial;font:bold 14px/1.2 Arial, sans-serif",
+                "font:1px Arial;font-size:14px",
+                "font:var(--f);font:14px Arial",
+                "font:14px Arial!important;font:var(--f)",
+                "font:var(--f);font-size:14px;line-height:normal;overflow:hidden",
+                "font-size:14px !important;font:1px Arial",
+                "font:14px/0 Arial;line-height:2;overflow:hidden",
+                "font:14px/0 Arial;font:14px Arial;overflow:hidden",
+                "display:none;display:block",
+                "display:table-column;display:block",
+                "display:table-column-group;display:block",
+                "visibility:hidden;visibility:visible",
+                "content-visibility:hidden;content-visibility:visible",
+                "height:0;overflow:hidden;overflow:visible",
+                "height:0;overflow:var(--o);overflow:visible",
+                "height:0;overflow:var(--o);overflow-x:visible;overflow-y:visible",
+                "height:0;overflow:hidden;overflow-x:visible;overflow-y:visible",
+                "height:0;overflow-block:hidden;overflow-block:visible",
+                "height:0;overflow-inline:hidden;overflow-inline:visible",
+                "line-height:0;overflow:hidden;line-height:normal",
+                "zoom:0;zoom:normal",
+                "font-size-adjust:0;font-size-adjust:none",
+                "text-size-adjust:0%;text-size-adjust:100%",
+                "-webkit-text-size-adjust:0%;-webkit-text-size-adjust:100%",
+                "opacity:0;opacity:1",
+                "filter:opacity(0);filter:none",
+                "-webkit-filter:opacity(0);-webkit-filter:opacity(1)",
+                "color:transparent;color:#000",
+                "color:transparent;color:steelblue",
+                "color:transparent;color:rgba(0,0,0,1)",
+                "-webkit-text-fill-color:transparent;-webkit-text-fill-color:red",
+                "all:inherit;all:initial",
+            ],
+            "Label",
+        );
+        assert_inline_cascade(
+            &[
+                "font-size:14px;font-size:1px",
+                "font-size:1px !important;font-size:14px",
+                "font-size:14px!important;font-size:1px !important",
+                "font-size:14px;font-size:1px!important",
+            ],
+            "",
+        );
+        for property in [
+            "width",
+            "height",
+            "inline-size",
+            "block-size",
+            "max-width",
+            "max-height",
+            "max-inline-size",
+            "max-block-size",
+        ] {
+            for (first, last, expected) in [(0, 200, "Label"), (200, 0, "")] {
+                let html = format!(
+                    "<span style='overflow:hidden;{property}:{first}px;{property}:{last}px'>Label</span>"
+                );
+                assert_eq!(md(&html), expected, "{html}");
+                assert_eq!(
+                    html_to_readable_text(&html, &[], None, 200).body,
+                    expected,
+                    "{html}"
+                );
+            }
+        }
+        for (layouts, expected) in [
+            ("fixed;table-layout:auto", "Cell"),
+            ("auto;table-layout:fixed", ""),
+        ] {
+            let html = format!(
+                "<table style='width:100%;table-layout:{layouts}'><tr>\
+                <td style='width:1px;overflow:hidden'>Cell</td></tr></table>"
+            );
+            assert_eq!(md(&html).contains("Cell"), !expected.is_empty(), "{html}");
+            assert_eq!(
+                html_to_readable_text(&html, &[], None, 200).body,
+                expected,
+                "{html}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_style_cascade_preserves_uncertain_and_independent_bounds() {
+        assert_inline_cascade(
+            &[
+                "font-size:0;font-size:14",
+                "font-size:1px;font-size:revert",
+                "font-size:1px;font-size:unset",
+                "font-size:1px;font-size:initial",
+                "font-size:1px;font-size:2rem",
+                "font-size:1px;font-size:1.4e1px",
+                "font-size:14px;font-size:calc(0px)",
+                "font-size:calc(0px) !important;font-size:14px",
+                "font-size:1px;font-size:not-a-size",
+                "font-size:1px;font-size:14px!important !important",
+                "font-size:1px;font-size:14px!important extra",
+                "font-size:1px;font-size:14px!bogus",
+                "font-size:1px;font-size:var(--s)",
+                "font-size:1px;font-size:calc(14px)",
+                "font-size:1px;/* note */font-size:14px",
+                r"font-size:1px;font-size:1\34px",
+                "font-size:14px;line-height:150%;overflow:hidden;font-size:1px",
+                "font-size:1px;font:14px Arial;line-height:150%;overflow:hidden",
+                "font-size:1px;font:14px Arial;width:10em;overflow:hidden",
+                "font:1px Arial;font:20px",
+                "font:var(--f)!important;font:14px Arial",
+                "font:var(--f);font-size:14px;overflow:hidden",
+                "font:var(--f);line-height:normal",
+                "font-size:calc(1px);font:14px Arial",
+                "font-size-adjust:0;font:14px Arial",
+                "font:1px Arial;font:oblique 10deg 20px Arial",
+                "font:1px Arial !important;font:14px Arial",
+                "display:none;display:bogus",
+                "display:none;display:flow-root",
+                "display:none;display:grid",
+                "display:none;display:flex",
+                "display:table-column",
+                "display:table-column-group",
+                "display:none;display:table-column",
+                "display:none;display:inline flow",
+                "height:0;overflow:hidden;overflow:visible visible",
+                "height:0;overflow:hidden visible",
+                "width:0;overflow:hidden;overflow-x:visible",
+                "height:0;overflow:var(--o);overflow-x:visible",
+                "height:0;overflow:var(--o)!important;overflow:visible",
+                "height:0;overflow:hidden!important;overflow-x:visible;overflow-y:visible",
+                "opacity:0;opacity:var(--o)",
+                "opacity:0;opacity:100%",
+                "opacity:0;opacity:initial",
+                "filter:opacity(0);filter:blur(bogus)",
+                "color:transparent;color:rgba(0,0,0,0,1)",
+                "color:transparent;color:rgba(0,0,0 / 1)",
+                "color:transparent;color:rgb(0 0 none / 1)",
+                "color:transparent;color:hwb(0 0% 0%)",
+                "color:transparent;color:#000f",
+                "color:transparent;color:#000000ff",
+                "-webkit-text-fill-color:transparent;color:red",
+            ],
+            "",
+        );
+        let nested = "<span style='display:none'><span style='display:none;display:inline'>Label</span></span>";
+        assert_eq!(md(nested), "");
+        assert_eq!(html_to_readable_text(nested, &[], None, 200).body, "");
+    }
+
+    #[test]
+    fn inline_style_cascade_requires_real_declaration_boundaries() {
+        for uncertain in [
+            "URL(x')')",
+            "url(x&quot;)&quot;)",
+            "<!--url(x')')",
+            "<!--url(x y)",
+            "-->",
+            "foo-url(x')')",
+            "'x\n",
+            "&quot ",
+            "&QUOT ",
+            "&quot:",
+            "&quot-",
+            "&lt!--url(x')')",
+            "&#x110000 ",
+            "&#99999999 ",
+            "&#xd800 ",
+        ] {
+            for (hides, clears) in [
+                ("display:none", "display:block"),
+                ("font-size:1px", "font-size:14px"),
+                ("opacity:0", "opacity:1"),
+                ("color:transparent", "color:red"),
+            ] {
+                assert_inline_cascade(&[&format!("{hides};a:{uncertain};{clears}")], "");
+            }
+            let html = format!(
+                r#"<img style="width:1px;a:{uncertain};width:200px" alt="Patch" src="https://example.test/p">"#
+            );
+            assert_eq!(md(&html), "");
+            let html = format!(
+                r#"<div style="font-size:1px"><span style="a:{uncertain};font-size:14px">Label</span></div>"#
+            );
+            assert_eq!(md(&html), "");
+            assert_eq!(html_to_readable_text(&html, &[], None, 200).body, "");
+        }
+        for entity in ["&sup2;", "&frac12;", "&#99999999;", "&#x110000;"] {
+            assert_inline_cascade(&[&format!("display:none;a:{entity}display:block")], "");
+        }
+        assert_inline_cascade(
+            &[
+                "display:none;display:block&nbsp;",
+                "display:none;a:];display:block",
+                "display:none;a:(x];display:block",
+            ],
+            "",
+        );
+        assert_inline_cascade(
+            &[
+                "display:none;a:url(https://example.test/?a=1&b=2);display:block",
+                "display:none;a:url(&quot;https://example.test/?a=1&b=2&quot;);display:block",
+                "display:none;a:url(https://example.test/?a=1&quot=2);display:block",
+                "display:none;a:url(https://example.test/?a=1&quote=2);display:block",
+            ],
+            "Label",
+        );
+    }
+
+    #[test]
+    fn font_cascade_requires_quoted_or_known_family_names() {
+        assert!(
+            BARE_FONT_FAMILIES
+                .windows(2)
+                .all(|pair| pair[0].split(' ').cmp(pair[1].split(' ')).is_lt())
+        );
+        for family in [
+            "serif foo",
+            "sans-serif foo",
+            "monospace foo",
+            "cursive foo",
+            "fantasy foo",
+            "Arial, serif foo",
+            "system-ui foo",
+            "math foo",
+            "-webkit-body foo",
+            "-webkit-pictograph foo",
+            "revert-rule",
+            "unknown-family",
+            "unknown family",
+            "&quot;a&quot b&quot;",
+        ] {
+            assert_inline_cascade(&[&format!("font:1px Arial;font:14px {family}")], "");
+        }
+        assert_inline_cascade(
+            &[
+                "font:1px Arial;font:14px &quot;serif foo&quot;, serif",
+                "font:1px Arial;font:14px &quot;revert-rule&quot;",
+                "font:1px Arial;font:14px 'revert-rule'",
+                "font:1px Arial;font:14px Helvetica  Neue",
+                "font:1px Arial;font:14px Times\tNew Roman, serif",
+            ],
+            "Label",
+        );
+    }
+
     #[test]
     fn hiding_looks_add_up_down_the_tree() {
         for html in [
@@ -4900,6 +5684,14 @@ mod tests {
 
     #[test]
     fn faint_text_is_dropped() {
+        assert_inline_cascade(
+            &[
+                "filter:\u{a0}opacity(0)",
+                "filter:blur(1px)💠opacity(0)",
+                "filter:opacité(.5)",
+            ],
+            "",
+        );
         for value in [
             "0",
             "0.0",
@@ -4955,9 +5747,6 @@ mod tests {
             "-webkit-text-fill-color:transparent",
             "-webkit-text-fill-color:transparent;color:#000",
             "color:#000;-webkit-text-fill-color:transparent",
-            "color:transparent;color:#000",
-            "opacity:0;opacity:1",
-            "filter:opacity(0);filter:none",
             "opacity:/**/0",
             "filter:/**/url(#f)",
             "-webkit-filter:opacity(0)",
@@ -5498,6 +6287,7 @@ mod tests {
 
     #[test]
     fn reads_css_numbers_and_escapes() {
+        assert!(NAMED_COLORS.is_sorted());
         assert_eq!(css_number("1e-3px"), Some((0.001, "px")));
         assert_eq!(css_number("-.5em"), Some((-0.5, "em")));
         assert_eq!(css_number("2.%"), Some((2.0, ".%")));
@@ -5601,8 +6391,9 @@ mod tests {
         assert_fast("style escapes", || assert_eq!(md(&escapes), "x"));
         let commented = format!("<span style=\"{}/*\">x</span>", "a".repeat(1_000_000));
         assert_fast("a long commented style", || assert_eq!(md(&commented), "x"));
-        let declarations = format!("<span style=\"{}\">x</span>", "a:b;".repeat(100_000));
-        assert_fast("many declarations", || assert_eq!(md(&declarations), "x"));
+        let declarations = "a:b;font-size:1px;".repeat(100_000);
+        let html = format!("<span style='{declarations}font-size:14px'>Label</span>");
+        assert_fast("many declarations", || assert_eq!(md(&html), "Label"));
         let zooms = format!(
             "{}x",
             "<span style=\"zoom:.99;line-height:0\">".repeat(160_000)
@@ -6697,6 +7488,20 @@ mod tests {
 
     #[test]
     fn tracking_pixels_are_dropped() {
+        for (style, expected) in [
+            (
+                "width:1px;width:200px",
+                "![Patch](https://example.test/image.png)",
+            ),
+            ("width:1px;height:1px;width:200px", ""),
+        ] {
+            assert_eq!(
+                md(&format!(
+                    "<img style='{style}' src='https://example.test/image.png' alt='Patch'>"
+                )),
+                expected
+            );
+        }
         for attributes in [
             "width=\"1\" height=\"1\"",
             "width=\"0\"",
