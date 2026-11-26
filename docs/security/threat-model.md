@@ -190,10 +190,11 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
   after a name, is refused unless `to` names the recipients, and a reply
   to all is refused when the message's To or Cc does not.
 - HTML: pages are askama templates with auto-escaping and a strict CSP
-  (no inline script or style). Mail HTML is converted to Markdown text
-  for tool results, never rendered; its text is escaped so that it cannot
-  form Markdown links, images or HTML. Links keep only http, https and
-  mailto URLs, and images only http and https URLs or the message's own
+  (no inline script or style). Mail HTML is converted to Markdown or
+  readable text for tool results, never rendered. In Markdown, mail text is
+  escaped so it cannot form Markdown links, images or HTML. Markdown links
+  keep only http, https and mailto URLs, and images only http and https URLs
+  or the message's own
   inline images (attachment:N); javascript:, data: and every other scheme
   keep only their text. Images of 1 pixel, or hidden by their style, are
   left out. Text, links and images inside an element with the `hidden` or
@@ -254,8 +255,9 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
   like the body. A part that can't be decoded is left out; nothing joins
   a body that is empty on purpose; nothing joins after an HTML part that
   may not end where it seems to, such as one that leaves an element open
-  at its end; and nothing joins when any HTML part's html or body style
-  dims, shrinks or clips text, since such a style reaches every part.
+  at its end. A stop before the main part leaves it alone, as does a cut
+  before the main part in Markdown only. Nothing joins when any HTML part's
+  html or body style dims, shrinks or clips text, since such a style reaches every part.
   Style sheets, which the converter doesn't read, can reach every part as
   they reach a single part. `body_format: html` returns the HTML part
   alone.
@@ -276,11 +278,11 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
   an opacity() filter, or a text color whose alpha is below 0.1 is left
   out too; opacities multiply down the tree, and the faintest color of an
   element and its parents counts. `all` other than a reset counts as
-  opacity 0. Text in a font smaller than 2 px is left out too, but the
-  images and links around it are kept; font sizes in em, % and the other
-  relative units multiply down the tree, and so does zoom; font-size-adjust
-  and text-size-adjust count at their lowest value in force, and a `font`
-  shorthand can only make the size smaller.
+  opacity 0. Text in a font smaller than 2 px is left out too, but Markdown
+  keeps the allowed images and links around it. Font sizes in em, % and the
+  other relative units multiply down the tree, and so does zoom;
+  font-size-adjust and text-size-adjust count at their lowest value in force,
+  and a `font` shorthand can only make the size smaller.
   A larger size set inside a smaller one counts only on elements that
   browsers still hold open, as far as the converter can follow them.
   Past the depth at which a browser stops nesting plainly nested elements
@@ -303,8 +305,11 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
   With `body_format: html`, get_message returns the HTML part as sent
   instead, unescaped and unfiltered: it can hold tracking URLs, scripts,
   hidden text and instructions aimed at the agent. It is off by default,
-  and Markdown is the format to use with an LLM; the server still fetches
-  nothing.
+  and the server still fetches nothing. `body_format: text` keeps visible
+  link labels, not destinations, images or alt text. Display a `text` result
+  as literal, untrusted text, not Markdown or HTML. A visible URL or markup
+  example remains text; interpreting it as markup could create links or
+  load images in your client.
 - Invisible characters: characters that mail apps draw as nothing are
   left out of get_message's body (Markdown or plain text), subject,
   addresses, Message-ID and attachment details, of the text that
@@ -499,12 +504,12 @@ distroless, runs as a non-root user, and holds only the binary.
   draft's Bcc recipients, as mail apps do, and an agent reading untrusted
   mail could be steered to add one. Check a draft's recipients, Bcc
   included, before you send it.
-- **Remote images and links reach the agent.** get_message shows a
-  message's remote image and link URLs. A client that renders the
-  Markdown, or an agent that fetches an image, can tell the sender that
-  the message was read; the server leaves out only obvious tracking
-  pixels. With `body_format: html` the agent gets every URL in the HTML,
-  tracking pixels included.
+- **Remote images and links can reach the agent.** Markdown keeps allowed
+  remote image and link references. A client that renders the Markdown,
+  or an agent that fetches an image, can tell the sender that the message
+  was read. `body_format: text` omits these references, but keeps URLs
+  written in visible text. With `body_format: html` the agent gets every
+  URL in the HTML, tracking pixels included.
 - **Attachments reach the agent.** download_attachment hands an
   attachment's text, image or bytes to the agent, which may act on
   instructions written in it, as in a message body. Nothing is scanned

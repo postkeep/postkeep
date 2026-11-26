@@ -24,13 +24,13 @@ const UNREADABLE: &str =
 
 pub fn build(raw: Vec<u8>, message: &mut OutgoingMessage) -> Result<Forwarded, String> {
     let original = mime::parse_for_forward(&raw).ok_or(UNREADABLE)?;
-    let (body, truncated, _, _, complete) = shown_body(
+    let shown = shown_body(
         &original,
         RequestedBodyFormat::Markdown,
         &HashMap::new(),
         usize::MAX,
     );
-    if truncated || !complete {
+    if shown.truncated || !shown.complete {
         return Err(UNREADABLE.to_owned());
     }
     let headers = original.headers;
@@ -66,7 +66,7 @@ pub fn build(raw: Vec<u8>, message: &mut OutgoingMessage) -> Result<Forwarded, S
         block.push_str(&cc);
     }
     let note = std::mem::take(&mut message.text_body);
-    message.text_body = format!("{note}\n\n{block}\n\n{body}");
+    message.text_body = format!("{note}\n\n{block}\n\n{}", shown.body);
     if original.body_parts.is_empty()
         && let Some(html) = original.html_body
     {

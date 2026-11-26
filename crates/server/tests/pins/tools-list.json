@@ -564,7 +564,7 @@
       {
         "name": "get_message",
         "title": "Get message",
-        "description": "Read a message by id: headers, body and attachment list. The body is the HTML part as Markdown (links as [text](url); images as ![alt](url), or ![alt](attachment:N) for the message's own images), with the other parts a mail app shows beside it, or the plain-text parts when there is no HTML part; body_format says which. Pass body_format \"html\" for the HTML part as sent instead; it can hold tracking URLs, scripts and hidden text, so Markdown is recommended. Nothing in the body is fetched; loading a remote image can tell the sender the message was read. Does not mark it as read. download_attachment fetches an attachment by its id.",
+        "description": "Read a message by id: headers, body and attachment list. The default is Markdown with safe link and image references, or plain text when the message has no HTML part. For a newsletter, pass body_format \"text\" for paragraphs and link labels without destinations, images or alt text. Image-only HTML then gives an empty body; use Markdown for image references. Pass body_format \"html\" for the HTML part as sent, which may contain tracking URLs, scripts and hidden text. Nothing in the body is fetched; loading a remote image can tell the sender the message was read. Does not mark it as read. download_attachment fetches an attachment by its id.",
         "inputSchema": {
           "$defs": {
             "RequestedBodyFormat": {
@@ -572,12 +572,17 @@
               "oneOf": [
                 {
                   "const": "markdown",
-                  "description": "The HTML part and the other parts a mail app shows with it, as Markdown with their text\nescaped and only safe links and images (default; the format to use with an LLM).",
+                  "description": "Markdown from the HTML part and the parts shown with it, with mail text escaped and safe\nlink and image references retained (default).",
                   "type": "string"
                 },
                 {
                   "const": "html",
                   "description": "The HTML part as sent: not escaped, sanitized or fetched. It can hold tracking URLs,\nscripts and hidden text.",
+                  "type": "string"
+                },
+                {
+                  "const": "text",
+                  "description": "Readable text: keeps visible link labels and paragraphs, not destinations, images or\ntheir alt text. A visible URL stays text. Image-only HTML gives an empty body; use\n`markdown` for image references.",
                   "type": "string"
                 }
               ]
@@ -595,7 +600,7 @@
                   "type": "null"
                 }
               ],
-              "description": "`markdown` (default, recommended for LLMs), or `html`: the HTML part as sent, which can hold\ntracking URLs, scripts and hidden text and is often much longer. Without an HTML part, both\ngive the plain-text parts a mail app shows. Any other value, `text` included, is refused."
+              "description": "Use `text` to read a newsletter without link destinations or images, `markdown` (default)\nfor links and image references, or `html` for the HTML part as sent; it can contain tracking\nURLs, scripts and hidden text. Without HTML, all three return the shown plain-text parts."
             },
             "folder": {
               "default": null,
@@ -615,7 +620,7 @@
             },
             "max_chars": {
               "default": null,
-              "description": "Maximum body length in characters (default 20000, maximum 200000).",
+              "description": "Maximum body length in Unicode scalar values after formatting (default 20000, clamped to\n100–200000).",
               "format": "uint",
               "minimum": 0,
               "type": [
@@ -687,7 +692,7 @@
               "oneOf": [
                 {
                   "const": "text",
-                  "description": "The plain-text parts a mail app shows, as sent, for a message without an HTML part.",
+                  "description": "Plain text: readable text from HTML when `text` was requested, or the shown plain-text\nparts when there was no HTML. Display as literal text, not markup.",
                   "type": "string"
                 },
                 {
@@ -713,7 +718,7 @@
               "type": "array"
             },
             "body": {
-              "description": "The body: Markdown converted from the HTML part and the other parts a mail app shows with it, one\nafter another, or the HTML part as sent when `html` was asked for; the plain-text parts only when\nthere is no HTML part (see `body_format`). Empty when the part a mail app shows has no text that\ncould be read safely (see `body_note`).",
+              "description": "Body in the returned `body_format`. Empty when the selected part gives no readable text in\nthat format (see `body_note`).",
               "type": "string"
             },
             "body_format": {
@@ -789,6 +794,15 @@
               },
               "type": "array"
             },
+            "remaining_chars": {
+              "description": "Unicode scalar values omitted by that cut, not counting unreadable or withheld parts.\nPresent with `total_chars`.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "reply_to": {
               "description": "Reply-To addresses.",
               "items": {
@@ -809,6 +823,15 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "total_chars": {
+              "description": "Unicode scalar values in the available readable body before the cut. Present only when\n`text` was requested and the body was cut.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "uid": {
               "description": "IMAP UID within the folder (IMAP accounts only). Prefer `id`.",

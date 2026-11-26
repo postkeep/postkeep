@@ -155,24 +155,33 @@ earlier than 1970-01-02.
 | `id` | The message id from `search_messages`. |
 | `folder` | Deprecated: folder of the message, with `uid` (IMAP accounts only). Use `id` instead. |
 | `uid` | Deprecated: IMAP UID of the message, with `folder`. Use `id` instead. |
-| `max_chars` | Maximum body length in characters (default 20000, maximum 200000). |
-| `body_format` | `markdown` (default, recommended for LLMs), or `html`: the HTML part as sent, which can hold tracking URLs, scripts and hidden text and is often much longer. Without an HTML part, both give the plain-text parts a mail app shows. Any other value, `text` included, is refused. |
+| `max_chars` | Maximum body length in Unicode scalar values after formatting (default 20000, clamped to 100–200000). |
+| `body_format` | Use `text` to read a newsletter without link destinations or images, `markdown` (default) for links and image references, or `html` for the HTML part as sent; it can contain tracking URLs, scripts and hidden text. Without HTML, all three return the shown plain-text parts. |
 
-With an HTML part, the body is that part as Markdown together with the
-other text and HTML parts a mail app shows with it, such as a second HTML
-part or text after an inline image, in the order they come. Each part is
-converted on its own, leaving out text a mail app would hide, and a blank
-line sets them apart. A part that can't be decoded is left out, and nothing
-joins after an HTML part that may not end where it seems to, such as one
-that leaves an element open at its end. The body is the HTML part alone
-when such a part, or the `max_chars` limit, comes before it, and when any
-HTML part's html or body style dims, shrinks or clips text, since such a
-style reaches every part. When the part a mail app shows has no text that
-could be read safely, the body is empty and `body_note` says why, whatever
-the other parts hold. Without an HTML part, the body is the plain-text
-parts a mail app shows, set apart the same way. With an HTML part,
-`body_format: html` returns that part alone, as sent, and `body_note` says
-why when it is empty, such as when the part can't be decoded.
+With HTML, `markdown` and `text` join the part a mail app shows with the
+other text and HTML parts shown beside it, in order. Each part is converted
+on its own and a blank line sets nonempty parts apart. A part that cannot
+be decoded is left out; nothing joins after HTML that may not end where it
+seems to, such as a part that leaves an element open. If such a stop comes
+before the main HTML part, or any part's html or body style dims, shrinks or
+clips text, only the main part is used. When the length limit comes before
+the main part, Markdown also falls back to that part alone; text keeps the
+prefix in the original part order. Neither format substitutes a plain-text
+alternative or a sibling when the main HTML part gives no readable text.
+
+A URL written in visible text remains in `text` output, even if it is a
+link label; the link's destination is left out. Display `text` as literal
+text, not markup. Image-only HTML gives an empty `body` with `body_note`;
+request `markdown` if you need allowed image references. `html` returns the
+HTML part alone as sent, with `body_note` if it is empty. Without HTML, all
+three requests return the shown plain-text parts.
+
+`body_truncated` says whether the body was cut at the length limit. Only an
+explicit `text` request with an actual cut adds `total_chars` (the scalar
+length of the available readable body before the cut) and `remaining_chars`
+(the scalars omitted by that cut). The cut keeps the exact scalar prefix,
+even in a gap between parts. The counts do not measure the original message
+or include unreadable or withheld parts. An exact fit has no count fields.
 
 The result's `message_id`, `in_reply_to` and `references` hold Message-IDs
 without angle brackets. A reply names the message it answers in
