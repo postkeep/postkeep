@@ -83,6 +83,9 @@ The app needs remote MCP with OAuth sign-in.
 The [Agent apps](docs/clients.md) page has the steps for Claude,
 ChatGPT, Grok, Cursor and VS Code.
 
+For setup in AI editors, see the [agent install guide](llms-install.md) and
+[client configuration examples](docs/clients.md#other-apps).
+
 When you add the address, the app opens postkeep's sign-in page. Sign in with
 an app password, or with Microsoft or Google once you have set up
 [their sign-in](docs/configuration.md#microsoft-and-google-sign-in). Then ask
