@@ -30,20 +30,69 @@ pub fn html_to_markdown(
     images: &HashMap<&str, u32>,
     max_chars: usize,
 ) -> (String, bool) {
-    let (markdown, cut, _) = convert(html, images, max_chars);
-    (markdown, cut)
+    convert(html, RenderMode::Markdown(images), max_chars)
+        .0
+        .into_body()
 }
 
-/// [`html_to_markdown`], and also whether the HTML ends open: `root` refused it, or the scan stopped
-/// before the end, or its end leaves an element, a region, a comment or raw text open
+#[derive(Clone, Copy)]
+enum RenderMode<'images> {
+    Markdown(&'images HashMap<&'images str, u32>),
+    Text,
+}
+
+impl RenderMode<'_> {
+    const fn is_text(self) -> bool {
+        matches!(self, Self::Text)
+    }
+}
+
+/// The retained prefix and its budget status. Only text counts beyond the budget.
+#[derive(Default)]
+pub struct RenderedBody {
+    /// Body to return to the caller.
+    pub body: String,
+    /// Scalars counted before cutting; exact for readable text.
+    pub count: usize,
+    /// Whether the output exceeded the budget.
+    pub cut: bool,
+}
+
+impl RenderedBody {
+    fn into_body(self) -> (String, bool) {
+        (self.body, self.cut)
+    }
+}
+
+/// Renders the selected HTML part as readable text, including safely joinable siblings.
+pub fn html_to_readable_text(
+    html: &str,
+    parts: &[BodyPart],
+    body: Option<usize>,
+    max_chars: usize,
+) -> RenderedBody {
+    let primary = convert(html, RenderMode::Text, max_chars);
+    if primary.0.count > 0
+        && parts.len() > 1
+        && let Some(body) = body
+        && let Some((joined, _)) =
+            join_parts(parts, body, RenderMode::Text, max_chars, Some(&primary))
+    {
+        return joined;
+    }
+    primary.0
+}
+
+/// Renders Markdown or readable text, and reports whether the HTML ends open: `root` refused it,
+/// the scan stopped early, or an element, region, comment or raw text was left open
 /// ([`Stack::closed`]). HTML that a mail client renders after it may then read differently.
-fn convert(html: &str, images: &HashMap<&str, u32>, max_chars: usize) -> (String, bool, bool) {
+fn convert(html: &str, mode: RenderMode<'_>, max_chars: usize) -> (RenderedBody, bool) {
     let Some(mut stack) = root(html) else {
-        return (String::new(), false, true);
+        return (RenderedBody::default(), true);
     };
     // Whether the scan reached the end of the HTML.
     let mut ended = false;
-    let mut writer = Writer::new(max_chars);
+    let mut writer = Writer::new(mode, max_chars);
     let mut rest = html;
     // Whether browsers may still be in the head, where a noscript holds
     // nothing they draw (see `start_tag`). End tags and text never end it
@@ -133,7 +182,7 @@ fn convert(html: &str, images: &HashMap<&str, u32>, max_chars: usize) -> (String
                 }
             }
             _ => {
-                if start_tag(&mut writer, &mut stack, &name, attributes, images, head).is_break() {
+                if start_tag(&mut writer, &mut stack, &name, attributes, head).is_break() {
                     break;
                 }
                 if name == "noscript" {
@@ -142,8 +191,10 @@ fn convert(html: &str, images: &HashMap<&str, u32>, max_chars: usize) -> (String
             }
         }
     }
-    let (markdown, cut) = writer.finish();
-    (markdown, cut, !ended || region.is_some() || !stack.closed())
+    (
+        writer.finish(),
+        !ended || region.is_some() || !stack.closed(),
+    )
 }
 
 /// Writes plain text as Markdown: escaped as mail text is in `html_to_markdown`, with invisible
@@ -230,6 +281,17 @@ pub fn parts_to_markdown_with_completion(
     images: &HashMap<&str, u32>,
     max_chars: usize,
 ) -> Option<((String, bool), bool)> {
+    join_parts(parts, body, RenderMode::Markdown(images), max_chars, None)
+        .map(|(rendered, complete)| (rendered.into_body(), complete))
+}
+
+fn join_parts(
+    parts: &[BodyPart],
+    body: usize,
+    mode: RenderMode<'_>,
+    max_chars: usize,
+    primary: Option<&(RenderedBody, bool)>,
+) -> Option<(RenderedBody, bool)> {
     let reduced = |part: &BodyPart| match part {
         BodyPart::Html(html) => root(html).is_none_or(|stack| stack.reduces()),
         BodyPart::Text(_) => false,
@@ -237,31 +299,66 @@ pub fn parts_to_markdown_with_completion(
     if parts.iter().any(reduced) {
         return None;
     }
-    let mut out = String::new();
-    // Characters written so far, counted per part so the cost stays linear.
-    let mut count = 0;
+    let mut joined = RenderedBody::default();
     for (index, part) in parts.iter().enumerate() {
-        let gap = if count == 0 { 0 } else { 2 };
-        let budget = max_chars.saturating_sub(count + gap);
-        let (markdown, cut, open) = match part {
-            BodyPart::Html(html) => convert(html, images, budget),
-            BodyPart::Text(text) => {
-                let (markdown, cut) = text_to_markdown(text, budget);
-                (markdown, cut, false)
-            }
+        let gap = if joined.count == 0 { 0 } else { 2 };
+        let room = max_chars.saturating_sub(joined.count);
+        let budget = room.saturating_sub(gap);
+        let converted;
+        let (rendered, open) = if index == body
+            && let Some(primary) = primary
+        {
+            primary
+        } else {
+            converted = match (part, mode) {
+                (BodyPart::Html(html), _) => convert(html, mode, budget),
+                (BodyPart::Text(text), RenderMode::Text) => (
+                    truncate_readable_text(shown_plain_part(text), budget),
+                    false,
+                ),
+                (BodyPart::Text(text), RenderMode::Markdown(_)) => {
+                    let (body, cut) = text_to_markdown(text, budget);
+                    (
+                        RenderedBody {
+                            body,
+                            cut,
+                            ..RenderedBody::default()
+                        },
+                        false,
+                    )
+                }
+            };
+            &converted
         };
-        if !markdown.trim().is_empty() {
-            if gap > 0 {
-                out.push_str("\n\n");
-            }
-            out.push_str(&markdown);
-            count += gap + markdown.chars().count();
+        let (written, kept_gap) = if mode.is_text() {
+            (rendered.count, gap.min(room))
+        } else if rendered.body.trim().is_empty() {
+            (0, 0)
+        } else {
+            (rendered.body.chars().count(), gap)
+        };
+        if written > 0 {
+            joined.body.push_str(&"\n\n"[..kept_gap]);
+            let kept = if index == body && primary.is_some() {
+                char_boundary(&rendered.body, budget).unwrap_or(rendered.body.len())
+            } else {
+                rendered.body.len()
+            };
+            joined.body.push_str(&rendered.body[..kept]);
+            joined.count += gap + written;
         }
-        if cut || open {
-            return (index >= body).then_some(((out, cut), !cut && index + 1 == parts.len()));
+        joined.cut = if mode.is_text() {
+            joined.count > max_chars
+        } else {
+            rendered.cut
+        };
+        if *open || (!mode.is_text() && joined.cut) {
+            let complete = !joined.cut && index + 1 == parts.len();
+            return (index >= body).then_some((joined, complete));
         }
     }
-    Some(((out, false), true))
+    let complete = !joined.cut;
+    Some((joined, complete))
 }
 
 #[cfg(test)]
@@ -282,13 +379,18 @@ pub fn parts_to_text(parts: &[BodyPart]) -> String {
     parts
         .iter()
         .filter_map(|part| match part {
-            BodyPart::Text(text) => Some(invisible::visible(text)),
+            BodyPart::Text(text) => Some(shown_plain_part(text)),
             BodyPart::Html(_) => None,
         })
-        .map(|text| text.trim_end().to_owned())
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn shown_plain_part(text: &str) -> String {
+    let mut body = invisible::visible(text);
+    body.truncate(body.trim_end().len());
+    body
 }
 
 /// Splits a tag, given its text after `<` or `</`, into its lowercase name,
@@ -341,7 +443,6 @@ fn start_tag(
     stack: &mut Stack,
     name: &str,
     attributes: &str,
-    images: &HashMap<&str, u32>,
     head: bool,
 ) -> ControlFlow<()> {
     let mut own = look(name, attributes, stack.top().font, stack.top().adjust);
@@ -366,7 +467,6 @@ fn start_tag(
             "img" if !entry.hides && entry.opacity >= 0.1 => {
                 writer.image(
                     attributes,
-                    images,
                     stack.top().font,
                     !entry.hidden() && !entry.tiny(size),
                 );
@@ -2802,7 +2902,7 @@ fn flanking(before: Option<char>, after: char) -> (bool, bool) {
     (opens, closes)
 }
 
-/// Markdown output. Breaks, spaces, markers and cell separators stay
+/// Markdown or readable text output. Breaks, spaces, markers and cell separators stay
 /// pending until a visible character follows, so the output never starts
 /// or ends with whitespace and output cut early is a prefix of the whole.
 /// Emphasis markers wait the same way: they open right before a visible
@@ -2810,13 +2910,15 @@ fn flanking(before: Option<char>, after: char) -> (bool, bool) {
 /// at a break or a cell separator. None opens or closes in link text, and a
 /// run whose opener or closer Markdown wouldn't read as one is written plain
 /// (see [`flanking`]).
-struct Writer {
+struct Writer<'images> {
+    mode: RenderMode<'images>,
     out: String,
     count: usize,
     max: usize,
     /// Newlines asked for since the last text (0-2).
     newlines: usize,
     whitespace: String,
+    whitespace_count: usize,
     marker: Marker,
     separator: bool,
     line_has_text: bool,
@@ -2840,16 +2942,20 @@ struct Writer {
     /// The emphasis open where each open table started, innermost last, at
     /// most [`MAX_OPEN`].
     tables: VecDeque<(usize, usize, Vec<Emphasis>)>,
+    /// Each open table's logical count at the last row boundary, for readable text only.
+    text_rows: VecDeque<usize>,
 }
 
-impl Writer {
-    const fn new(max: usize) -> Self {
+impl<'images> Writer<'images> {
+    const fn new(mode: RenderMode<'images>, max: usize) -> Self {
         Self {
+            mode,
             out: String::new(),
             count: 0,
             max,
             newlines: 0,
             whitespace: String::new(),
+            whitespace_count: 0,
             marker: Marker::None,
             separator: false,
             line_has_text: false,
@@ -2863,12 +2969,13 @@ impl Writer {
             wanted: Vec::new(),
             written: Vec::new(),
             tables: VecDeque::new(),
+            text_rows: VecDeque::new(),
         }
     }
 
     /// Opens a link when `href` passes [`markdown_url`] and no link is open.
     fn open_link(&mut self, attributes: &str) {
-        if self.link.is_none() {
+        if !self.mode.is_text() && self.link.is_none() {
             self.link = attribute(attributes, "href")
                 .and_then(|href| markdown_url(&href, true))
                 .map(|url| (url, false));
@@ -2886,7 +2993,10 @@ impl Writer {
     /// Writes an `<img>` (D9 order): pixels nothing, a known `cid:` source
     /// the attachment, an http or https source the URL, else the alt text
     /// where `text` says text is shown.
-    fn image(&mut self, attributes: &str, images: &HashMap<&str, u32>, font: bool, text: bool) {
+    fn image(&mut self, attributes: &str, font: bool, text: bool) {
+        let RenderMode::Markdown(images) = self.mode else {
+            return;
+        };
         if is_pixel(attributes, font) {
             return;
         }
@@ -2918,10 +3028,35 @@ impl Writer {
     }
 
     fn tag(&mut self, name: &str, closing: bool) {
-        self.table_part(name, closing);
+        if !self.mode.is_text() {
+            self.table_part(name, closing);
+        }
         match name {
             "a" if closing => self.close_link(),
             "br" => self.line_break(),
+            "table" if self.mode.is_text() => {
+                if closing {
+                    self.text_rows.pop_back();
+                } else {
+                    if self.text_rows.len() == MAX_OPEN {
+                        self.text_rows.pop_front();
+                    }
+                    self.text_rows.push_back(self.count);
+                }
+                self.block(1);
+            }
+            "tr" if self.mode.is_text() => {
+                if let Some(start) = self.text_rows.back_mut() {
+                    if self.count > *start {
+                        // A nonempty row ends at a line break, even after a block or empty cell.
+                        self.newlines = 1;
+                        self.separator = false;
+                    }
+                    *start = self.count;
+                }
+                // An empty row must not consume the space pending from an outer cell boundary.
+                self.block(1);
+            }
             "div" | "tr" | "table" | "ul" | "ol" => self.block(1),
             "li" if closing => {
                 if self.marker == Marker::Item && self.link.is_none() {
@@ -2944,11 +3079,13 @@ impl Writer {
             }
             "blockquote" => {
                 self.block(2);
-                self.quote = if closing {
-                    self.quote.saturating_sub(1)
-                } else {
-                    self.quote.saturating_add(1)
-                };
+                if !self.mode.is_text() {
+                    self.quote = if closing {
+                        self.quote.saturating_sub(1)
+                    } else {
+                        self.quote.saturating_add(1)
+                    };
+                }
             }
             "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                 if closing && matches!(self.marker, Marker::Heading(_)) && self.link.is_none() {
@@ -2963,13 +3100,24 @@ impl Writer {
                 self.block(2);
                 self.set_marker(Marker::Rule);
             }
+            "td" | "th" if !closing && self.mode.is_text() => {
+                if self
+                    .text_rows
+                    .back()
+                    .is_some_and(|&start| self.count > start)
+                {
+                    self.newlines = 0;
+                    self.separator = true;
+                    self.clear_whitespace();
+                }
+            }
             "td" | "th" if !closing && self.link.is_some() => self.space(),
             "td" | "th" if !closing && self.line_has_text && self.newlines == 0 => {
                 self.separator = true;
-                self.whitespace.clear();
+                self.clear_whitespace();
             }
-            "b" | "strong" => self.emphasize(Emphasis::Bold, closing),
-            "i" | "em" => self.emphasize(Emphasis::Italic, closing),
+            "b" | "strong" if !self.mode.is_text() => self.emphasize(Emphasis::Bold, closing),
+            "i" | "em" if !self.mode.is_text() => self.emphasize(Emphasis::Italic, closing),
             _ => {}
         }
     }
@@ -3095,9 +3243,12 @@ impl Writer {
             self.space();
             return;
         }
-        self.newlines = self.newlines.max(newlines);
-        self.whitespace.clear();
-        self.separator = false;
+        self.clear_whitespace();
+        // The gap between nonempty cells takes precedence over breaks around cell content.
+        if !self.mode.is_text() || !self.separator {
+            self.newlines = self.newlines.max(newlines);
+            self.separator = false;
+        }
     }
 
     /// One more newline, at most two.
@@ -3106,18 +3257,30 @@ impl Writer {
     }
 
     fn space(&mut self) {
-        if self.whitespace.is_empty() {
-            self.whitespace.push(' ');
+        if self.whitespace_count == 0 {
+            self.defer_whitespace(' ');
         }
     }
 
-    /// Markers are not written inside a link.
+    fn defer_whitespace(&mut self, character: char) {
+        if !self.mode.is_text() || self.whitespace_count < self.max.saturating_sub(self.count) {
+            self.whitespace.push(character);
+        }
+        self.whitespace_count += 1;
+    }
+
+    fn clear_whitespace(&mut self) {
+        self.whitespace.clear();
+        self.whitespace_count = 0;
+    }
+
+    /// Only Markdown writes markers, and never inside a link.
     fn set_marker(&mut self, marker: Marker) {
-        if self.link.is_some() {
+        if self.mode.is_text() || self.link.is_some() {
             return;
         }
         self.marker = marker;
-        self.whitespace.clear();
+        self.clear_whitespace();
     }
 
     fn text(&mut self, text: &str) {
@@ -3138,7 +3301,7 @@ impl Writer {
                 }
             } else if character.is_whitespace() {
                 if self.pre > 0 {
-                    self.whitespace.push(character);
+                    self.defer_whitespace(character);
                 } else {
                     self.space();
                 }
@@ -3150,7 +3313,7 @@ impl Writer {
     }
 
     fn push_escaped(&mut self, character: char) {
-        if matches!(character, '\\' | '[' | ']' | '<') {
+        if !self.mode.is_text() && matches!(character, '\\' | '[' | ']' | '<') {
             self.push('\\');
         }
         self.push(character);
@@ -3172,7 +3335,7 @@ impl Writer {
         if self.full() {
             return;
         }
-        let at_start = self.out.is_empty();
+        let at_start = self.count == 0;
         let last = self.out.chars().next_back();
         // Link text keeps the emphasis written before its `[`.
         let in_link_text = matches!(self.link, Some((_, true)));
@@ -3185,7 +3348,7 @@ impl Writer {
         let closed = self.out.len();
         let mut marked = false;
         loop {
-            if !self.out.is_empty() && self.newlines > 0 {
+            if self.count > 0 && self.newlines > 0 {
                 self.push('\n');
                 if self.newlines == 2 {
                     for index in 0..self.line_quote.min(self.quote).min(MAX_QUOTE) {
@@ -3226,15 +3389,19 @@ impl Writer {
             break;
         }
         let whitespace = std::mem::take(&mut self.whitespace);
+        let whitespace_count = std::mem::take(&mut self.whitespace_count);
         let keep_whitespace = if self.pre > 0 {
             !at_start
         } else {
             self.line_has_text
         };
         if std::mem::take(&mut self.separator) {
-            self.push_str(" | ");
+            self.push_str(if self.mode.is_text() { " " } else { " | " });
         } else if !marked && keep_whitespace {
             self.push_str(&whitespace);
+            if self.mode.is_text() {
+                self.count += whitespace_count - whitespace.chars().count();
+            }
         }
         // `!` right before the `[` would make the link an image, also where
         // an opener between them is taken back out later.
@@ -3265,24 +3432,30 @@ impl Writer {
         }
     }
 
-    /// Closes an open link and the emphasis, and returns the output, cut at `max`, and whether it
-    /// was cut.
-    fn finish(mut self) -> (String, bool) {
+    /// Closes Markdown decorations and returns the output and its budget status.
+    fn finish(mut self) -> RenderedBody {
         self.close_link();
         self.close_emphasis(0, true);
-        if self.full() {
-            let (cut, _) = truncate_chars(self.out, self.max);
-            (cut.trim_end().to_owned(), true)
+        let cut = self.count > self.max;
+        let body = if cut && !self.mode.is_text() {
+            let (mut prefix, _) = truncate_chars(self.out, self.max);
+            prefix.truncate(prefix.trim_end().len());
+            prefix
         } else {
-            (self.out, false)
+            self.out
+        };
+        RenderedBody {
+            body,
+            count: self.count,
+            cut,
         }
     }
 
-    /// Whether the output went past `max`; nothing more is written then. Not
-    /// while a run that opened before `max` is open: its opener may still be
-    /// taken out, which moves later text before `max`.
+    /// Whether Markdown has gone past `max` and can stop. Not while a run that opened before
+    /// `max` is open: its opener may still be taken out, which moves later text before `max`.
     fn full(&self) -> bool {
-        self.count > self.max
+        !self.mode.is_text()
+            && self.count > self.max
             && self
                 .written
                 .iter()
@@ -3291,7 +3464,9 @@ impl Writer {
 
     fn push(&mut self, character: char) {
         if !self.full() {
-            self.out.push(character);
+            if !self.mode.is_text() || self.count < self.max {
+                self.out.push(character);
+            }
             self.count += 1;
         }
     }
@@ -3427,10 +3602,34 @@ fn decode_entities(text: &str) -> String {
 /// Cuts `text` to at most `max_chars` characters. Returns whether it was cut.
 #[must_use]
 pub fn truncate_chars(text: String, max_chars: usize) -> (String, bool) {
-    match text.char_indices().nth(max_chars) {
-        Some((index, _)) => (text[..index].to_owned(), true),
+    match char_boundary(&text, max_chars) {
+        Some(index) => (text[..index].to_owned(), true),
         None => (text, false),
     }
+}
+
+/// Cuts an already materialized readable body, counting the suffix only on a cut.
+pub fn truncate_readable_text(body: String, max_chars: usize) -> RenderedBody {
+    let mut chars = body.chars();
+    let count = chars.by_ref().take(max_chars).count();
+    let suffix = chars.as_str();
+    if suffix.is_empty() {
+        RenderedBody {
+            body,
+            count,
+            cut: false,
+        }
+    } else {
+        RenderedBody {
+            body: body[..body.len() - suffix.len()].to_owned(),
+            count: count + chars.count(),
+            cut: true,
+        }
+    }
+}
+
+fn char_boundary(text: &str, max_chars: usize) -> Option<usize> {
+    text.char_indices().nth(max_chars).map(|(index, _)| index)
 }
 
 #[cfg(test)]
@@ -6627,6 +6826,72 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn readable_text_keeps_structure_and_visible_labels() {
+        let readable = |html| html_to_readable_text(html, &[], None, usize::MAX).body;
+        assert_eq!(
+            readable(
+                "<h2>Headline</h2><blockquote><p>Quote<br>line</p></blockquote>\
+                      <ol><li>First</li><li>Second</li></ol><hr><p>End</p><hr>"
+            ),
+            "Headline\n\nQuote\nline\n\nFirst\nSecond\n\nEnd"
+        );
+        assert_eq!(
+            readable(
+                "<table><tr><td><div>A</div></td><td><p></p></td><td><p>B</p></td></tr><tr><td>C</td></tr></table><hr><p>D</p>"
+            ),
+            "A B\nC\n\nD"
+        );
+        assert_eq!(
+            readable(
+                r#"<a href="https://example.net/go"><p><b>https://example.net/visible</b></p><p>[x]\ &lt;i&gt;</p></a><div hidden>hidden</div><script>source()</script><img src="cid:chart@x" alt="chart"><img alt="bare"><img src="https://example.net/p" width="1" height="1">"#
+            ),
+            "https://example.net/visible\n\n[x]\\ <i>"
+        );
+        assert_eq!(
+            readable("<pre>é  x\r\n  🦀\u{200B}\u{202E}y  </pre>"),
+            "é  x\n  🦀\\u{202e}y"
+        );
+    }
+
+    #[test]
+    fn readable_nested_tables_keep_outer_cells_and_inner_rows() {
+        for (html, expected) in [
+            (
+                "<table><tr><td><table><tr><td>Tea</td></tr></table></td><td>$5</td></tr>\
+                 <tr><td>Cake</td><td><table><tr><td>$9</td></tr></table></td></tr></table>",
+                "Tea $5\nCake $9",
+            ),
+            (
+                "<table><tr><td><table><tr><td>A</td></tr><tr><td>B</td></tr></table></td><td>C</td></tr>\
+                 <tr><td>D</td><td><table><tr><td>E</td></tr><tr><td>F</td></tr></table></td></tr></table>",
+                "A\nB C\nD E\nF",
+            ),
+        ] {
+            assert_eq!(
+                html_to_readable_text(html, &[], None, usize::MAX).body,
+                expected
+            );
+            for cap in 0..=expected.len() {
+                let result = html_to_readable_text(html, &[], None, cap);
+                assert_eq!(result.body, &expected[..cap]);
+                assert_eq!(result.count, expected.len());
+                assert_eq!(result.cut, cap < expected.len());
+            }
+        }
+    }
+
+    #[test]
+    fn readable_pre_whitespace_is_counted_only_if_committed() {
+        for (tail, count) in [("</pre>", 1), ("🦀</pre>", 10_002)] {
+            let html = format!("<pre>é{}{tail}", " ".repeat(10_000));
+            let result = html_to_readable_text(&html, &[], None, 4);
+            assert_eq!(result.body, if count == 1 { "é" } else { "é   " });
+            assert_eq!(result.count, count);
+            assert_eq!(result.cut, count > 4);
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -6646,6 +6911,15 @@ mod tests {
             } else {
                 prop_assert_eq!(&out, &full);
             }
+            let readable = |limit| html_to_readable_text(&html, &[], None, limit);
+            let full_text = readable(usize::MAX);
+            let short = readable(max);
+            let total = full_text.body.chars().count();
+            let prefix: String = full_text.body.chars().take(max).collect();
+            prop_assert_eq!(short.body, prefix);
+            prop_assert_eq!(short.count, total);
+            prop_assert_eq!(short.cut, total > max);
+
             // `\\` is only written before an ASCII character.
             let bytes = full.as_bytes();
             let mut index = 0;
@@ -6741,6 +7015,19 @@ mod tests {
             join(&[text("abcdef"), text("ghij")], 10),
             ("abcdef\n\ngh".to_owned(), true)
         );
+        // Text counts the whole projection, preserves plain whitespace and can cut within a gap.
+        let parts = [
+            text(" \té  x  \n"),
+            html("<p>🦀</p>"),
+            text(" \n"),
+            text(" z "),
+        ];
+        for (max, expected) in [(usize::MAX, " \té  x\n\n🦀\n\n z"), (7, " \té  x\n")] {
+            let readable = html_to_readable_text("<p>🦀</p>", &parts, Some(1), max);
+            assert_eq!(readable.body, expected);
+            assert_eq!(readable.count, 13);
+            assert_eq!(readable.cut, max < 13);
+        }
     }
 
     #[test]
@@ -6759,6 +7046,15 @@ mod tests {
             ),
             ("Hi".to_owned(), false)
         );
+        let markup = format!("<p>{}</p><img alt=\"unclosed", "é".repeat(101));
+        let parts = [html(&markup), html("<p>Not joined</p>")];
+        let readable = html_to_readable_text(&markup, &parts, Some(0), 100);
+        assert_eq!(readable.body, "é".repeat(100));
+        assert_eq!(readable.count, 101);
+        assert!(readable.cut);
+        let primary = html_to_readable_text("<p>Not joined</p>", &parts, Some(1), 100);
+        assert_eq!(primary.body, "Not joined");
+        assert!(!primary.cut);
         // Nor after a part whose scan stops before its end, or that ends in an open region.
         assert_eq!(
             join(&[html("<p>One</p><img alt=\"x"), html("<p>Two</p>")], 100),

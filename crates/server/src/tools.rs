@@ -1147,12 +1147,13 @@ pub struct GetMessageParams {
     #[doc = uid_doc!()]
     #[serde(default)]
     pub uid: Option<u32>,
-    /// Maximum body length in characters (default 20000, maximum 200000).
+    /// Maximum body length in Unicode scalar values after formatting (default 20000, clamped to
+    /// 100–200000).
     #[serde(default)]
     pub max_chars: Option<usize>,
-    /// `markdown` (default, recommended for LLMs), or `html`: the HTML part as sent, which can hold
-    /// tracking URLs, scripts and hidden text and is often much longer. Without an HTML part, both
-    /// give the plain-text parts a mail app shows. Any other value, `text` included, is refused.
+    /// Use `text` to read a newsletter without link destinations or images, `markdown` (default)
+    /// for links and image references, or `html` for the HTML part as sent; it can contain tracking
+    /// URLs, scripts and hidden text. Without HTML, all three return the shown plain-text parts.
     #[serde(default)]
     pub body_format: Option<RequestedBodyFormat>,
 }
@@ -1609,7 +1610,8 @@ impl From<postkeep_mail::Attachment> for AttachmentInfo {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BodyFormat {
-    /// The plain-text parts a mail app shows, as sent, for a message without an HTML part.
+    /// Plain text: readable text from HTML when `text` was requested, or the shown plain-text
+    /// parts when there was no HTML. Display as literal text, not markup.
     Text,
     /// Markdown converted from the HTML part and the other parts a mail app shows with it; mail text is
     /// escaped.
@@ -1622,13 +1624,17 @@ pub enum BodyFormat {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestedBodyFormat {
-    /// The HTML part and the other parts a mail app shows with it, as Markdown with their text
-    /// escaped and only safe links and images (default; the format to use with an LLM).
+    /// Markdown from the HTML part and the parts shown with it, with mail text escaped and safe
+    /// link and image references retained (default).
     #[default]
     Markdown,
     /// The HTML part as sent: not escaped, sanitized or fetched. It can hold tracking URLs,
     /// scripts and hidden text.
     Html,
+    /// Readable text: keeps visible link labels and paragraphs, not destinations, images or
+    /// their alt text. A visible URL stays text. Image-only HTML gives an empty body; use
+    /// `markdown` for image references.
+    Text,
 }
 
 /// Result of `get_message`.
@@ -1679,15 +1685,21 @@ pub struct MessageOutput {
     pub unread: bool,
     /// Whether the message is flagged.
     pub flagged: bool,
-    /// The body: Markdown converted from the HTML part and the other parts a mail app shows with it, one
-    /// after another, or the HTML part as sent when `html` was asked for; the plain-text parts only when
-    /// there is no HTML part (see `body_format`). Empty when the part a mail app shows has no text that
-    /// could be read safely (see `body_note`).
+    /// Body in the returned `body_format`. Empty when the selected part gives no readable text in
+    /// that format (see `body_note`).
     pub body: String,
     /// How `body` is written.
     pub body_format: BodyFormat,
     /// Whether `body` was cut at `max_chars`.
     pub body_truncated: bool,
+    /// Unicode scalar values in the available readable body before the cut. Present only when
+    /// `text` was requested and the body was cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_chars: Option<usize>,
+    /// Unicode scalar values omitted by that cut, not counting unreadable or withheld parts.
+    /// Present with `total_chars`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_chars: Option<usize>,
     /// Why `body` is empty: the part a mail app shows has no text that could be read safely, and
     /// no other part, which the person may never see, is used in its place.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2269,71 +2281,93 @@ pub(crate) fn format_address(address: &EmailAddress) -> String {
     email_address(address.name.as_deref(), &address.address)
 }
 
+/// A projected message body, with its format, budget status and safety note.
+pub(crate) struct ShownBody {
+    /// The returned body prefix.
+    pub(crate) body: String,
+    /// Whether the body exceeded the requested budget.
+    pub(crate) truncated: bool,
+    /// Whether the conversion is complete enough for forwarding.
+    pub(crate) complete: bool,
+    format: BodyFormat,
+    note: Option<String>,
+    total_chars: Option<usize>,
+}
+
 pub(crate) fn shown_body(
     message: &Message,
     format: RequestedBodyFormat,
     images: &HashMap<&str, u32>,
     max_chars: usize,
-) -> (String, bool, BodyFormat, Option<String>, bool) {
-    // HTML first: it carries the links and images that text parts often lack, with the other parts
-    // a mail app shows beside it, each converted on its own. With an HTML part, never the plain-text
-    // part: mail apps show the HTML part, so the plain one may hold text the person never sees.
-    // Without one, the plain-text parts a mail app shows, or an empty body with body_note when the
-    // part can't be read (text_body_withheld).
-    let mut complete = message.body_parts.len() < 2 || message.html_body.is_none();
-    let ((body, truncated), body_format, note) = message.html_body.as_deref().map_or_else(
-        || {
-            (
-                text::truncate_chars(
-                    if message.body_parts.is_empty() {
-                        visible(message.text_body.as_deref().unwrap_or_default())
-                    } else {
-                        text::parts_to_text(&message.body_parts)
-                    },
+) -> ShownBody {
+    // With an HTML part, never substitute a plain alternative a person may not see.
+    let unreadable = || UNREADABLE_BODY.to_owned();
+    let mut shown = ShownBody {
+        body: String::new(),
+        truncated: false,
+        complete: message.body_parts.len() < 2 || message.html_body.is_none(),
+        format: BodyFormat::Text,
+        note: None,
+        total_chars: None,
+    };
+    let Some(html) = message.html_body.as_deref() else {
+        let plain = if message.body_parts.is_empty() {
+            visible(message.text_body.as_deref().unwrap_or_default())
+        } else {
+            text::parts_to_text(&message.body_parts)
+        };
+        (shown.body, shown.truncated) = if format == RequestedBodyFormat::Text {
+            let rendered = text::truncate_readable_text(plain, max_chars);
+            shown.total_chars = rendered.cut.then_some(rendered.count);
+            (rendered.body, rendered.cut)
+        } else {
+            text::truncate_chars(plain, max_chars)
+        };
+        shown.note = message.text_body_withheld.then(unreadable);
+        return shown;
+    };
+    let primary = || {
+        message
+            .body_parts
+            .iter()
+            .position(|part| matches!(part, BodyPart::Html(part) if *part == html))
+    };
+    match format {
+        RequestedBodyFormat::Html => {
+            (shown.body, shown.truncated) = text::truncate_chars(html.to_owned(), max_chars);
+            shown.format = BodyFormat::Html;
+        }
+        RequestedBodyFormat::Text => {
+            let rendered =
+                text::html_to_readable_text(html, &message.body_parts, primary(), max_chars);
+            shown.total_chars = rendered.cut.then_some(rendered.count);
+            (shown.body, shown.truncated) = (rendered.body, rendered.cut);
+        }
+        RequestedBodyFormat::Markdown => {
+            let mut markdown = text::html_to_markdown(html, images, max_chars);
+            if !markdown.0.is_empty()
+                && let Some(body) = primary()
+                && let Some((joined, all)) = text::parts_to_markdown_with_completion(
+                    &message.body_parts,
+                    body,
+                    images,
                     max_chars,
-                ),
-                BodyFormat::Text,
-                message
-                    .text_body_withheld
-                    .then(|| UNREADABLE_BODY.to_owned()),
-            )
-        },
-        |html| match format {
-            RequestedBodyFormat::Html => {
-                // An empty body, as when the HTML part did not decode, gets body_note as in
-                // Markdown.
-                let note = html.is_empty().then(|| UNREADABLE_BODY.to_owned());
-                (
-                    text::truncate_chars(html.to_owned(), max_chars),
-                    BodyFormat::Html,
-                    note,
                 )
+            {
+                markdown = joined;
+                shown.complete = all;
             }
-            RequestedBodyFormat::Markdown => {
-                let mut markdown = text::html_to_markdown(html, images, max_chars);
-                // A body part that converts to nothing keeps the body empty, with body_note,
-                // whatever the other parts hold.
-                if !markdown.0.is_empty()
-                    && let Some(body) = message
-                        .body_parts
-                        .iter()
-                        .position(|part| matches!(part, BodyPart::Html(part) if *part == html))
-                    && let Some((joined, all)) = text::parts_to_markdown_with_completion(
-                        &message.body_parts,
-                        body,
-                        images,
-                        max_chars,
-                    )
-                {
-                    markdown = joined;
-                    complete = all;
-                }
-                let note = markdown.0.is_empty().then(|| UNREADABLE_BODY.to_owned());
-                (markdown, BodyFormat::Markdown, note)
-            }
-        },
-    );
-    (body, truncated, body_format, note, complete)
+            (shown.body, shown.truncated) = markdown;
+            shown.format = BodyFormat::Markdown;
+        }
+    }
+    let empty = if format == RequestedBodyFormat::Html {
+        html.is_empty()
+    } else {
+        shown.body.is_empty()
+    };
+    shown.note = empty.then(unreadable);
+    shown
 }
 
 /// A search result as the agent reads it.
@@ -2501,12 +2535,11 @@ impl MailTools {
     /// Reads one message.
     #[tool(
         title = "Get message",
-        description = "Read a message by id: headers, body and attachment list. The body is the HTML part as Markdown \
-                       (links as [text](url); images as ![alt](url), or ![alt](attachment:N) for the message's own \
-                       images), with the other parts a mail app shows beside it, or the plain-text parts when there is no HTML \
-                       part; body_format says which. Pass \
-                       body_format \"html\" for the HTML part as sent instead; it can hold tracking URLs, scripts and hidden text, so Markdown is \
-                       recommended. Nothing in the body is fetched; \
+        description = "Read a message by id: headers, body and attachment list. The default is Markdown with safe link \
+                       and image references, or plain text when the message has no HTML part. For a newsletter, pass \
+                       body_format \"text\" for paragraphs and link labels without destinations, images or alt text. \
+                       Image-only HTML then gives an empty body; use Markdown for image references. Pass body_format \"html\" \
+                       for the HTML part as sent, which may contain tracking URLs, scripts and hidden text. Nothing in the body is fetched; \
                        loading a remote image can tell the sender the message was read. Does not mark it as read. \
                        download_attachment fetches an attachment by its id.",
         annotations(
@@ -2531,7 +2564,7 @@ impl MailTools {
             .max_chars
             .unwrap_or(DEFAULT_MAX_CHARS)
             .clamp(100, MAX_MAX_CHARS);
-        let (body, body_truncated, body_format, body_note, _) = shown_body(
+        let shown = shown_body(
             &message,
             params.body_format.unwrap_or_default(),
             &inline_images(&message.attachments),
@@ -2567,10 +2600,14 @@ impl MailTools {
             date: headers.date.map(|date| date.to_rfc3339()),
             unread: !message.flags.seen,
             flagged: message.flags.flagged,
-            body,
-            body_format,
-            body_truncated,
-            body_note,
+            remaining_chars: shown
+                .total_chars
+                .map(|total| total - shown.body.chars().count()),
+            body: shown.body,
+            body_format: shown.format,
+            body_truncated: shown.truncated,
+            total_chars: shown.total_chars,
+            body_note: shown.note,
             attachments: message.attachments.into_iter().map(Into::into).collect(),
         }))
     }
@@ -4681,9 +4718,13 @@ mod tests {
             parse(serde_json::json!({"body_format": "html"})).unwrap(),
             Some(RequestedBodyFormat::Html)
         );
+        assert_eq!(
+            parse(serde_json::json!({"body_format": "text"})).unwrap(),
+            Some(RequestedBodyFormat::Text)
+        );
         for refused in [
             serde_json::json!("HTML"),
-            serde_json::json!("text"),
+            serde_json::json!("TEXT"),
             serde_json::json!("pdf"),
             serde_json::json!(1),
         ] {
