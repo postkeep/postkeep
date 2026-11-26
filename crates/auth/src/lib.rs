@@ -128,8 +128,9 @@ const BODY_LIMIT: usize = 16 * 1024;
 pub struct RouterOptions {
     /// The account page under [`ACCOUNT_PATH`]: sign-in, disconnecting
     /// apps, the stored password, deletion, webhook settings and their
-    /// filter rules. On by default; an embedder with its own account pages
-    /// turns it off.
+    /// filter rules, plus `POST /oauth/{provider}/start`. On by default; an
+    /// embedder with its own account pages turns it off. The provider
+    /// callback stays mounted.
     pub account_pages: bool,
 }
 
@@ -148,8 +149,11 @@ pub fn router(state: AuthState) -> Router {
     router_with(state, RouterOptions::default())
 }
 
-/// [`router`] with some optional parts left out. The OAuth endpoints, the
-/// metadata documents and the sign-in page are always served.
+/// [`router`] with some optional parts left out.
+///
+/// The MCP OAuth endpoints, provider callback, metadata documents and sign-in
+/// page are always served.
+/// With account pages disabled, the sign-in page offers no upstream OAuth buttons.
 pub fn router_with(state: AuthState, options: RouterOptions) -> Router {
     let resource_metadata = state.config().resource_metadata_path();
     let prefixed_metadata = state
@@ -162,16 +166,17 @@ pub fn router_with(state: AuthState, options: RouterOptions) -> Router {
             "/authorize",
             get(authorize::show)
                 .post(authorize::submit)
+                .layer(axum::Extension(options))
                 .layer(middleware::from_fn_with_state(
                     state.clone(),
                     authorize::embedded_page,
                 )),
         )
         .route("/token", post(token::token))
-        .route("/revoke", post(token::revoke))
-        .route("/oauth/{provider}/start", post(upstream::start));
+        .route("/revoke", post(token::revoke));
     if options.account_pages {
         limited = limited
+            .route("/oauth/{provider}/start", post(upstream::start))
             .route(account::ACCOUNT_PATH, get(account::show))
             .route("/account/sign-in", post(account::sign_in))
             .route("/account/sign-out", post(account::sign_out))

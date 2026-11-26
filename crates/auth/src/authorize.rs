@@ -1,11 +1,11 @@
 //! The authorization endpoint and sign-in page.
 
-use axum::Form;
 use axum::extract::rejection::{FormRejection, QueryRejection};
 use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::{Extension, Form};
 use postkeep_mail::ImapServer;
 use postkeep_store::{
     AccountId, AuthorizationRequest, Client, CodeGrant, GrantSubject, Provider, StoreError,
@@ -14,12 +14,13 @@ use postkeep_store::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
+use crate::RouterOptions;
 use crate::account;
 use crate::client_ip::ClientIp;
 use crate::client_metadata::{self, MetadataError};
 use crate::error::no_store;
 use crate::limits::describe_wait;
-use crate::pages::{self, MailChoices, SignInPage};
+use crate::pages::{self, MailChoices, OAuthButtons, SignInPage};
 use crate::sign_in::SignInRequest;
 use crate::state::AuthState;
 use crate::verifier::VerifyError;
@@ -43,6 +44,7 @@ pub struct AuthorizeQuery {
 /// hands the request to the sign-in hook if it handles the resource.
 pub async fn show(
     State(state): State<AuthState>,
+    Extension(options): Extension<RouterOptions>,
     ip: ClientIp,
     headers: HeaderMap,
     query: Result<Query<AuthorizeQuery>, QueryRejection>,
@@ -143,13 +145,14 @@ pub async fn show(
         tracing::error!(error = %err, "storage error");
         return pages::server_error();
     }
-    begin_sign_in(&state, &headers, &client, &request, &request_id).await
+    begin_sign_in(&state, options, &headers, &client, &request, &request_id).await
 }
 
 /// Hands a stored request to the sign-in hook if it handles the resource;
 /// otherwise shows the sign-in page.
 async fn begin_sign_in(
     state: &AuthState,
+    options: RouterOptions,
     headers: &HeaderMap,
     client: &Client,
     request: &AuthorizationRequest,
@@ -166,12 +169,12 @@ async fn begin_sign_in(
     }
     sign_in_page(
         state,
-        StatusCode::OK,
+        options,
         client,
         request,
         request_id,
         &SignInValues::default(),
-        SignInErrors::default(),
+        None,
     )
 }
 
@@ -232,6 +235,7 @@ pub struct SignInForm {
 /// login CSRF into an attacker-chosen request.
 pub async fn submit(
     State(state): State<AuthState>,
+    Extension(options): Extension<RouterOptions>,
     ip: ClientIp,
     headers: HeaderMap,
     form: Result<Form<SignInForm>, FormRejection>,
@@ -287,12 +291,12 @@ pub async fn submit(
     let retry = |problem: &SignInError| {
         sign_in_page(
             &state,
-            StatusCode::BAD_REQUEST,
+            options,
             &client,
             &request,
             &form.request_id,
             &values,
-            problem.into(),
+            Some(problem),
         )
     };
 
@@ -658,13 +662,19 @@ impl<'a> From<&'a SignInError> for SignInErrors<'a> {
 
 fn sign_in_page(
     state: &AuthState,
-    status: StatusCode,
+    options: RouterOptions,
     client: &Client,
     request: &AuthorizationRequest,
     request_id: &str,
     values: &SignInValues,
-    errors: SignInErrors<'_>,
+    problem: Option<&SignInError>,
 ) -> Response {
+    let status = if problem.is_some() {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    let errors = problem.map(SignInErrors::from).unwrap_or_default();
     let redirect_host = crate::account_view::display_host(&request.redirect_uri);
     // Stored names predate the registration filter, so strip again here.
     let client_name =
@@ -688,7 +698,11 @@ fn sign_in_page(
                 &values.imap_server,
                 &values.email,
             ),
-            oauth: &crate::upstream::buttons(state, Some(request_id)),
+            oauth: &if options.account_pages {
+                crate::upstream::buttons(state, Some(request_id))
+            } else {
+                OAuthButtons::default()
+            },
         },
     )
 }

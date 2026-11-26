@@ -420,9 +420,14 @@ reverse automaton and a lazy-DFA cache of up to 2 MiB per set and
 searching thread (eight sets at most), dropped at the next lookup of any
 mailbox's rules once they have judged nothing for 10 minutes. The sender's text is cut before matching.
 
-download_attachment returns one attachment of at most 3 MiB; like
-get_message it reads the whole message first (Microsoft and Google
-messages at most 48 MiB).
+`download_attachment` returns one attachment of at most 3 MiB; like
+`get_message` it reads the whole message first. Microsoft and Google message
+responses are limited to 48 MiB. IMAP full-message reads check `RFC822.SIZE`
+against 48 MiB before requesting `BODY.PEEK[]` and reject oversized bodies
+before parsing the MIME. The preflight relies on the size reported by the
+operator-configured IMAP server. If the server severely understates the
+size, its response can still be buffered up to the IMAP decoder's ceiling
+before it is rejected.
 
 ### Cryptography
 

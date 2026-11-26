@@ -72,6 +72,50 @@ async fn server(
     (imap, server)
 }
 
+#[tokio::test]
+async fn oversized_messages_are_refused_before_fetching_the_body() {
+    let (mut imap, server) = server("IMAP4rev1", |command| {
+        (command == "UID FETCH 2 (UID RFC822.SIZE)")
+            .then(|| format!("* 2 FETCH (UID 2 RFC822.SIZE {})\r\nTAG OK done", u32::MAX))
+    })
+    .await;
+    assert!(matches!(
+        imap.fetch_message("INBOX", 2, Some(7)).await,
+        Err(Error::MessageTooLarge)
+    ));
+    assert!(matches!(
+        imap.fetch_attachment("INBOX", 2, Some(7), 1, 1024).await,
+        Err(Error::MessageTooLarge)
+    ));
+    drop(imap);
+    let commands = server.await.unwrap();
+    assert!(!commands.iter().any(|command| command.contains("BODY.PEEK")));
+}
+
+#[tokio::test]
+async fn fetch_raw_checks_the_body_when_the_reported_size_is_too_small() {
+    let (mut imap, _) = server("IMAP4rev1", |command| {
+        let reply = match command {
+            "UID FETCH 2 (UID RFC822.SIZE)" => "RFC822.SIZE 4",
+            "UID FETCH 2 (UID FLAGS BODY.PEEK[])" => "FLAGS () BODY[] {6}\r\nhello!",
+            _ => return None,
+        };
+        // An unsolicited flags update for the same UID must not hide the requested data.
+        Some(format!(
+            "* 2 FETCH (UID 2 FLAGS (\\Seen))\r\n* 2 FETCH (UID 2 {reply})\r\nTAG OK done"
+        ))
+    })
+    .await;
+    assert!(matches!(
+        imap.fetch_raw("INBOX", 2, Some(7), 5).await,
+        Err(Error::MessageTooLarge)
+    ));
+    assert_eq!(
+        imap.fetch_raw("INBOX", 2, Some(7), 6).await.unwrap(),
+        b"hello!"
+    );
+}
+
 /// Fetches only the requested fixtures, using the header section the client asks for.
 fn fetched(command: &str, header: impl Fn(u32) -> String) -> Option<String> {
     let (set, items) = command.strip_prefix("UID FETCH ")?.split_once(' ')?;

@@ -275,10 +275,11 @@ impl Extensions {
         self.principal_resolver.as_ref()?.tenant_argument()
     }
 
-    /// Serves or leaves out the default pages: the landing page at `/` and
-    /// the account page under `/account`. The sign-in page at `/authorize`,
-    /// the OAuth endpoints, the MCP endpoint, `/healthz` and `/readyz`
-    /// always stay.
+    /// Serves or leaves out the default pages at `/` and under `/account`.
+    ///
+    /// Disabling them also removes the upstream OAuth start route and buttons.
+    /// The sign-in page at `/authorize`, the MCP OAuth endpoints, the provider
+    /// callback, the MCP endpoint, `/healthz` and `/readyz` always stay.
     #[must_use]
     pub const fn default_pages(mut self, enabled: bool) -> Self {
         self.default_pages = enabled;

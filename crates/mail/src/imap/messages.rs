@@ -1,6 +1,7 @@
 //! Message operations: fetch, flags, move, delete and append.
 
 use std::collections::HashMap;
+use std::pin::pin;
 
 use async_imap::imap_proto::rfc4315::UidSetMember;
 use async_imap::imap_proto::{AttributeValue, Response, ResponseCode, Status};
@@ -12,8 +13,8 @@ use super::search::{UID_SET_MAX, run_until_done, search_uids, uid_chunks, uid_se
 use super::{Conn, select};
 use crate::query::{self, Literals};
 use crate::{
-    AttachmentData, Error, Flag, Message, MessageFlags, Result, SearchQuery, SentCopy, Uid, parse,
-    utf7,
+    AttachmentData, Error, Flag, IMAP_MESSAGE_LIMIT, Message, MessageFlags, Result, SearchQuery,
+    SentCopy, Uid, parse, utf7,
 };
 
 /// How [`ImapSession::delete_message`](crate::ImapSession::delete_message)
@@ -114,11 +115,18 @@ pub(super) async fn fetch(
     uid: Uid,
     uid_validity: Option<u32>,
 ) -> Result<(Message, Option<u32>)> {
-    let (fetch, seen) = fetch_whole(conn, folder, uid, uid_validity).await?;
-    let raw = fetch.body().ok_or(Error::Parse(uid))?;
-    let message = parse::parse_message(uid, MessageFlags::from_imap(fetch.flags()), raw)
-        .ok_or(Error::Parse(uid))?;
-    Ok((message, seen))
+    fetch_whole(
+        conn,
+        folder,
+        uid,
+        uid_validity,
+        IMAP_MESSAGE_LIMIT,
+        |fetch, raw| {
+            parse::parse_message(uid, MessageFlags::from_imap(fetch.flags()), raw)
+                .ok_or(Error::Parse(uid))
+        },
+    )
+    .await
 }
 
 pub(super) async fn fetch_attachment(
@@ -129,9 +137,16 @@ pub(super) async fn fetch_attachment(
     id: u32,
     max_bytes: usize,
 ) -> Result<Option<AttachmentData>> {
-    let (fetch, _) = fetch_whole(conn, folder, uid, uid_validity).await?;
-    let raw = fetch.body().ok_or(Error::Parse(uid))?;
-    Ok(parse::attachment_data(raw, id, max_bytes))
+    let (attachment, _) = fetch_whole(
+        conn,
+        folder,
+        uid,
+        uid_validity,
+        IMAP_MESSAGE_LIMIT,
+        |_, raw| Ok(parse::attachment_data(raw, id, max_bytes)),
+    )
+    .await?;
+    Ok(attachment)
 }
 
 /// Reads the provider's `RFC822.SIZE` for the message without fetching its body.
@@ -142,20 +157,19 @@ pub(super) async fn message_size(
     uid_validity: Option<u32>,
 ) -> Result<u32> {
     select(conn, folder, uid_validity).await?;
-    let fetches: Vec<Fetch> = conn
-        .uid_fetch(uid.to_string(), "(UID RFC822.SIZE)")
-        .await?
-        .try_collect()
-        .await?;
-    fetches
-        .into_iter()
-        .find(|fetch| fetch.uid == Some(uid))
-        .ok_or_else(|| not_found(folder, uid))?
-        .size
-        .ok_or(Error::Parse(uid))
+    selected_message_size(conn, folder, uid).await
 }
 
-/// Fetches raw MIME after checking its reported size against `max`.
+async fn selected_message_size(conn: &mut Conn, folder: &str, uid: Uid) -> Result<u32> {
+    fetch_one(conn, folder, uid, "(UID RFC822.SIZE)", |fetch| {
+        fetch.size.is_some()
+    })
+    .await?
+    .size
+    .ok_or(Error::Parse(uid))
+}
+
+/// Fetches raw MIME after checking its reported size against the read limit.
 pub(super) async fn fetch_raw(
     conn: &mut Conn,
     folder: &str,
@@ -163,35 +177,54 @@ pub(super) async fn fetch_raw(
     uid_validity: Option<u32>,
     max: usize,
 ) -> Result<Vec<u8>> {
-    if message_size(conn, folder, uid, uid_validity).await? as usize > max {
-        return Err(Error::MessageTooLarge);
-    }
-    let (fetch, _) = fetch_whole(conn, folder, uid, uid_validity).await?;
-    let bytes = fetch.body().ok_or(Error::Parse(uid))?;
-    if bytes.len() > max {
-        return Err(Error::MessageTooLarge);
-    }
-    Ok(bytes.to_vec())
+    let (raw, _) = fetch_whole(conn, folder, uid, uid_validity, max, |_, raw| {
+        Ok(raw.to_vec())
+    })
+    .await?;
+    Ok(raw)
 }
 
-/// Fetches the whole raw message without setting `\Seen`, with the folder's UIDVALIDITY.
-async fn fetch_whole(
+/// Reads and uses raw MIME without setting `\Seen`, with the folder's UIDVALIDITY.
+async fn fetch_whole<T>(
     conn: &mut Conn,
     folder: &str,
     uid: Uid,
     uid_validity: Option<u32>,
-) -> Result<(Fetch, Option<u32>)> {
+    max: usize,
+    read: impl FnOnce(&Fetch, &[u8]) -> Result<T>,
+) -> Result<(T, Option<u32>)> {
+    let max = max.min(IMAP_MESSAGE_LIMIT);
     let seen = select(conn, folder, uid_validity).await?;
-    let fetches: Vec<Fetch> = conn
-        .uid_fetch(uid.to_string(), "(UID FLAGS BODY.PEEK[])")
-        .await?
-        .try_collect()
-        .await?;
-    let fetch = fetches
-        .into_iter()
-        .find(|fetch| fetch.uid == Some(uid))
-        .ok_or_else(|| not_found(folder, uid))?;
-    Ok((fetch, seen))
+    if selected_message_size(conn, folder, uid).await? as usize > max {
+        return Err(Error::MessageTooLarge);
+    }
+    let fetch = fetch_one(conn, folder, uid, "(UID FLAGS BODY.PEEK[])", |fetch| {
+        fetch.body().is_some()
+    })
+    .await?;
+    let raw = fetch.body().ok_or(Error::Parse(uid))?;
+    if raw.len() > max {
+        return Err(Error::MessageTooLarge);
+    }
+    Ok((read(&fetch, raw)?, seen))
+}
+
+/// Drains the command's replies, preferring a match with the requested item over a flags update.
+async fn fetch_one(
+    conn: &mut Conn,
+    folder: &str,
+    uid: Uid,
+    items: &str,
+    has_item: fn(&Fetch) -> bool,
+) -> Result<Fetch> {
+    let mut fetches = pin!(conn.uid_fetch(uid.to_string(), items).await?);
+    let mut found = None;
+    while let Some(fetch) = fetches.try_next().await? {
+        if fetch.uid == Some(uid) && found.as_ref().is_none_or(|found| !has_item(found)) {
+            found = Some(fetch);
+        }
+    }
+    found.ok_or_else(|| not_found(folder, uid))
 }
 
 pub(super) async fn find_messages(

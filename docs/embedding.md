@@ -103,7 +103,7 @@ are the builder's alone):
 | Method | Without it | Use it for |
 | ------ | ---------- | ---------- |
 | `route` | Nothing extra | Your own pages and endpoints, behind the same request limits. Handlers can extract `axum::Extension<AuthState>`. A path the server already serves panics at start |
-| `default_pages(false)` | `/` and `/account` are served | Leaving out the landing and account pages; `/authorize`, OAuth, `/mcp`, `/healthz` and `/readyz` stay |
+| `default_pages(false)` | `/` and `/account` are served | Leaves out `/`, `/account`, `POST /oauth/{provider}/start` and the upstream OAuth buttons on `/authorize`. Keeps `/authorize`, the MCP OAuth endpoints, `/oauth/{provider}/callback`, `/mcp`, `/healthz` and `/readyz`. |
 | `principal_resolver` | This server's access tokens, each for one mailbox | Your own keys or tenants, and several mailboxes per caller (`selects_mailboxes`) |
 | `sign_in_hook` | The mailbox sign-in page | `/authorize` for the resources the hook claims: your own sign-in or consent page, finished with `AuthState::approve_sign_in` or `deny_sign_in` |
 | `continuation_hook` | `AuthState::start_upstream_sign_in` fails | Microsoft or Google sign-ins that your page starts to add a mailbox to a tenant |
