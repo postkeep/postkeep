@@ -151,6 +151,7 @@ pub const GET_MAILBOX_CAPABILITIES: &str = "get_mailbox_capabilities";
 mod attachments;
 mod extension;
 mod filters;
+mod schema;
 mod skills;
 
 pub use attachments::{DownloadAttachmentParams, NewAttachment};
@@ -434,6 +435,9 @@ impl MailTools {
         if select_mailboxes {
             selector::advertise(&mut router);
             instructions.push_str(selector::INSTRUCTIONS);
+        }
+        for route in router.map.values_mut() {
+            schema::prepare_listed_tool(&mut route.attr);
         }
         Self {
             context: Arc::new(Context {
@@ -776,27 +780,15 @@ where
     }
 }
 
-/// Schema stand-in: seconds, or a duration such as `36h`.
+// Shared schema shape; each field documents the strings it accepts.
 #[derive(JsonSchema)]
 #[serde(untagged)]
 #[allow(
     dead_code,
     reason = "the variants exist so the MCP schema accepts a number or a string"
 )]
-enum RetentionWire {
-    Seconds(u64),
-    Text(String),
-}
-
-/// Schema stand-in: an event count, or the string `default`.
-#[derive(JsonSchema)]
-#[serde(untagged)]
-#[allow(
-    dead_code,
-    reason = "the variants exist so the MCP schema accepts a number or a string"
-)]
-enum MaxEventsWire {
-    Count(u64),
+enum OutboxLimitWire {
+    Number(u64),
     Text(String),
 }
 
@@ -815,7 +807,7 @@ pub struct SetWebhookOutboxLimitsParams {
         deserialize_with = "deserialize_limit_input",
         skip_serializing_if = "limit_input_is_keep"
     )]
-    #[schemars(with = "Option<RetentionWire>")]
+    #[schemars(with = "Option<OutboxLimitWire>")]
     pub retention: OutboxLimitInput,
     /// How many events to keep, delivered or not. JSON null or `"default"`
     /// stores the server default. Omit the field to leave the stored value.
@@ -827,7 +819,7 @@ pub struct SetWebhookOutboxLimitsParams {
         deserialize_with = "deserialize_limit_input",
         skip_serializing_if = "limit_input_is_keep"
     )]
-    #[schemars(with = "Option<MaxEventsWire>")]
+    #[schemars(with = "Option<OutboxLimitWire>")]
     pub max_events: OutboxLimitInput,
     /// When true, both limits return to the server default. `retention`
     /// and `max_events` are ignored, even if they would not parse.
@@ -1221,7 +1213,7 @@ pub struct GetMessageParams {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SendParams {
-    /// A held answer's handle, passed back only after the user's yes.
+    /// The handle of a held send.
     #[serde(default)]
     #[schemars(description = hold_id_description())]
     pub hold_id: Option<String>,
@@ -1294,7 +1286,7 @@ pub struct CreateDraftParams {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReplyParams {
-    /// A held answer's handle, passed back only after the user's yes.
+    /// The handle of a held send.
     #[serde(default)]
     #[schemars(description = hold_id_description())]
     pub hold_id: Option<String>,
@@ -4164,7 +4156,9 @@ impl ServerHandler for MailTools {
         if let Some((extension, caller)) = self.extension_caller(context.extensions.get::<Parts>())
         {
             tools.retain(|tool| !extension.hides_tool(caller, &tool.name));
-            tools.extend(self.extension_tools(extension, caller));
+            let mut extra = self.extension_tools(extension, caller);
+            extra.iter_mut().for_each(schema::prepare_listed_tool);
+            tools.extend(extra);
         }
         let (ttl_ms, cache_scope) = self.cache_hints(&context).unzip();
         Ok(ListToolsResult {

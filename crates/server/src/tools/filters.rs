@@ -4,7 +4,7 @@
 use axum::http::request::Parts;
 use postkeep_auth::{UnreadableRules, parse_filter_rules};
 use postkeep_store::{AddedFilterRule, FilterRule, NewFilterRule, StoreError};
-use postkeep_webhook::filter::{Action, CompiledRules, Field, Kind, Rule};
+use postkeep_webhook::filter::{Action, CompiledRules, Field, Kind, MAX_PATTERN_LEN, Rule};
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -32,67 +32,14 @@ pub struct ListWebhookFiltersParams {
 #[serde(deny_unknown_fields)]
 pub struct AddWebhookFilterParams {
     /// What a match does.
-    #[schemars(with = "ActionWire")]
     pub action: Action,
     /// The part of a new message that is compared.
-    #[schemars(with = "FieldWire")]
     pub field: Field,
     /// How the pattern is compared.
-    #[schemars(with = "KindWire")]
     pub kind: Kind,
-    /// 1 to 512 bytes. Matching ignores case.
+    /// Pattern to compare.
+    #[schemars(description = format!("1 to {MAX_PATTERN_LEN} bytes. Matching ignores case."))]
     pub pattern: String,
-}
-
-/// Schema stand-in: what a rule does to mail that matches it.
-#[derive(JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[allow(
-    dead_code,
-    reason = "the variants exist so the MCP schema lists the names"
-)]
-enum ActionWire {
-    /// Once the mailbox has an active allow rule, only mail that matches one calls the webhook.
-    Allow,
-    /// Mail that matches never calls the webhook, whatever else matches.
-    Block,
-}
-
-/// Schema stand-in: the part of a new message a rule compares.
-#[derive(JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[allow(
-    dead_code,
-    reason = "the variants exist so the MCP schema lists the names"
-)]
-enum FieldWire {
-    /// The sender's address.
-    From,
-    /// The sender's domain: what follows the last @.
-    FromDomain,
-    /// The addresses in To and Cc; the rule matches if any does.
-    To,
-    /// The decoded subject.
-    Subject,
-}
-
-/// Schema stand-in: how a rule compares its pattern.
-#[derive(JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[allow(
-    dead_code,
-    reason = "the variants exist so the MCP schema lists the names"
-)]
-enum KindWire {
-    /// The whole text is the pattern.
-    Equals,
-    /// The text contains the pattern.
-    Contains,
-    /// The address's domain, or the domain itself, is the pattern or a
-    /// subdomain of it. A plain domain such as example.com; not for subject.
-    Domain,
-    /// A regular expression in Rust syntax, without look-around or back-references.
-    Regex,
 }
 
 /// Parameters for `remove_webhook_filter`: exactly one of `id` or `all`.

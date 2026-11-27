@@ -50,6 +50,9 @@ use tower::ServiceExt;
 
 use imap::{ACCEPT, scripted_mail};
 
+#[path = "common/tool_list.rs"]
+mod tool_list;
+
 const HOST: &str = "mail.example.com";
 const EXTRA_SKILL: &str =
     "---\nname: \"follow-up\"\ndescription: \"Draft a follow-up.\"\n---\n\n# Follow up\n";
@@ -189,19 +192,45 @@ impl ToolExtension for AccountTools {
         if !matches!(caller.principal.as_str(), "key:1" | "key:2") {
             return Vec::new();
         }
+        let mut disconnect = tool(
+            "disconnect_mailbox",
+            json!({
+                "type": "object",
+                "$defs": {
+                    "choice": { "enum": [2.5, 1, "one"] },
+                    "loop": { "$ref": "#/$defs/loop" }
+                },
+                "properties": {
+                    "mailbox": { "type": "string", "description": "The mailbox to disconnect." },
+                    "details": {
+                        "type": "object",
+                        "properties": {
+                            "choice": { "anyOf": [{ "$ref": "#/$defs/choice" }, { "const": null }], "default": null },
+                            "count": { "allOf": [{ "type": ["number", "string"] }, { "type": "integer", "minimum": 1 }] },
+                            "forbidden": false,
+                            "unconstrained": true,
+                            "recursive": { "$ref": "#/$defs/loop" }
+                        },
+                        "dependentSchemas": {
+                            "count": { "properties": { "confirmed": { "const": true } } }
+                        },
+                        "examples": [{ "properties": { "not_a_schema": {} } }]
+                    }
+                },
+                "required": ["mailbox"]
+            }),
+            false,
+        );
+        disconnect.title = Some("Disconnect mailbox".into());
+        disconnect.annotations.get_or_insert_default().title = Some("Not the display title".into());
+        let mut account = tool("get_account", json!({ "type": "object" }), true);
+        if caller.client_id == "another-app" {
+            account.title = Some("  ".into());
+            account.annotations.get_or_insert_default().title = Some("Get account".into());
+        }
         let mut tools = vec![
-            tool("get_account", json!({ "type": "object" }), true),
-            tool(
-                "disconnect_mailbox",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "mailbox": { "type": "string", "description": "The mailbox to disconnect." }
-                    },
-                    "required": ["mailbox"]
-                }),
-                false,
-            ),
+            account,
+            disconnect,
             tool("list_folders", json!({ "type": "object" }), false),
         ];
         if self.hide_capabilities.load(Ordering::Relaxed) {
@@ -569,6 +598,7 @@ async fn the_extension_lists_its_tools_to_the_callers_it_picks() {
     let extended = listed(&h.extended, "workspace-key").await;
     assert_eq!(extended.len(), 21, "list_folders stays the server's");
     assert_eq!(&extended[..19], &plain[..]);
+    extended.iter().for_each(tool_list::assert_listed_metadata);
     assert_eq!(extended[19]["name"], "get_account");
     assert_eq!(
         extended[19]["inputSchema"]["properties"]["mailbox"],
@@ -578,12 +608,49 @@ async fn the_extension_lists_its_tools_to_the_callers_it_picks() {
         })
     );
     assert_eq!(extended[19]["annotations"]["readOnlyHint"], true);
+    assert_eq!(extended[19]["title"], "get_account");
     assert_eq!(extended[20]["name"], "disconnect_mailbox");
     assert_eq!(
         extended[20]["inputSchema"]["properties"]["mailbox"],
         json!({ "type": "string", "description": "The mailbox to disconnect." })
     );
-    assert_eq!(extended[20]["inputSchema"]["required"], json!(["mailbox"]));
+    assert_eq!(extended[20]["title"], "Disconnect mailbox");
+    let schema = &extended[20]["inputSchema"];
+    assert_eq!(schema["required"], json!(["mailbox"]));
+    let details_schema = &schema["properties"]["details"];
+    assert_eq!(
+        details_schema["dependentSchemas"]["count"]["properties"]["confirmed"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        details_schema["examples"],
+        json!([{ "properties": { "not_a_schema": {} } }])
+    );
+    let details = &details_schema["properties"];
+    assert_eq!(
+        details["choice"]["type"],
+        json!(["null", "number", "string"])
+    );
+    assert_eq!(
+        details["choice"]["anyOf"],
+        json!([{ "$ref": "#/$defs/choice" }, { "const": null }])
+    );
+    assert_eq!(details["choice"].get("default"), Some(&Value::Null));
+    assert_eq!(details["count"]["type"], "integer");
+    assert_eq!(details["count"]["allOf"][1]["minimum"], 1);
+    let any = json!(["array", "boolean", "null", "number", "object", "string"]);
+    assert_eq!(details["forbidden"], json!({ "type": any, "not": {} }));
+    assert_eq!(details["unconstrained"], json!({ "type": any }));
+    assert_eq!(
+        details["recursive"],
+        json!({ "$ref": "#/$defs/loop", "type": any })
+    );
+    let other_app = listed(&h.extended, "other-app").await;
+    let account = &other_app[19];
+    assert_eq!(account["name"], "get_account");
+    assert_eq!(account["title"], "Get account");
+    assert_eq!(account["annotations"]["title"], "Get account");
+    assert_eq!(account["annotations"]["readOnlyHint"], true);
     assert_eq!(listed(&h.extended, "other-key").await, plain);
 
     assert_eq!(cache_scope(&h.plain).await, "public");
