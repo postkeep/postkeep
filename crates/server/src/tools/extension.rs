@@ -31,6 +31,11 @@ pub trait ToolExtension: Send + Sync + 'static {
     /// no `mailbox` property gets the optional one the server's tools have,
     /// and the server checks the name before [`call`](Self::call). The
     /// default lists none.
+    ///
+    /// When listed, a non-blank top-level title is also used as the annotation
+    /// title. Without one, both use the non-blank annotation title or, failing
+    /// that, the tool's name. The other annotation hints are unchanged. Listing
+    /// also fills missing input property types without changing the call.
     fn tools(&self, caller: &Authenticated) -> Vec<Tool> {
         let _ = caller;
         Vec::new()

@@ -50,6 +50,8 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 mod serve;
+#[path = "common/tool_list.rs"]
+mod tool_list;
 
 const HOST: &str = "mail.example.com";
 const ORIGIN: &str = "https://mail.example.com";
@@ -811,17 +813,38 @@ async fn check_tools(harness: &Harness) {
     let tools = listed["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 19);
     for tool in tools {
-        assert!(
-            tool["title"]
-                .as_str()
-                .is_some_and(|title| !title.trim().is_empty()),
-            "{} has no title",
-            tool["name"]
-        );
+        tool_list::assert_listed_metadata(tool);
         assert!(
             tool["annotations"]["destructiveHint"].is_boolean(),
             "{} has no explicit destructiveHint",
             tool["name"]
+        );
+    }
+    for (name, property, kind) in [
+        (
+            "download_attachment",
+            "attachment_id",
+            json!(["integer", "string"]),
+        ),
+        ("add_webhook_filter", "action", json!("string")),
+        ("add_webhook_filter", "field", json!("string")),
+        ("add_webhook_filter", "kind", json!("string")),
+        ("get_message", "body_format", json!(["null", "string"])),
+        (
+            "set_webhook_outbox_limits",
+            "max_events",
+            json!(["integer", "null", "string"]),
+        ),
+        (
+            "set_webhook_outbox_limits",
+            "retention",
+            json!(["integer", "null", "string"]),
+        ),
+    ] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(
+            tool["inputSchema"]["properties"][property]["type"], kind,
+            "{name}.{property}"
         );
     }
     check_json_pin("tools-list.json", &reply.body);

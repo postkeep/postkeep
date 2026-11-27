@@ -9,8 +9,8 @@
         "description": "Add a rule that chooses which new mail calls the webhook. action allow or block: the first active allow rule silences all other mail, and block wins over allow. field from, from_domain, to (any To or Cc address) or subject. kind equals, contains, domain (a plain domain such as example.com, which also matches its subdomains; not for subject) or regex (Rust syntax, without look-around or back-references). Matching ignores case. pattern is 1 to 512 bytes. Refused once the mailbox has filter_rules_limit rules. Returns the new rule's id and the counts. Requires a saved webhook.",
         "inputSchema": {
           "$defs": {
-            "ActionWire": {
-              "description": "Schema stand-in: what a rule does to mail that matches it.",
+            "Action": {
+              "description": "What a rule does to a message that matches it.",
               "oneOf": [
                 {
                   "const": "allow",
@@ -24,8 +24,8 @@
                 }
               ]
             },
-            "FieldWire": {
-              "description": "Schema stand-in: the part of a new message a rule compares.",
+            "Field": {
+              "description": "The part of a message a rule looks at.",
               "oneOf": [
                 {
                   "const": "from",
@@ -49,8 +49,8 @@
                 }
               ]
             },
-            "KindWire": {
-              "description": "Schema stand-in: how a rule compares its pattern.",
+            "Kind": {
+              "description": "How a rule's pattern is compared.",
               "oneOf": [
                 {
                   "const": "equals",
@@ -79,16 +79,19 @@
           "additionalProperties": false,
           "properties": {
             "action": {
-              "$ref": "#/$defs/ActionWire",
-              "description": "What a match does."
+              "$ref": "#/$defs/Action",
+              "description": "What a match does.",
+              "type": "string"
             },
             "field": {
-              "$ref": "#/$defs/FieldWire",
-              "description": "The part of a new message that is compared."
+              "$ref": "#/$defs/Field",
+              "description": "The part of a new message that is compared.",
+              "type": "string"
             },
             "kind": {
-              "$ref": "#/$defs/KindWire",
-              "description": "How the pattern is compared."
+              "$ref": "#/$defs/Kind",
+              "description": "How the pattern is compared.",
+              "type": "string"
             },
             "pattern": {
               "description": "1 to 512 bytes. Matching ignores case.",
@@ -143,6 +146,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Add webhook filter",
           "readOnlyHint": false,
           "destructiveHint": false,
           "idempotentHint": false,
@@ -284,6 +288,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Create draft",
           "readOnlyHint": false,
           "destructiveHint": false,
           "idempotentHint": false,
@@ -322,6 +327,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Create folder",
           "readOnlyHint": false,
           "destructiveHint": false,
           "idempotentHint": false,
@@ -510,6 +516,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Delete message",
           "readOnlyHint": false,
           "destructiveHint": true,
           "idempotentHint": false,
@@ -541,7 +548,11 @@
           "properties": {
             "attachment_id": {
               "$ref": "#/$defs/AttachmentIdWire",
-              "description": "The attachment id from `get_message`, such as \"1\"."
+              "description": "The attachment id from `get_message`, such as \"1\".",
+              "type": [
+                "integer",
+                "string"
+              ]
             },
             "base64": {
               "default": false,
@@ -570,6 +581,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Download attachment",
           "readOnlyHint": true,
           "destructiveHint": false,
           "openWorldHint": false
@@ -829,6 +841,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Get mailbox capabilities",
           "readOnlyHint": true,
           "destructiveHint": false,
           "openWorldHint": false
@@ -873,7 +886,11 @@
                   "type": "null"
                 }
               ],
-              "description": "Use `text` to read a newsletter without link destinations or images, `markdown` (default)\nfor links and image references, or `html` for the HTML part as sent; it can contain tracking\nURLs, scripts and hidden text. Without HTML, all three return the shown plain-text parts."
+              "description": "Use `text` to read a newsletter without link destinations or images, `markdown` (default)\nfor links and image references, or `html` for the HTML part as sent; it can contain tracking\nURLs, scripts and hidden text. Without HTML, all three return the shown plain-text parts.",
+              "type": [
+                "null",
+                "string"
+              ]
             },
             "folder": {
               "default": null,
@@ -1139,6 +1156,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Get message",
           "readOnlyHint": true,
           "destructiveHint": false,
           "openWorldHint": false
@@ -1343,6 +1361,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Get webhook status",
           "readOnlyHint": true,
           "destructiveHint": false,
           "openWorldHint": false
@@ -1402,6 +1421,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "List folders",
           "readOnlyHint": true,
           "destructiveHint": false,
           "openWorldHint": false
@@ -1544,6 +1564,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "List webhook filters",
           "readOnlyHint": true,
           "destructiveHint": false,
           "openWorldHint": false
@@ -1733,6 +1754,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Move message",
           "readOnlyHint": false,
           "destructiveHint": false,
           "idempotentHint": false,
@@ -1779,6 +1801,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Remove webhook filter",
           "readOnlyHint": false,
           "destructiveHint": true,
           "idempotentHint": true,
@@ -1975,6 +1998,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Reply to message",
           "readOnlyHint": false,
           "destructiveHint": true,
           "idempotentHint": false,
@@ -2205,6 +2229,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Search messages",
           "readOnlyHint": true,
           "destructiveHint": false,
           "openWorldHint": false
@@ -2397,6 +2422,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Send message",
           "readOnlyHint": false,
           "destructiveHint": true,
           "idempotentHint": false,
@@ -2610,6 +2636,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Set webhook enabled",
           "readOnlyHint": false,
           "destructiveHint": true,
           "idempotentHint": true,
@@ -2622,7 +2649,7 @@
         "description": "Set how long this account keeps new-mail events, and how many. retention is a whole number of seconds or a duration like 36h, 30d or 90m. Omit a field to leave it unchanged. JSON null or \"default\" on a field stores the server default for that field. reset true stores the server default for both and ignores the other fields. Values outside the server's allowed range are rejected. Lowering a limit deletes the oldest kept events immediately, including ones that were not delivered yet. Requires a saved webhook. Works while the webhook is paused or turned off. Does not change the endpoint, secrets, or which events were already delivered.",
         "inputSchema": {
           "$defs": {
-            "MaxEventsWire": {
+            "OutboxLimitWire": {
               "anyOf": [
                 {
                   "format": "uint64",
@@ -2632,21 +2659,7 @@
                 {
                   "type": "string"
                 }
-              ],
-              "description": "Schema stand-in: an event count, or the string `default`."
-            },
-            "RetentionWire": {
-              "anyOf": [
-                {
-                  "format": "uint64",
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                {
-                  "type": "string"
-                }
-              ],
-              "description": "Schema stand-in: seconds, or a duration such as `36h`."
+              ]
             }
           },
           "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2655,13 +2668,18 @@
             "max_events": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/MaxEventsWire"
+                  "$ref": "#/$defs/OutboxLimitWire"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "How many events to keep, delivered or not. JSON null or `\"default\"`\nstores the server default. Omit the field to leave the stored value.\n\nLowering this deletes the oldest kept events, including ones that\nwere not delivered."
+              "description": "How many events to keep, delivered or not. JSON null or `\"default\"`\nstores the server default. Omit the field to leave the stored value.\n\nLowering this deletes the oldest kept events, including ones that\nwere not delivered.",
+              "type": [
+                "integer",
+                "null",
+                "string"
+              ]
             },
             "reset": {
               "default": false,
@@ -2671,13 +2689,18 @@
             "retention": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/RetentionWire"
+                  "$ref": "#/$defs/OutboxLimitWire"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "How long to keep events. A whole number of seconds, or a duration\nsuch as `36h`, `30d` or `90m`. JSON null or `\"default\"` stores the\nserver default. Omit the field to leave the stored value.\n\nLowering this deletes events older than the new retention, including\nones that were not delivered."
+              "description": "How long to keep events. A whole number of seconds, or a duration\nsuch as `36h`, `30d` or `90m`. JSON null or `\"default\"` stores the\nserver default. Omit the field to leave the stored value.\n\nLowering this deletes events older than the new retention, including\nones that were not delivered.",
+              "type": [
+                "integer",
+                "null",
+                "string"
+              ]
             }
           },
           "type": "object"
@@ -2878,6 +2901,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Set webhook outbox limits",
           "readOnlyHint": false,
           "destructiveHint": true,
           "idempotentHint": true,
@@ -3077,6 +3101,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Update flags",
           "readOnlyHint": false,
           "destructiveHint": false,
           "idempotentHint": true,
@@ -3127,6 +3152,7 @@
           "type": "object"
         },
         "annotations": {
+          "title": "Upload attachment",
           "readOnlyHint": false,
           "destructiveHint": false,
           "idempotentHint": false,

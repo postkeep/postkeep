@@ -23,6 +23,7 @@
 use std::fmt;
 
 use regex::{RegexSet, RegexSetBuilder};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The longest pattern a rule may have, in bytes.
@@ -43,41 +44,41 @@ const MAX_ADDRESS_LEN: usize = 320;
 const MAX_RECIPIENTS: usize = 100;
 
 /// What a rule does to a message that matches it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
-    /// Report only messages that match an allow rule, if there is one.
+    /// Once the mailbox has an active allow rule, only mail that matches one calls the webhook.
     Allow,
-    /// Never report a message that matches, whatever else matches.
+    /// Mail that matches never calls the webhook, whatever else matches.
     Block,
 }
 
 /// The part of a message a rule looks at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Field {
     /// The sender's address.
     From,
-    /// The sender's domain: what follows the last `@`.
+    /// The sender's domain: what follows the last @.
     FromDomain,
-    /// The addresses in `To` and `Cc`; the rule matches if any does.
+    /// The addresses in To and Cc; the rule matches if any does.
     To,
     /// The decoded subject.
     Subject,
 }
 
 /// How a rule's pattern is compared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// The whole text is the pattern.
     Equals,
     /// The text contains the pattern.
     Contains,
-    /// The domain of the address, or the domain itself, is the pattern or a
-    /// subdomain of it. The pattern is a plain domain such as `example.com`.
+    /// The address's domain, or the domain itself, is the pattern or a
+    /// subdomain of it. A plain domain such as example.com; not for subject.
     Domain,
-    /// The pattern is a regular expression, used as written.
+    /// A regular expression in Rust syntax, without look-around or back-references.
     Regex,
 }
 
