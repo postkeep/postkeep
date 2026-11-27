@@ -8,28 +8,41 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use postkeep_mail::{
-    Check, Credentials, DeleteMode, Error, Flag, ImapConfig, ImapSecurity, ImapSession, InFlight,
-    MailClient, MailConfig, NaiveDate, Paging, Result, SearchQuery, SearchResults, SecretString,
-    UID_SET_MAX,
+    Check, Credentials, DeleteMode, EmailAddress, Error, Flag, ImapConfig, ImapSecurity,
+    ImapSession, InFlight, MailClient, MailConfig, NaiveDate, OutgoingMessage, Paging, Result,
+    SearchQuery, SearchResults, SecretString, UID_SET_MAX,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
 /// Starts a server with command-specific replies (`TAG` is replaced by its tag).
 async fn server(
     capabilities: &'static str,
-    mut answer: impl FnMut(&str) -> Option<String> + Send + 'static,
+    answer: impl FnMut(&str) -> Option<String> + Send + 'static,
 ) -> (ImapSession, tokio::task::JoinHandle<Vec<String>>) {
+    let (_, imap, server) = server_with_client(capabilities, answer).await;
+    (imap, server)
+}
+
+async fn server_with_client(
+    capabilities: &'static str,
+    mut answer: impl FnMut(&str) -> Option<String> + Send + 'static,
+) -> (
+    MailClient,
+    ImapSession,
+    tokio::task::JoinHandle<Vec<String>>,
+) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
         write.write_all(b"* OK ready\r\n").await.unwrap();
-        let mut lines = BufReader::new(read).lines();
+        let mut read = BufReader::new(read);
         let mut commands = Vec::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let (tag, command) = line.split_once(' ').unwrap();
+        let mut line = String::new();
+        while let Ok(1..) = read.read_line(&mut line).await {
+            let (tag, command) = line.trim_end_matches("\r\n").split_once(' ').unwrap();
             commands.push(command.to_owned());
             let answer = answer(command);
             if answer.as_deref() == Some("") {
@@ -49,7 +62,26 @@ async fn server(
                 },
                 |reply| format!("{}\r\n", reply.replace("TAG", tag)),
             );
-            write.write_all(reply.as_bytes()).await.unwrap();
+            if command.starts_with("APPEND ")
+                && let Some(continuation) = reply.lines().find(|line| line.starts_with("+ "))
+            {
+                let end = reply.find(continuation).unwrap() + continuation.len() + 2;
+                write.write_all(&reply.as_bytes()[..end]).await.unwrap();
+                let (_, length) = command.rsplit_once(" {").unwrap();
+                let length: usize = length.strip_suffix('}').unwrap().parse().unwrap();
+                let mut literal = vec![0; length + 2];
+                read.read_exact(&mut literal).await.unwrap();
+                assert_eq!(&literal[length..], b"\r\n");
+                assert!(
+                    literal[..length]
+                        .windows(b"Message-ID:".len())
+                        .any(|part| part == b"Message-ID:")
+                );
+                write.write_all(&reply.as_bytes()[end..]).await.unwrap();
+            } else {
+                write.write_all(reply.as_bytes()).await.unwrap();
+            }
+            line.clear();
         }
         commands
     });
@@ -64,12 +96,85 @@ async fn server(
     };
     let credentials =
         Credentials::new("bob@example.com", &SecretString::from("secret".to_owned())).unwrap();
-    let imap = MailClient::new(config, credentials)
-        .unwrap()
-        .connect_imap()
-        .await
-        .unwrap();
-    (imap, server)
+    let client = MailClient::new(config, credentials).unwrap();
+    let imap = client.connect_imap().await.unwrap();
+    (client, imap, server)
+}
+
+#[tokio::test]
+async fn save_draft_parses_appenduid_handles_untagged_and_refusals() {
+    let message = OutgoingMessage {
+        to: vec![EmailAddress::new("recipient@example.com")],
+        text_body: "Save, do not send.".to_owned(),
+        ..OutgoingMessage::default()
+    };
+    for (reply, expected) in [
+        ("+ Ready\r\nTAG OK [APPENDUID 42 7] done", Ok(Some((42, 7)))),
+        (
+            "* 1 EXISTS\r\n+ Ready\r\nTAG OK [APPENDUID 42 7] done",
+            Ok(Some((42, 7))),
+        ),
+        ("+ Ready\r\nTAG OK done", Ok(None)),
+        ("+ Ready\r\nTAG OK [APPENDUID 0 7] done", Ok(None)),
+        ("+ Ready\r\nTAG OK [APPENDUID 42 0] done", Ok(None)),
+        ("+ Ready\r\nTAG OK [APPENDUID 42 1:2] done", Ok(None)),
+        ("TAG NO [TRYCREATE] refused", Err("no")),
+        ("TAG BAD refused", Err("bad")),
+        ("TAG OK without continuation", Err("bad")),
+        ("", Err("eof")),
+    ] {
+        let (client, mut imap, server) = server_with_client("IMAP4rev1 UIDPLUS", move |command| {
+            if command.starts_with("LIST") {
+                Some("* LIST (\\Drafts) \"/\" \"Drafts\"\r\nTAG OK done".to_owned())
+            } else {
+                command.starts_with("APPEND").then(|| reply.to_owned())
+            }
+        })
+        .await;
+        let saved = client.save_draft(&mut imap, &message).await;
+        match expected {
+            Ok(uid) => {
+                let saved = saved.unwrap();
+                assert_eq!(saved.folder, "Drafts");
+                assert_eq!(saved.append_uid, uid, "{reply}");
+            }
+            Err(kind) => {
+                let error = saved.unwrap_err();
+                assert_eq!(error.leaves_session_usable(), kind == "no", "{error}");
+                match kind {
+                    "no" => {
+                        assert!(
+                            matches!(error, Error::Imap(async_imap::error::Error::No(ref text)) if text.contains("TryCreate"))
+                        );
+                        imap.noop().await.unwrap();
+                    }
+                    "bad" => assert!(matches!(
+                        error,
+                        Error::Imap(async_imap::error::Error::Bad(_))
+                    )),
+                    _ => assert!(matches!(
+                        error,
+                        Error::Imap(async_imap::error::Error::ConnectionLost)
+                    )),
+                }
+            }
+        }
+        drop(imap);
+        let commands = server.await.unwrap();
+        let append = commands
+            .iter()
+            .position(|command| command.starts_with("APPEND"))
+            .unwrap();
+        assert!(commands[append].starts_with("APPEND \"Drafts\" (\\Seen \\Draft) {"));
+        assert_eq!(
+            &commands[append + 1..],
+            if expected == Err("no") {
+                &["NOOP"][..]
+            } else {
+                &[]
+            }
+        );
+    }
 }
 
 #[tokio::test]

@@ -39,10 +39,10 @@ use crate::tools::format_address;
 use super::capabilities::SelectionFilterRules;
 use super::id::{self, GRAPH_PREFIX};
 use super::{
-    Change, Criteria, Cutoff, Fetched, FolderEntry, IdsFrom, MAY_HAVE_BEEN_SENT, MailboxError,
-    MailboxResult, Mode, NOTHING_LEFT, Outcome, Page, SENT_NO_ANSWER, Selected, Selector,
-    SendError, Status, Summary, TIME_EXHAUSTED, maybe_sent, provider_may_have_acted,
-    provider_outcomes, too_large_to_forward, unanswered,
+    Change, Criteria, Cutoff, DRAFT_UNCONFIRMED, Fetched, FolderEntry, IdsFrom, MAY_HAVE_BEEN_SENT,
+    MailboxError, MailboxResult, Mode, NOTHING_LEFT, Outcome, Page, SENT_NO_ANSWER, SavedDraft,
+    Selected, Selector, SendError, Status, Summary, TIME_EXHAUSTED, maybe_sent,
+    provider_may_have_acted, provider_outcomes, too_large_to_forward, unanswered,
 };
 
 /// Folders listed at most, against runaway hierarchies.
@@ -370,6 +370,7 @@ const UPLOAD_RANGE: usize = 12 * 320 * 1024;
 const SEND_MAIL_ROOM: usize = 2 * 1024 * 1024;
 const SEND_MAIL_LIMIT: usize = 4_000_000;
 const DRAFT_CANCELLED: &str = "the call ended before sending";
+const SAVE_CANCELLED: &str = "the call ended before the draft finished";
 
 fn needs_draft(text: &str, html: Option<&str>, files: &[OutgoingAttachment]) -> bool {
     let size = text.len() + html.map_or(0, str::len);
@@ -1295,8 +1296,6 @@ impl GraphMailbox {
         .await
     }
 
-    /// Keep draft cleanup alive if the MCP call goes away while a request is in flight.
-    /// The send's memory reservation, `room`, lasts as long as the task.
     async fn send_draft(
         &self,
         start: DraftStart,
@@ -1305,17 +1304,56 @@ impl GraphMailbox {
         request: CancellationToken,
         room: Option<SemaphorePermit<'static>>,
     ) -> MailboxResult<SentMessage> {
+        let draft = self.run_draft(start, message, true, request, room).await?;
+        Ok(Self::sent(
+            draft.internet_message_id.unwrap_or_default(),
+            options,
+        ))
+    }
+
+    async fn save_draft(
+        &self,
+        start: DraftStart,
+        message: OutgoingMessage,
+        request: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
+    ) -> MailboxResult<SavedDraft> {
+        let draft = self.run_draft(start, message, false, request, room).await?;
+        Ok(SavedDraft {
+            id: Some(id::provider_id(GRAPH_PREFIX, &draft.id)),
+            message_id: strip_brackets(draft.internet_message_id.as_deref()).unwrap_or_default(),
+            folder: "Drafts".to_owned(),
+        })
+    }
+
+    /// Keep draft cleanup alive if the MCP call goes away while a request is in flight.
+    /// The memory reservation, `room`, lasts as long as the task.
+    async fn run_draft(
+        &self,
+        start: DraftStart,
+        message: OutgoingMessage,
+        send: bool,
+        request: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
+    ) -> MailboxResult<Draft> {
         let mailbox = self.clone();
         let cancel = request.child_token();
         // Also cancel if the server drops the tool future rather than signalling rmcp.
         let _on_drop = cancel.clone().drop_guard();
         tokio::spawn(async move {
-            let sent = mailbox.draft_task(start, message, options, &cancel).await;
+            let result = mailbox.draft_task(start, message, send, &cancel).await;
             drop(room);
-            sent
+            result
         })
         .await
-        .map_err(|_| MailboxError::Message(MAY_HAVE_BEEN_SENT.to_owned()))?
+        .map_err(|_| {
+            let message = if send {
+                MAY_HAVE_BEEN_SENT
+            } else {
+                DRAFT_UNCONFIRMED
+            };
+            MailboxError::Message(message.to_owned())
+        })?
     }
 
     async fn draft_write(
@@ -1338,10 +1376,11 @@ impl GraphMailbox {
             .await
     }
 
-    async fn create_draft(
+    async fn post_draft(
         &self,
         start: &DraftStart,
         message: &OutgoingMessage,
+        send: bool,
     ) -> MailboxResult<Draft> {
         let (url, body, original) = match start {
             DraftStart::New => (self.url(&["messages"]), draft_body(message), None),
@@ -1369,26 +1408,47 @@ impl GraphMailbox {
             )
             .await;
         let answer = answer.map_err(|error| {
-            let draft = if provider_may_have_acted(&error) {
-                " A draft may remain in Drafts."
+            let uncertain = provider_may_have_acted(&error);
+            if send {
+                let draft = if uncertain {
+                    " A draft may remain in Drafts."
+                } else {
+                    ""
+                };
+                MailboxError::Message(format!(
+                    "Not sent: {}.{draft}",
+                    submit_error(&error, "Microsoft")
+                ))
+            } else if uncertain {
+                DRAFT_UNCONFIRMED.to_owned().into()
             } else {
-                ""
-            };
-            MailboxError::Message(format!(
-                "Not sent: {}.{draft}",
-                submit_error(&error, "Microsoft")
-            ))
+                match submit_error(&error, "Microsoft") {
+                    MailboxError::Deadline => MailboxError::Deadline,
+                    other => MailboxError::Message(format!("Draft not saved: {other}.")),
+                }
+            }
         })?;
+        let invalid = "Outlook did not return a valid draft id. Check Drafts before trying again.";
         let draft: Draft = self.api.parse(&answer).map_err(|_| {
-            "Not sent: Outlook did not return the draft's id. A draft may remain in Drafts."
-                .to_owned()
+            if send {
+                "Not sent: Outlook did not return the draft's id. A draft may remain in Drafts."
+            } else {
+                invalid
+            }
+            .to_owned()
         })?;
-        if draft.id.is_empty() || original == Some(draft.id.as_str()) {
-            return Err(
+        if draft.id.is_empty()
+            || original == Some(draft.id.as_str())
+            || id::parse_provider_id(GRAPH_PREFIX, &id::provider_id(GRAPH_PREFIX, &draft.id))
+                .is_none()
+        {
+            return Err(if send {
                 "Not sent: Outlook did not return a new draft id. A draft may remain in Drafts."
-                    .to_owned()
-                    .into(),
-            );
+            } else {
+                invalid
+            }
+            .to_owned()
+            .into());
         }
         Ok(draft)
     }
@@ -1397,23 +1457,27 @@ impl GraphMailbox {
         &self,
         start: DraftStart,
         message: OutgoingMessage,
-        options: SendOptions,
+        send: bool,
         cancel: &CancellationToken,
-    ) -> MailboxResult<SentMessage> {
+    ) -> MailboxResult<Draft> {
+        let cancelled = if send {
+            DRAFT_CANCELLED
+        } else {
+            SAVE_CANCELLED
+        };
+        let prefix = if send { "Not sent" } else { "Draft not saved" };
         if cancel.is_cancelled() {
-            return Err(DRAFT_CANCELLED.to_owned().into());
+            return Err(cancelled.to_owned().into());
         }
-        let draft = self.create_draft(&start, &message).await?;
-        let draft_id = draft.id;
-        let forward = matches!(start, DraftStart::Forward { .. });
-        let forward_body = forward.then_some(draft.body).flatten();
+        let mut draft = self.post_draft(&start, &message, send).await?;
+        let draft_id = &draft.id;
         let pre_send = async {
             match start {
                 DraftStart::New => {}
                 DraftStart::Reply(_) => {
                     self.draft_write(
                         Method::PATCH,
-                        &self.url(&["messages", &draft_id]),
+                        &self.url(&["messages", draft_id]),
                         &draft_body(&message),
                         || !cancel.is_cancelled(),
                     )
@@ -1421,14 +1485,14 @@ impl GraphMailbox {
                     .map_err(|err| submit_error(&err, "Microsoft"))?;
                     // Outlook can copy inline files from the original into the reply draft.
                     let files: Vec<IdOnly> = tokio::select! {
-                        () = cancel.cancelled() => return Err(DRAFT_CANCELLED.to_owned().into()),
-                        files = self.message_files(&draft_id, "id") => files?,
+                        () = cancel.cancelled() => return Err(cancelled.to_owned().into()),
+                        files = self.message_files(draft_id, "id") => files?,
                     };
                     for file in files {
                         self.api
                             .call_status(
                                 Method::DELETE,
-                                &self.url(&["messages", &draft_id, "attachments", &file.id]),
+                                &self.url(&["messages", draft_id, "attachments", &file.id]),
                                 &Self::headers(),
                                 Bytes::new(),
                                 || !cancel.is_cancelled(),
@@ -1438,32 +1502,29 @@ impl GraphMailbox {
                     }
                 }
                 DraftStart::Forward { files, .. } => {
-                    self.update_forward(&draft_id, forward_body, &message, files, cancel)
+                    self.update_forward(draft_id, draft.body.take(), &message, files, cancel)
                         .await?;
                 }
             }
-            self.add_files(&draft_id, message.attachments, cancel).await
+            self.add_files(draft_id, message.attachments, cancel, cancelled)
+                .await
         }
         .await;
         let error = match pre_send {
+            Ok(()) if !cancel.is_cancelled() && !send => return Ok(draft),
             Ok(()) if !cancel.is_cancelled() => {
                 match self
                     .api
                     .call_status(
                         Method::POST,
-                        &self.url(&["messages", &draft_id, "send"]),
+                        &self.url(&["messages", draft_id, "send"]),
                         &Self::headers(),
                         Bytes::new(),
                         || !cancel.is_cancelled(),
                     )
                     .await
                 {
-                    Ok(()) => {
-                        return Ok(Self::sent(
-                            draft.internet_message_id.unwrap_or_default(),
-                            options,
-                        ));
-                    }
+                    Ok(()) => return Ok(draft),
                     // A gateway can fail after Exchange accepts the send. The immutable id
                     // could now name the Sent copy, so do not delete it or retry.
                     Err(error) if provider_may_have_acted(&error) => {
@@ -1472,15 +1533,15 @@ impl GraphMailbox {
                     Err(error) => submit_error(&error, "Microsoft"),
                 }
             }
-            Ok(()) => DRAFT_CANCELLED.to_owned().into(),
+            Ok(()) => cancelled.to_owned().into(),
             Err(error) => error,
         };
-        let cleanup = if self.permanent_delete(&draft_id).await.is_ok() {
+        let cleanup = if self.permanent_delete(draft_id).await.is_ok() {
             ""
         } else {
             " A draft may remain in Drafts."
         };
-        Err(format!("Not sent: {error}.{cleanup}").into())
+        Err(format!("{prefix}: {error}.{cleanup}").into())
     }
 
     async fn update_forward(
@@ -1546,10 +1607,11 @@ impl GraphMailbox {
         id: &str,
         files: Vec<OutgoingAttachment>,
         cancel: &CancellationToken,
+        cancelled: &str,
     ) -> MailboxResult<()> {
         for file in files {
             if cancel.is_cancelled() {
-                return Err(DRAFT_CANCELLED.to_owned().into());
+                return Err(cancelled.to_owned().into());
             }
             if file.content.len() >= GRAPH_NEW_FILE_LIMIT {
                 let name = forward::display_file(&file.filename);
@@ -1660,10 +1722,7 @@ impl GraphMailbox {
             message.html_body.as_deref(),
             &message.attachments,
         ) {
-            let message = message.to_mut();
-            let files = std::mem::take(&mut message.attachments);
-            drop(mime::compose(&self.from(), message)?);
-            message.attachments = files;
+            self.validate_headers(message.to_mut())?;
         } else if let Some(sent) = self
             .submit_if_fits(mime::compose(&self.from(), &message)?, options)
             .await?
@@ -1700,11 +1759,7 @@ impl GraphMailbox {
         room: Option<SemaphorePermit<'static>>,
     ) -> MailboxResult<SentMessage> {
         let id = Self::message_id(selector)?;
-        let raw = self.raw(id).await?;
-        let original = mime::parse_headers(&raw).ok_or_else(|| {
-            MailboxError::Message("the original message could not be parsed".to_owned())
-        })?;
-        drop(raw);
+        let original = self.fetch_original(id).await?;
         let large = needs_draft(
             &reply.text_body,
             reply.html_body.as_deref(),
@@ -1720,14 +1775,7 @@ impl GraphMailbox {
         {
             return Ok(sent);
         }
-        let mut reply = reply.into_owned();
-        let files = std::mem::take(&mut reply.attachments);
-        let mut message = mime::reply_message(&original, &self.email, &reply)?;
-        drop(reply);
-        if large {
-            drop(mime::compose(&self.from(), &message)?);
-        }
-        message.attachments = files;
+        let message = self.prepare_reply_draft(&original, reply.into_owned(), large)?;
         self.send_draft(
             DraftStart::Reply(id.to_owned()),
             message,
@@ -1737,6 +1785,92 @@ impl GraphMailbox {
         )
         .await
     }
+
+    fn prepare_reply_draft(
+        &self,
+        original: &postkeep_mail::MessageHeaders,
+        mut reply: Reply,
+        validate: bool,
+    ) -> MailboxResult<OutgoingMessage> {
+        let files = std::mem::take(&mut reply.attachments);
+        let mut message = mime::reply_message(original, &self.email, &reply)?;
+        drop(reply);
+        if validate {
+            self.validate_headers(&mut message)?;
+        }
+        message.attachments = files;
+        Ok(message)
+    }
+
+    fn validate_headers(&self, message: &mut OutgoingMessage) -> MailboxResult<()> {
+        let files = std::mem::take(&mut message.attachments);
+        let composed = mime::compose(&self.from(), message);
+        message.attachments = files;
+        composed.map(drop).map_err(Into::into)
+    }
+
+    async fn fetch_original(&self, id: &str) -> MailboxResult<postkeep_mail::MessageHeaders> {
+        let raw = self.raw(id).await?;
+        mime::parse_headers(&raw).ok_or_else(|| {
+            MailboxError::Message("the original message could not be parsed".to_owned())
+        })
+    }
+
+    /// Saves a new message to Drafts without sending it.
+    pub async fn create_draft(&self, message: &OutgoingMessage) -> MailboxResult<SavedDraft> {
+        self.create_draft_with_cancel(Cow::Borrowed(message), CancellationToken::new(), None)
+            .await
+    }
+
+    pub(crate) async fn create_draft_with_cancel(
+        &self,
+        mut message: Cow<'_, OutgoingMessage>,
+        cancel: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
+    ) -> MailboxResult<SavedDraft> {
+        self.validate_headers(message.to_mut())?;
+        self.save_draft(DraftStart::New, message.into_owned(), cancel, room)
+            .await
+    }
+
+    /// Saves a threaded reply to Drafts without sending it.
+    pub async fn create_reply_draft(
+        &self,
+        selector: &Selector,
+        reply: &Reply,
+    ) -> MailboxResult<SavedDraft> {
+        self.create_reply_draft_with_cancel(
+            selector,
+            Cow::Borrowed(reply),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_reply_draft_with_cancel(
+        &self,
+        selector: &Selector,
+        reply: Cow<'_, Reply>,
+        cancel: CancellationToken,
+        room: Option<SemaphorePermit<'static>>,
+    ) -> MailboxResult<SavedDraft> {
+        let id = Self::message_id(selector)?;
+        let original = self.fetch_original(id).await?;
+        let message = self.prepare_reply_draft(&original, reply.into_owned(), true)?;
+        self.save_draft(DraftStart::Reply(id.to_owned()), message, cancel, room)
+            .await
+    }
+}
+
+fn strip_brackets(id: Option<&str>) -> Option<String> {
+    let id = id?.trim();
+    Some(
+        id.strip_prefix('<')
+            .and_then(|inner| inner.strip_suffix('>'))
+            .unwrap_or(id)
+            .to_owned(),
+    )
 }
 
 fn draft_body(message: &OutgoingMessage) -> Value {
@@ -2042,6 +2176,19 @@ mod tests {
 
     fn date(value: &str) -> Option<chrono::NaiveDate> {
         chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
+    }
+
+    #[test]
+    fn strips_angle_brackets_from_internet_message_id() {
+        assert_eq!(
+            strip_brackets(Some("<draft@example.com>")).as_deref(),
+            Some("draft@example.com")
+        );
+        assert_eq!(
+            strip_brackets(Some("draft@example.com")).as_deref(),
+            Some("draft@example.com")
+        );
+        assert_eq!(strip_brackets(None), None);
     }
 
     #[test]

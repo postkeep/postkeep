@@ -108,7 +108,7 @@ doesn't ask.
 | `download_attachment` | Downloads one attachment of a message: images as images, text as text, other files as base64, or any file as base64 with `base64: true`, up to 3 MiB. It stays unread. |
 | `send_message` | Sends a new plain-text email with any attachments or forwards a message with its attachments. Saves a copy to Sent by default. |
 | `reply_to_message` | Replies, or replies to all, with any attachments, and keeps the thread together. |
-| `create_draft` | Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it. Not available for Outlook or for Gmail with Sign in with Google. |
+| `create_draft` | Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it. |
 | `update_flags` | Marks a message read or unread, flagged or unflagged. |
 | `move_message` | Moves a message to another folder. |
 | `delete_message` | Moves a message to the trash, or deletes it for good when you ask. |

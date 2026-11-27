@@ -7,9 +7,13 @@ use async_imap::imap_proto::rfc4315::UidSetMember;
 use async_imap::imap_proto::{AttributeValue, Response, ResponseCode, Status};
 use async_imap::types::{Capabilities, Fetch, Flag as ImapFlag};
 use futures::TryStreamExt;
+use tokio::io::AsyncWriteExt;
 
 use super::folders::{self, SpecialUse, same_folder};
-use super::search::{UID_SET_MAX, run_until_done, search_uids, uid_chunks, uid_set, uid_sets};
+use super::search::{
+    UID_SET_MAX, done_error, read_until_done, run_until_done, search_uids, uid_chunks, uid_set,
+    uid_sets,
+};
 use super::{Conn, select};
 use crate::query::{self, Literals};
 use crate::{
@@ -430,8 +434,7 @@ pub(super) async fn save_sent_copy(
     if !conn.uid_search(&criteria).await?.is_empty() {
         return Ok(SentCopy::AlreadyPresent { folder });
     }
-    conn.append(utf7::encode(&folder), Some("(\\Seen)"), None, raw)
-        .await?;
+    append(conn, &folder, "\\Seen", raw).await?;
     Ok(SentCopy::Saved { folder })
 }
 
@@ -439,11 +442,45 @@ pub(super) async fn save_draft(
     conn: &mut Conn,
     drafts_folder: Option<&str>,
     raw: &[u8],
-) -> Result<String> {
+) -> Result<(String, Option<(u32, Uid)>)> {
     let folder = folders::resolve(conn, SpecialUse::Drafts, drafts_folder).await?;
-    conn.append(utf7::encode(&folder), Some("(\\Seen \\Draft)"), None, raw)
+    let append_uid = append(conn, &folder, "\\Seen \\Draft", raw).await?;
+    Ok((folder, append_uid))
+}
+
+async fn append(
+    conn: &mut Conn,
+    folder: &str,
+    flags: &str,
+    raw: &[u8],
+) -> Result<Option<(u32, Uid)>> {
+    let mailbox = query::imap_string(&utf7::encode(folder), Literals::Unsupported)?;
+    let tag = conn
+        .run_command(&format!("APPEND {mailbox} ({flags}) {{{}}}", raw.len()))
         .await?;
-    Ok(folder)
+    loop {
+        let response = conn
+            .read_response()
+            .await?
+            .ok_or(async_imap::error::Error::ConnectionLost)?;
+        match response.parsed() {
+            Response::Continue { .. } => break,
+            Response::Done {
+                tag: done,
+                status,
+                outcome,
+            } if *done == tag => {
+                return Err(done_error(status, outcome));
+            }
+            _ => {}
+        }
+    }
+    let stream = conn.get_mut();
+    stream.write_all(raw).await?;
+    stream.write_all(b"\r\n").await?;
+    stream.flush().await?;
+    let code = read_until_done(conn, &tag, |_| {}).await?;
+    Ok(append_uid(code.as_ref()))
 }
 
 /// Moves existing UIDs to `destination`, pairing COPYUIDs across confirmed chunks.
@@ -553,6 +590,19 @@ fn expand_uids(set: &[UidSetMember]) -> Vec<Uid> {
         })
         .take(UID_SET_MAX + 1)
         .collect()
+}
+
+fn append_uid(code: Option<&ResponseCode<'_>>) -> Option<(u32, Uid)> {
+    let Some(ResponseCode::AppendUid(validity, set)) = code else {
+        return None;
+    };
+    if *validity == 0 {
+        return None;
+    }
+    match expand_uids(set).as_slice() {
+        [uid] if *uid != 0 => Some((*validity, *uid)),
+        _ => None,
+    }
 }
 
 /// COPYUID sets pair in their listed order, not in the request's order.
@@ -667,6 +717,26 @@ fn not_found(folder: &str, uid: Uid) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_valid_appenduid_and_rejects_zero_or_multi_uid() {
+        for (validity, set, expected) in [
+            (42, vec![7.into()], Some((42, 7))),
+            (42, vec![(5..=5).into()], Some((42, 5))),
+            (0, vec![7.into()], None),
+            (42, vec![0.into()], None),
+            (42, vec![(1..=2).into()], None),
+            (42, vec![1.into(), 2.into()], None),
+            (42, vec![], None),
+        ] {
+            assert_eq!(
+                append_uid(Some(&ResponseCode::AppendUid(validity, set))),
+                expected
+            );
+        }
+        assert_eq!(append_uid(Some(&ResponseCode::TryCreate)), None);
+        assert_eq!(append_uid(None), None);
+    }
 
     #[test]
     fn pairs_copyuid_sets_in_the_responses_order() {

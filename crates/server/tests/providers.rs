@@ -2709,9 +2709,91 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         )
         .await;
     assert!(err.contains("not a message id"), "{err}");
-    let draft = json!({ "to": ["someone@example.com"], "subject": "s", "body": "b" });
-    let err = harness.call_err(&token, "create_draft", draft).await;
-    assert!(err.contains("isn't available"), "{err}");
+    let new_draft = "/graph/v1.0/me/messages";
+    let draft_start = |route: &str| {
+        Mock::given(method("POST"))
+            .and(path(route))
+            .and(has_header("prefer", IMMUTABLE))
+    };
+    draft_start(new_draft)
+        .and(body_json(json!({
+            "subject": "Save only", "body": {"contentType": "text", "content": "Keep me"},
+            "toRecipients": [{"emailAddress": {"address": "someone@example.com"}}],
+            "ccRecipients": [], "bccRecipients": [],
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "new-draft", "internetMessageId": null
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
+    let draft = harness
+        .call_ok(
+            &token,
+            "create_draft",
+            json!({
+                "to": ["someone@example.com"], "subject": "Save only", "body": "Keep me"
+            }),
+        )
+        .await;
+    assert_eq!(
+        draft,
+        json!({ "id": "graph.new-draft", "message_id": "", "folder": "Drafts" })
+    );
+
+    let reply_draft = "/graph/v1.0/me/messages/AAMk-1/createReply";
+    for (mock, route, id, args) in [
+        (
+            draft_start(new_draft).and(body_string_contains("\"subject\":\"Malformed id\"")),
+            new_draft,
+            "../bad",
+            json!({"to": ["someone@example.com"], "subject": "Malformed id"}),
+        ),
+        (
+            draft_start(reply_draft).and(body_json(json!({}))),
+            reply_draft,
+            "AAMk-1",
+            json!({"id": "graph.AAMk-1"}),
+        ),
+    ] {
+        let _draft = mock
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": id })))
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let before = server.received_requests().await.unwrap().len();
+        let error = harness.call_err(&token, "create_draft", args).await;
+        assert_eq!(
+            error,
+            "Outlook did not return a valid draft id. Check Drafts before trying again."
+        );
+        let requests = server.received_requests().await.unwrap();
+        let writes: Vec<_> = requests[before..]
+            .iter()
+            .filter(|r| r.method != "GET")
+            .map(|r| (r.method.as_str(), r.url.path()))
+            .collect();
+        assert_eq!(writes, [("POST", route)]);
+    }
+
+    draft_start(new_draft)
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(server)
+        .await;
+    let error = harness
+        .call_err(
+            &token,
+            "create_draft",
+            json!({
+                "to": ["someone@example.com"], "subject": "Unconfirmed"
+            }),
+        )
+        .await;
+    assert_eq!(
+        error,
+        "The provider did not confirm the draft. Check Drafts before trying again."
+    );
 
     let caps = harness
         .call_ok(&token, GET_MAILBOX_CAPABILITIES, json!({}))
@@ -2724,7 +2806,7 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
     );
     assert_eq!(caps["operations"]["permanent_delete_trash_only"], false);
     assert_eq!(caps["operations"]["create_folder"], true);
-    assert_eq!(caps["operations"]["create_draft"], false);
+    assert_eq!(caps["operations"]["create_draft"], true);
     assert_eq!(caps["webhooks_available"], true);
     assert_eq!(caps["attachments"]["upload_enabled"], true);
 }
@@ -3054,10 +3136,20 @@ async fn mock_google_sign_in(server: &MockServer) {
         .await;
 }
 
-fn gmail_send() -> wiremock::MockBuilder {
+fn gmail_upload(route: &str) -> wiremock::MockBuilder {
     Mock::given(method("POST"))
-        .and(path("/gmail/upload/gmail/v1/users/me/messages/send"))
+        .and(path(route))
         .and(query_param("uploadType", "multipart"))
+}
+
+fn gmail_send() -> wiremock::MockBuilder {
+    gmail_upload("/gmail/upload/gmail/v1/users/me/messages/send")
+}
+
+const GMAIL_DRAFT_UPLOAD: &str = "/gmail/upload/gmail/v1/users/me/drafts";
+
+fn gmail_draft() -> wiremock::MockBuilder {
+    gmail_upload(GMAIL_DRAFT_UPLOAD)
 }
 
 /// Matches Gmail upload metadata and checks the raw MIME part for every needle.
@@ -3093,6 +3185,11 @@ impl Match for RawContains {
         let expected = self
             .1
             .map_or_else(|| json!({}), |id| json!({"threadId": id}));
+        let expected = if request.url.path() == GMAIL_DRAFT_UPLOAD {
+            json!({ "message": expected })
+        } else {
+            expected
+        };
         serde_json::from_str::<Value>(&metadata).is_ok_and(|metadata| metadata == expected)
             && self.0.iter().all(|needle| raw.contains(needle))
     }
@@ -4306,9 +4403,115 @@ async fn gmail_accounts_work_through_the_gmail_api() {
         .call_err(&token, "get_message", json!({ "id": "graph.AAMk-1" }))
         .await;
     assert!(err.contains("not a message id"), "{err}");
-    let draft = json!({ "id": "gmail.18c1", "body": "b" });
-    let err = harness.call_err(&token, "create_draft", draft).await;
-    assert!(err.contains("isn't available"), "{err}");
+    gmail_draft()
+        .and(RawContains(
+            vec![
+                "Subject: Save only",
+                "Bcc: hidden@example.org",
+                FILE_NEEDLES[1],
+            ],
+            None,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "r-draft-1", "message": {"id": "18d2"}
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
+    let draft = harness
+        .call_ok(&token, "create_draft", send_with_files("Save only"))
+        .await;
+    assert_eq!(draft["id"], "gmail.18d2");
+    assert_eq!(draft["folder"], "Drafts");
+    let message_id = draft["message_id"].as_str().unwrap();
+    assert!(message_id.ends_with("@example.com") && !message_id.contains(['<', '>']));
+
+    let raw = format!("Message-ID: <{message_id}>\r\nSubject: Save only\r\n\r\nDraft body\r\n");
+    Mock::given(method("GET"))
+        .and(path("/gmail/gmail/v1/users/me/messages/18d2"))
+        .and(query_param("format", "raw"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "18d2", "labelIds": ["DRAFT"],
+            "raw": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
+    let readback = harness
+        .call_ok(&token, "get_message", json!({ "id": draft["id"] }))
+        .await;
+    assert_eq!(readback["id"], "gmail.18d2");
+    assert_eq!(readback["subject"], "Save only");
+
+    gmail_draft()
+        .and(RawContains(
+            vec![
+                "Subject: Re: Plans",
+                "In-Reply-To: <orig@example.net>",
+                "References: <orig@example.net>",
+            ],
+            Some("t1"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "r-draft-2", "message": {"id": "18d3"}
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
+    let reply = harness
+        .call_ok(
+            &token,
+            "create_draft",
+            json!({
+                "id": "gmail.18c1", "reply_all": true, "body": "Save this reply"
+            }),
+        )
+        .await;
+    assert_eq!(reply["id"], "gmail.18d3");
+    assert_eq!(reply["folder"], "Drafts");
+
+    let invalid = "Google did not return a valid draft id. Check Drafts before trying again.";
+    let unconfirmed = "The provider did not confirm the draft. Check Drafts before trying again.";
+    for (response, message) in [
+        (
+            ResponseTemplate::new(200).set_body_string("not JSON"),
+            invalid,
+        ),
+        (
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "r-draft-3" })),
+            invalid,
+        ),
+        (
+            ResponseTemplate::new(200).set_body_json(json!({ "message": {} })),
+            invalid,
+        ),
+        (
+            ResponseTemplate::new(200).set_body_json(json!({ "message": {"id": ""} })),
+            invalid,
+        ),
+        (
+            ResponseTemplate::new(200).set_body_json(json!({ "message": {"id": "../bad"} })),
+            invalid,
+        ),
+        (ResponseTemplate::new(503), unconfirmed),
+    ] {
+        let _draft = gmail_draft()
+            .and(RawContains(vec!["Subject: Unconfirmed"], None))
+            .respond_with(response)
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let error = harness
+            .call_err(
+                &token,
+                "create_draft",
+                json!({
+                    "to": ["someone@example.com"], "subject": "Unconfirmed"
+                }),
+            )
+            .await;
+        assert_eq!(error, message);
+    }
 
     let caps = harness
         .call_ok(&token, GET_MAILBOX_CAPABILITIES, json!({}))
@@ -4318,7 +4521,7 @@ async fn gmail_accounts_work_through_the_gmail_api() {
     assert_eq!(caps["operations"]["permanent_delete"], false);
     assert_eq!(caps["operations"]["permanent_delete_trash_only"], false);
     assert_eq!(caps["operations"]["create_folder"], true);
-    assert_eq!(caps["operations"]["create_draft"], false);
+    assert_eq!(caps["operations"]["create_draft"], true);
     assert_eq!(caps["webhooks_available"], true);
     assert_eq!(caps["attachments"]["upload_enabled"], true);
 }
@@ -5730,90 +5933,112 @@ fn outlook_next(range: &str) -> ResponseTemplate {
 }
 
 #[tokio::test]
-async fn outlook_sends_a_new_draft_with_small_and_large_files() {
-    let (harness, token, mut args) = outlook_new_mail().await;
-    let server = &harness.server;
-    args["attachments"]
-        .as_array_mut()
-        .unwrap()
-        .insert(0, json!({"filename": "small.txt", "text": "small"}));
-    outlook_new_draft(server).await;
-    let attachments = format!("{OUTLOOK_DRAFT}/attachments");
-    Mock::given(method("POST"))
-        .and(path(&attachments))
-        .and(body_json(
-            json!({"@odata.type": "#microsoft.graph.fileAttachment", "name": "small.txt",
+async fn outlook_sends_or_saves_a_new_draft_with_small_and_large_files() {
+    for tool in ["send_message", "create_draft"] {
+        let (harness, token, mut args) = outlook_new_mail().await;
+        let server = &harness.server;
+        args["attachments"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!({"filename": "small.txt", "text": "small"}));
+        outlook_new_draft(server).await;
+        let attachments = format!("{OUTLOOK_DRAFT}/attachments");
+        Mock::given(method("POST"))
+            .and(path(&attachments))
+            .and(body_json(
+                json!({"@odata.type": "#microsoft.graph.fileAttachment", "name": "small.txt",
             "contentType": "text/plain; charset=utf-8", "contentBytes": "c21hbGw="}),
-        ))
-        .respond_with(ResponseTemplate::new(201))
-        .expect(1)
-        .mount(server)
+            ))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(server)
+            .await;
+        outlook_session(
+            server,
+            "big.txt",
+            OUTLOOK_LARGE_FILE,
+            &outlook_upload_url(server),
+        )
         .await;
-    outlook_session(
-        server,
-        "big.txt",
-        OUTLOOK_LARGE_FILE,
-        &outlook_upload_url(server),
-    )
-    .await;
-    outlook_range(
-        server,
-        0..OUTLOOK_CHUNK,
-        OUTLOOK_LARGE_FILE,
-        b'x',
-        outlook_next(&OUTLOOK_CHUNK.to_string()),
-    )
-    .await;
-    outlook_range(
-        server,
-        OUTLOOK_CHUNK..OUTLOOK_LARGE_FILE,
-        OUTLOOK_LARGE_FILE,
-        b'y',
-        ResponseTemplate::new(201)
-            .append_header("Location", format!("{}/unused-location", server.uri())),
-    )
-    .await;
-    outlook_draft_end(server, Some(202), None).await;
-    let sent = harness.call_ok(&token, "send_message", args).await;
-    assert_eq!(sent["message_id"], "<draft@example.org>");
-    let requests = server.received_requests().await.unwrap();
-    let draft_writes: Vec<_> = requests
-        .iter()
-        .filter_map(|req| {
-            let path = req.url.path();
-            (req.method != "GET"
-                && (path.starts_with("/graph/v1.0/me/messages") || path == OUTLOOK_UPLOAD))
-                .then_some(path)
-        })
-        .collect();
-    assert_eq!(
-        draft_writes,
-        [
+        outlook_range(
+            server,
+            0..OUTLOOK_CHUNK,
+            OUTLOOK_LARGE_FILE,
+            b'x',
+            outlook_next(&OUTLOOK_CHUNK.to_string()),
+        )
+        .await;
+        outlook_range(
+            server,
+            OUTLOOK_CHUNK..OUTLOOK_LARGE_FILE,
+            OUTLOOK_LARGE_FILE,
+            b'y',
+            ResponseTemplate::new(201)
+                .append_header("Location", format!("{}/unused-location", server.uri())),
+        )
+        .await;
+        let send = tool == "send_message";
+        if send {
+            outlook_draft_end(server, Some(202), None).await;
+        }
+        let result = harness.call_ok(&token, tool, args).await;
+        if send {
+            assert_eq!(result["message_id"], "<draft@example.org>");
+        } else {
+            assert_eq!(
+                result,
+                json!({"id": "graph.draft", "message_id": "draft@example.org", "folder": "Drafts"})
+            );
+        }
+        let requests = server.received_requests().await.unwrap();
+        let draft_writes: Vec<_> = requests
+            .iter()
+            .filter_map(|req| {
+                let path = req.url.path();
+                (req.method != "GET"
+                    && (path.starts_with("/graph/v1.0/me/messages") || path == OUTLOOK_UPLOAD))
+                    .then_some(path)
+            })
+            .collect();
+        let session = format!("{attachments}/createUploadSession");
+        let send_path = format!("{OUTLOOK_DRAFT}/send");
+        let mut expected = vec![
             "/graph/v1.0/me/messages",
             &attachments,
-            &format!("{attachments}/createUploadSession"),
+            &session,
             OUTLOOK_UPLOAD,
             OUTLOOK_UPLOAD,
-            &format!("{OUTLOOK_DRAFT}/send")
-        ]
-    );
-    assert!(
-        !requests
-            .iter()
-            .any(|req| req.url.path() == "/unused-location")
-    );
-    server.verify().await;
+        ];
+        if send {
+            expected.push(&send_path);
+        }
+        assert_eq!(draft_writes, expected);
+        assert!(
+            !requests
+                .iter()
+                .any(|req| req.url.path() == "/unused-location")
+        );
+        server.verify().await;
+    }
 }
 
 #[tokio::test]
 async fn outlook_large_reply_all_keeps_the_thread_and_resolved_recipients() {
+    for tool in ["reply_to_message", "create_draft"] {
+        outlook_reply_all_draft(tool).await;
+    }
+}
+
+async fn outlook_reply_all_draft(tool: &str) {
     let harness = outlook_large_harness().await;
     let server = &harness.server;
     mock_microsoft_sign_in(server).await;
     let token = harness.sign_in("microsoft").await;
     let reply = "x".repeat(2 * 1024 * 1024 + 1);
+    let original = "/graph/v1.0/me/messages/original/$value";
+    let create = "/graph/v1.0/me/messages/original/createReply";
     Mock::given(method("GET"))
-        .and(path("/graph/v1.0/me/messages/original/$value"))
+        .and(path(original))
         .respond_with(ResponseTemplate::new(200).set_body_string(concat!(
             "From: sender@example.org\r\nReply-To: replies@example.org\r\n",
             "To: person@example.com, other@example.org\r\nSubject: Files\r\n",
@@ -5822,12 +6047,7 @@ async fn outlook_large_reply_all_keeps_the_thread_and_resolved_recipients() {
         .expect(1)
         .mount(server)
         .await;
-    outlook_draft_start(
-        server,
-        "/graph/v1.0/me/messages/original/createReply",
-        json!({}),
-    )
-    .await;
+    outlook_draft_start(server, create, json!({})).await;
     let attachments = format!("{OUTLOOK_DRAFT}/attachments");
     let copied = format!("{attachments}/copied-inline");
     Mock::given(method("GET"))
@@ -5864,33 +6084,48 @@ async fn outlook_large_reply_all_keeps_the_thread_and_resolved_recipients() {
         })))
         .respond_with(ResponseTemplate::new(200))
         .expect(1).mount(server).await;
-    outlook_draft_end(server, Some(202), None).await;
-    let sent = harness
+    let send = tool == "reply_to_message";
+    if send {
+        outlook_draft_end(server, Some(202), None).await;
+    }
+    let saved = harness
         .call_ok(
             &token,
-            "reply_to_message",
+            tool,
             json!({"id": "graph.original", "reply_all": true, "body": reply,
                 "attachments": [{"filename": "mine.txt", "text": "mine"}]}),
         )
         .await;
-    assert_eq!(sent["message_id"], "<draft@example.org>");
-    let submit_path = format!("{OUTLOOK_DRAFT}/send");
+    if send {
+        assert_eq!(saved["message_id"], "<draft@example.org>");
+    } else {
+        assert_eq!(
+            saved,
+            json!({"id": "graph.draft", "message_id": "draft@example.org", "folder": "Drafts"})
+        );
+    }
     let requests = server.received_requests().await.unwrap();
     let draft_requests: Vec<_> = requests
         .iter()
-        .filter(|req| req.url.path().starts_with(OUTLOOK_DRAFT))
+        .filter(|req| {
+            let path = req.url.path();
+            path.starts_with("/graph/v1.0/me/messages") || path == "/graph/v1.0/me/sendMail"
+        })
         .map(|req| (req.method.as_str(), req.url.path()))
         .collect();
-    assert_eq!(
-        draft_requests,
-        [
-            ("PATCH", OUTLOOK_DRAFT),
-            ("GET", attachments.as_str()),
-            ("DELETE", copied.as_str()),
-            ("POST", attachments.as_str()),
-            ("POST", submit_path.as_str()),
-        ]
-    );
+    let submit = format!("{OUTLOOK_DRAFT}/send");
+    let mut expected = vec![
+        ("GET", original),
+        ("POST", create),
+        ("PATCH", OUTLOOK_DRAFT),
+        ("GET", attachments.as_str()),
+        ("DELETE", copied.as_str()),
+        ("POST", attachments.as_str()),
+    ];
+    if send {
+        expected.push(("POST", &submit));
+    }
+    assert_eq!(draft_requests, expected);
     server.verify().await;
 }
 
@@ -5950,60 +6185,67 @@ async fn outlook_refuses_unconfirmed_range_receipts() {
 
 #[tokio::test]
 async fn outlook_deletes_the_draft_when_the_call_disconnects_during_upload() {
-    let (harness, token, args) = outlook_new_mail().await;
-    let server = &harness.server;
-    outlook_new_draft(server).await;
-    outlook_session(
-        server,
-        "big.txt",
-        OUTLOOK_LARGE_FILE,
-        &outlook_upload_url(server),
-    )
-    .await;
-    let uploading = CancellationToken::new();
-    let uploading_reply = uploading.clone();
-    outlook_range(
-        server,
-        0..OUTLOOK_CHUNK,
-        OUTLOOK_LARGE_FILE,
-        b'x',
-        move |_: &wiremock::Request| {
-            uploading_reply.cancel();
-            outlook_next(&OUTLOOK_CHUNK.to_string()).set_delay(Duration::from_secs(1))
-        },
-    )
-    .await;
-    let deleted = CancellationToken::new();
-    outlook_draft_end(server, None, Some(deleted.clone())).await;
-    disconnect_outlook_call(
-        harness.call(&token, "send_message", args),
-        &uploading,
-        &deleted,
-        "a range",
-    )
-    .await;
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.iter().filter(|r| r.method == "PUT").count(), 1);
-    server.verify().await;
+    for tool in ["send_message", "create_draft"] {
+        let (harness, token, args) = outlook_new_mail().await;
+        let server = &harness.server;
+        outlook_new_draft(server).await;
+        outlook_session(
+            server,
+            "big.txt",
+            OUTLOOK_LARGE_FILE,
+            &outlook_upload_url(server),
+        )
+        .await;
+        let uploading = CancellationToken::new();
+        let uploading_reply = uploading.clone();
+        outlook_range(
+            server,
+            0..OUTLOOK_CHUNK,
+            OUTLOOK_LARGE_FILE,
+            b'x',
+            move |_: &wiremock::Request| {
+                uploading_reply.cancel();
+                outlook_next(&OUTLOOK_CHUNK.to_string()).set_delay(Duration::from_secs(1))
+            },
+        )
+        .await;
+        let deleted = CancellationToken::new();
+        outlook_draft_end(server, None, Some(deleted.clone())).await;
+        disconnect_outlook_call(
+            harness.call(&token, tool, args),
+            &uploading,
+            &deleted,
+            "a range",
+        )
+        .await;
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.iter().filter(|r| r.method == "PUT").count(), 1);
+        server.verify().await;
+    }
 }
 
 #[tokio::test]
 async fn outlook_refuses_an_upload_url_on_another_host() {
-    let (harness, token, args) = outlook_new_mail().await;
-    let server = &harness.server;
-    let other = MockServer::start().await;
-    let mut url = url::Url::parse(&outlook_upload_url(&other)).unwrap();
-    url.set_host(Some("localhost")).unwrap();
-    outlook_new_draft(server).await;
-    outlook_session(server, "big.txt", OUTLOOK_LARGE_FILE, url.as_str()).await;
-    outlook_draft_end(server, None, None).await;
-    let error = harness.call_err(&token, "send_message", args).await;
-    assert!(
-        error.starts_with("Not sent: Outlook did not confirm the file"),
-        "{error}"
-    );
-    assert!(other.received_requests().await.unwrap().is_empty());
-    server.verify().await;
+    for (tool, prefix) in [
+        ("send_message", "Not sent"),
+        ("create_draft", "Draft not saved"),
+    ] {
+        let (harness, token, args) = outlook_new_mail().await;
+        let server = &harness.server;
+        let other = MockServer::start().await;
+        let mut url = url::Url::parse(&outlook_upload_url(&other)).unwrap();
+        url.set_host(Some("localhost")).unwrap();
+        outlook_new_draft(server).await;
+        outlook_session(server, "big.txt", OUTLOOK_LARGE_FILE, url.as_str()).await;
+        outlook_draft_end(server, None, None).await;
+        let error = harness.call_err(&token, tool, args).await;
+        assert!(
+            error.starts_with(&format!("{prefix}: Outlook did not confirm the file")),
+            "{error}"
+        );
+        assert!(other.received_requests().await.unwrap().is_empty());
+        server.verify().await;
+    }
 }
 
 /// As in `request_log.rs`, don't cache interest from a different test's
@@ -6059,16 +6301,18 @@ async fn outlook_keeps_the_upload_token_out_of_errors_and_logs() {
 
 #[tokio::test]
 async fn outlook_checks_the_headers_of_large_mail_before_writing_a_draft() {
-    let (harness, token, mut args) = outlook_new_mail().await;
-    let server = &harness.server;
-    let before = server.received_requests().await.unwrap().len();
-    args["subject"] = json!("First line\r\nsecond line");
-    let error = harness.call_err(&token, "send_message", args).await;
-    assert!(
-        error.contains("subject must not contain line breaks"),
-        "{error}"
-    );
-    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    for tool in ["send_message", "create_draft"] {
+        let (harness, token, mut args) = outlook_new_mail().await;
+        let server = &harness.server;
+        let before = server.received_requests().await.unwrap().len();
+        args["subject"] = json!("First line\r\nsecond line");
+        let error = harness.call_err(&token, tool, args).await;
+        assert!(
+            error.contains("subject must not contain line breaks"),
+            "{error}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+    }
 }
 
 /// A Gmail harness, signed in, whose sends succeed: its MCP token.
@@ -6397,11 +6641,14 @@ async fn only_its_own_app_attaches_an_upload_once_its_file_is_in() {
         ),
         "{error}"
     );
-    // Gmail saves no draft here, so the upload stays for a send.
-    let draft = harness
-        .call_err(&token, "create_draft", attach(&id, "a.pdf"))
-        .await;
-    assert!(draft.contains("Gmail"), "{draft}");
+    // A refusal before using_uploads leaves the file for a send.
+    let mut invalid = attach(&id, "a.pdf");
+    invalid["reply_all"] = json!(true);
+    let error = harness.call_err(&token, "create_draft", invalid).await;
+    assert!(
+        error.starts_with("reply_all can only be set when drafting a reply"),
+        "{error}"
+    );
     assert_eq!(sends(&harness.server).await, 0);
     let sent = harness
         .call_ok(&token, "send_message", attach(&id, "a.pdf"))
@@ -6411,6 +6658,32 @@ async fn only_its_own_app_attaches_an_upload_once_its_file_is_in() {
         gmail_sent_files(&harness.server).await[0][1],
         ("a.pdf".to_owned(), b"%PDF-1.4".to_vec())
     );
+
+    let content = b"draft file";
+    let upload = harness.upload(&token, content, content.len()).await;
+    gmail_draft()
+        .and(RawContains(vec!["filename=\"draft.txt\""], None))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message": {"id": "18d2"}})))
+        .expect(1)
+        .mount(&harness.server)
+        .await;
+    let draft = harness
+        .call_ok(&token, "create_draft", attach(&upload, "draft.txt"))
+        .await;
+    assert_eq!(draft["id"], "gmail.18d2");
+    let requests = harness.server.received_requests().await.unwrap();
+    let request = requests
+        .iter()
+        .find(|r| r.url.path() == GMAIL_DRAFT_UPLOAD)
+        .unwrap();
+    let (_, raw) = gmail_parts(request).unwrap();
+    let files = postkeep_mail::mime::files(raw.as_bytes()).unwrap();
+    assert_eq!(files[1].content.as_deref(), Some(content.as_slice()));
+    let error = harness
+        .call_err(&token, "send_message", attach(&upload, "draft.txt"))
+        .await;
+    assert!(error.contains(NO_UPLOAD), "{error}");
+    assert_eq!(sends(&harness.server).await, 1);
 }
 
 #[tokio::test]

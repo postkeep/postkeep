@@ -655,7 +655,7 @@
     },
     "home.tools[16].desc": {
       "n": "H206",
-      "text": "Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it. Not available for Outlook or for Gmail with Sign in with Google."
+      "text": "Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it."
     },
     "home.tools[17].name": {
       "n": "H207",

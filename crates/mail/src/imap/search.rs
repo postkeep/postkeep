@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use async_imap::imap_proto::{
-    AttributeValue, MailboxDatum, MessageSection, Response, ResponseCode, SectionPath, Status,
+    AttributeValue, MailboxDatum, MessageSection, Outcome, RequestId, Response, ResponseCode,
+    SectionPath, Status,
 };
 use async_imap::types::{Capabilities, Flag};
 use chrono::DateTime;
@@ -149,9 +150,17 @@ pub(super) async fn search_uids(conn: &mut Conn, command: &str) -> Result<Vec<Ui
 pub(super) async fn run_until_done(
     conn: &mut Conn,
     command: &str,
-    mut on_untagged: impl FnMut(&mut Response<'_>),
+    on_untagged: impl FnMut(&mut Response<'_>),
 ) -> Result<Option<ResponseCode<'static>>> {
     let tag = conn.run_command(command).await?;
+    read_until_done(conn, &tag, on_untagged).await
+}
+
+pub(super) async fn read_until_done(
+    conn: &mut Conn,
+    tag: &RequestId,
+    mut on_untagged: impl FnMut(&mut Response<'_>),
+) -> Result<Option<ResponseCode<'static>>> {
     loop {
         let mut response = conn
             .read_response()
@@ -162,20 +171,11 @@ pub(super) async fn run_until_done(
                 tag: done,
                 status,
                 outcome,
-            } if *done == tag => {
-                Some(if *status == Status::Ok {
-                    Ok(outcome.code.take().map(ResponseCode::into_owned))
-                } else {
-                    // Keep async-imap's command diagnostics, including response codes.
-                    let text = format!("code: {:?}, info: {:?}", outcome.code, outcome.information);
-                    let error = if *status == Status::No {
-                        async_imap::error::Error::No(text)
-                    } else {
-                        async_imap::error::Error::Bad(text)
-                    };
-                    Err(error.into())
-                })
-            }
+            } if done == tag => Some(if *status == Status::Ok {
+                Ok(outcome.code.take().map(ResponseCode::into_owned))
+            } else {
+                Err(done_error(status, outcome))
+            }),
             response => {
                 on_untagged(response);
                 None
@@ -184,6 +184,16 @@ pub(super) async fn run_until_done(
         if let Some(result) = completed {
             return result;
         }
+    }
+}
+
+pub(super) fn done_error(status: &Status, outcome: &Outcome<'_>) -> Error {
+    // Keep async-imap's command diagnostics, including response codes.
+    let text = format!("code: {:?}, info: {:?}", outcome.code, outcome.information);
+    if *status == Status::No {
+        async_imap::error::Error::No(text).into()
+    } else {
+        async_imap::error::Error::Bad(text).into()
     }
 }
 

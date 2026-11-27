@@ -152,7 +152,7 @@
       {
         "name": "create_draft",
         "title": "Create draft",
-        "description": "Save a new draft message with up to 1000 attachments to the Drafts folder without sending it. Needs at least one recipient, in to, cc or bcc. To draft a reply that keeps the thread (Re: subject, In-Reply-To and References), pass the id of the message; the recipients are then derived as in reply_to_message. Not available for Outlook or for Gmail with Sign in with Google. To find the draft later, call search_messages on the returned folder.",
+        "description": "Save a new draft message with up to 1000 attachments to the Drafts folder without sending it. Needs at least one recipient, in to, cc or bcc. To draft a reply that keeps the thread (Re: subject, In-Reply-To and References), pass the id of the message; the recipients are then derived as in reply_to_message. Returns the draft's id for immediate get_message readback when the provider reports one; otherwise call search_messages on the returned folder.",
         "inputSchema": {
           "$defs": {
             "NewAttachmentWire": {
@@ -264,6 +264,13 @@
             "folder": {
               "description": "The Drafts folder the draft was saved to.",
               "type": "string"
+            },
+            "id": {
+              "description": "Opaque message id of the saved draft for immediate `get_message` readback, when the provider returns one.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "message_id": {
               "description": "Message-ID of the draft, without angle brackets.",

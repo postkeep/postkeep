@@ -2031,6 +2031,11 @@ async fn greenmail_end_to_end() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!((uploads.names(), rows().await), (Vec::<String>::new(), 0));
+    let readback = harness
+        .call_ok(&token, "get_message", json!({ "id": draft["id"] }))
+        .await;
+    assert_eq!(readback["id"], draft["id"]);
+    assert_eq!(readback["subject"], format!("Re: {subject}"));
     let drafts = harness
         .call_ok(
             &token,
@@ -2039,6 +2044,7 @@ async fn greenmail_end_to_end() {
         )
         .await;
     assert_eq!(drafts["total"], 1, "{drafts}");
+    assert_eq!(draft["id"], drafts["messages"][0]["id"]);
 
     let folder = format!("Archive {}", std::process::id());
     harness
