@@ -209,9 +209,9 @@ impl Extensions {
         self
     }
 
-    /// Lists the extension's tools beside the server's to the callers it
-    /// picks, adds its paragraph to the instructions and runs its check
-    /// before every tool call; see [`ToolExtension`].
+    /// Lists the extension's tools and skills beside the server's to the
+    /// callers it picks, adds its paragraph to the instructions and runs its
+    /// check before every tool call; see [`ToolExtension`].
     #[must_use]
     pub fn tool_extension(mut self, extension: Arc<dyn ToolExtension>) -> Self {
         self.tool_extension = Some(extension);

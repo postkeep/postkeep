@@ -213,7 +213,7 @@ impl ServerBuilder {
         self
     }
 
-    /// Adds an embedding's tools, instructions and checks to the MCP
+    /// Adds an embedding's tools, skills, instructions and checks to the MCP
     /// endpoint; see [`Extensions::tool_extension`].
     #[must_use]
     pub fn tool_extension(

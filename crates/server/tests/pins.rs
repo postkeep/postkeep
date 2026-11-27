@@ -2,10 +2,11 @@
 //! `serve()` and the extension points cannot change it unnoticed.
 //!
 //! Pinned in `tests/pins/`: the `tools/list` response (names, input and
-//! output schemas, annotations), the instructions from `initialize`, the
-//! route table, the authorization-server and protected-resource metadata,
-//! and the `WWW-Authenticate` header of a `401`. The tests build the router
-//! in process; the last one starts `postkeep serve` itself with only the
+//! output schemas, annotations), the `skills/list` response (`skills-list.json`),
+//! the instructions from `initialize`, the route table, the authorization-server
+//! and protected-resource metadata, and the `WWW-Authenticate` header of a
+//! `401`. The tests build the router in process; the last one starts
+//! `postkeep serve` itself with only the
 //! required settings and checks it against the same files, so the binary
 //! keeps the pinned surface too. Everything runs on SQLite, without network
 //! access.
@@ -40,6 +41,7 @@ use postkeep_mail::{ImapServer, ImapServers};
 use postkeep_store::{CodeGrant, GrantSubject, MasterKey, NewClient, Store};
 use postkeep_upstream::{AppCredentials, Endpoints, Http, OAuthClient, PushExpectations};
 use postkeep_webhook::Deliverer;
+use rmcp::model::{SKILLS_EXTENSION_ID, Skill};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -794,6 +796,34 @@ async fn check_tools(harness: &Harness) {
         );
     }
     check_json_pin("tools-list.json", &reply.body);
+
+    let capabilities = &info["result"]["capabilities"];
+    assert_eq!(capabilities["resources"], json!({}));
+    assert_eq!(capabilities["extensions"][SKILLS_EXTENSION_ID], json!({}));
+    let reply = harness.rpc(Some(&token), "skills/list", &json!({})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    check_json_pin("skills-list.json", &reply.body);
+    let listed: Value = serde_json::from_str(&reply.body).unwrap();
+    let skills: Vec<Skill> = serde_json::from_value(listed["result"]["skills"].clone()).unwrap();
+    for skill in skills {
+        let rmcp::model::SkillResources::Files(files) = skill.resources else {
+            panic!("{} has no file manifest", skill.uri);
+        };
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].uri, skill.uri);
+        let reply = harness
+            .rpc(Some(&token), "resources/read", &json!({ "uri": skill.uri }))
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let read: Value = serde_json::from_str(&reply.body).unwrap();
+        let contents = read["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["uri"], skill.uri);
+        assert_eq!(contents[0]["mimeType"], "text/markdown");
+        files[0]
+            .verify(contents[0]["text"].as_str().unwrap().as_bytes())
+            .unwrap();
+    }
 }
 
 #[tokio::test]

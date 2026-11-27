@@ -137,8 +137,9 @@ CI does not verify the MSRV or build or run the fuzz targets.
 
 `crates/server/tests/pins.rs` compares what MCP clients and OAuth clients
 see with files in `crates/server/tests/pins/`, byte for byte: the
-`tools/list` response, the instructions, the route table, both OAuth metadata
-documents and the `WWW-Authenticate` header. A change fails with a line diff.
+`tools/list` and `skills/list` (`skills-list.json`) responses, the instructions,
+the route table, both OAuth metadata documents and the `WWW-Authenticate`
+header. A change fails with a line diff.
 The last test starts `postkeep serve` itself with only the required settings
 and compares it with the same files, so the binary cannot drift from the
 router the other tests build. If the change is intended, rewrite the files

@@ -1,4 +1,4 @@
-//! An embedding's own tools and checks on the MCP endpoint.
+//! An embedding's own tools, skills and checks on the MCP endpoint.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -8,12 +8,14 @@ use postkeep_store::AccountId;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, Implementation, JsonObject, Tool};
 
+use super::SkillDocument;
+
 /// What one of a [`ToolExtension`]'s tools answers: its result, which can
 /// be a tool error, or a protocol error such as invalid arguments.
 pub type ToolFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CallToolResult, ErrorData>> + Send + 'a>>;
 
-/// Tools, instructions and checks an embedding adds to the MCP endpoint,
+/// Tools, skills, instructions and checks an embedding adds to the MCP endpoint,
 /// installed with
 /// [`Extensions::tool_extension`](crate::app::Extensions::tool_extension).
 ///
@@ -28,6 +30,16 @@ pub trait ToolExtension: Send + Sync + 'static {
     /// and the server checks the name before [`call`](Self::call). The
     /// default lists none.
     fn tools(&self, caller: &Authenticated) -> Vec<Tool> {
+        let _ = caller;
+        Vec::new()
+    }
+
+    /// Skills `caller` may use besides the server's own, listed after
+    /// them in this order. Implementations should return skills in a
+    /// deterministic order. A skill whose name or URI matches one of the
+    /// server's, or an earlier skill in the returned list, is left out.
+    /// The default lists none.
+    fn skills(&self, caller: &Authenticated) -> Vec<SkillDocument> {
         let _ = caller;
         Vec::new()
     }

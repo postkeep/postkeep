@@ -1,5 +1,7 @@
-//! A check that a tool's result matches the output schema that `tools/list`
-//! advertises for the tool, as the MCP specification has clients check it.
+//! Shared integration-test helpers for MCP requests and output schemas.
+
+#[allow(dead_code, reason = "the provider suite only uses the schema helpers")]
+pub mod mcp_request;
 
 use serde_json::Value;
 
