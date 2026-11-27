@@ -138,22 +138,41 @@ pub fn matches(registered: &[String], requested: &str) -> bool {
     if registered.iter().any(|uri| uri == requested) {
         return true;
     }
-    let Ok(requested) = Url::parse(requested) else {
+    let Ok(requested_url) = Url::parse(requested) else {
         return false;
     };
-    if requested.scheme() != "http" || !is_loopback(&requested) {
+    if requested_url.scheme() != "http" || !is_loopback(&requested_url) {
         return false;
     }
-    registered
-        .iter()
-        .filter_map(|uri| Url::parse(uri).ok())
-        .any(|uri| {
-            uri.scheme() == "http"
-                && is_loopback(&uri)
-                && uri.host() == requested.host()
-                && uri.path() == requested.path()
-                && uri.query() == requested.query()
-        })
+    let Some(requested_parts) = without_port(requested) else {
+        return false;
+    };
+    registered.iter().any(|raw| {
+        let Ok(uri) = Url::parse(raw) else {
+            return false;
+        };
+        uri.scheme() == "http"
+            && uri.host() == requested_url.host()
+            && uri.username() == requested_url.username()
+            && uri.password() == requested_url.password()
+            && uri.fragment() == requested_url.fragment()
+            && without_port(raw) == Some(requested_parts)
+    })
+}
+
+// Compare original bytes: Url also normalizes hosts and paths, not just ports.
+fn without_port(uri: &str) -> Option<(&str, &str, &str)> {
+    let (scheme, rest) = uri.split_once("://")?;
+    let (authority, tail) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+    if !scheme.eq_ignore_ascii_case("http") || authority.contains('\\') {
+        return None;
+    }
+    // A bracketed IPv6 literal ends in ']', not in a numeric port.
+    let authority = authority
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.as_bytes().iter().all(u8::is_ascii_digit))
+        .map_or(authority, |(host, _)| host);
+    Some((scheme, authority, tail))
 }
 
 fn is_loopback(url: &Url) -> bool {
@@ -274,16 +293,39 @@ mod tests {
 
     #[test]
     fn matches_exactly_or_with_any_loopback_port() {
-        let registered = vec![
-            "https://client.example/cb".to_owned(),
-            "http://127.0.0.1/callback".to_owned(),
-        ];
-        assert!(matches(&registered, "https://client.example/cb"));
-        assert!(!matches(&registered, "https://client.example/cb2"));
-        assert!(!matches(&registered, "https://client.example:8443/cb"));
-        assert!(matches(&registered, "http://127.0.0.1:51234/callback"));
-        assert!(!matches(&registered, "http://127.0.0.1:51234/other"));
-        assert!(!matches(&registered, "http://localhost:51234/callback"));
+        let registered = [
+            "https://client.example/cb",
+            "http://127.0.0.1/callback",
+            "http://localhost:80/cb",
+            "http://[::1]:9999/cb?fixed=1",
+            "http://user@localhost/cb",
+        ]
+        .map(str::to_owned);
+        for requested in [
+            "https://client.example/cb",
+            "http://127.0.0.1:51234/callback",
+            "http://localhost:51234/cb",
+            "http://[::1]:51234/cb?fixed=1",
+        ] {
+            assert!(matches(&registered, requested), "{requested}");
+        }
+        for requested in [
+            "https://client.example/cb2",
+            "https://client.example:8443/cb",
+            "http://127.0.0.1:51234/other",
+            "http://localhost:51234/callback",
+            "http://[::1]:51234/cb?fixed=2",
+            "http://127.0.0.1:51234/callback?",
+            "http://user@127.0.0.1:51234/callback",
+            "http://user:placeholder@localhost:51234/cb",
+            "http://127.0.0.1:51234/callback#frag",
+            "http://127.0.0.1:/callback",
+            r"http://127.0.0.1:38159\callback",
+            "http://0x7f000001:38159/callback",
+            "http://127.0.0.1:38159/a/../callback",
+        ] {
+            assert!(!matches(&registered, requested), "{requested}");
+        }
     }
 
     #[test]

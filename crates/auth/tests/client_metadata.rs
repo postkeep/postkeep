@@ -23,6 +23,7 @@ use tower::ServiceExt;
 
 const ISSUER: &str = "https://mail.example.com";
 const REDIRECT: &str = "http://127.0.0.1/callback";
+const EPHEMERAL_REDIRECT: &str = "http://127.0.0.1:38159/callback";
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
@@ -142,6 +143,47 @@ impl Setup {
         .await
     }
 
+    async fn sign_in_for_code(&self, page: &Page, redirect_uri: &str) -> String {
+        let marker = "name=\"request_id\" value=\"";
+        let start = page.body.find(marker).unwrap() + marker.len();
+        let request_id = &page.body[start..start + page.body[start..].find('"').unwrap()];
+        let signed_in = self
+            .form(
+                "/authorize",
+                &[
+                    ("request_id", request_id),
+                    ("email", "user@example.com"),
+                    ("password", "abcd-efgh-ijkl-mnop"),
+                    ("action", "connect"),
+                ],
+            )
+            .await;
+        assert_eq!(
+            signed_in.status,
+            StatusCode::SEE_OTHER,
+            "{}",
+            signed_in.body
+        );
+        let location = signed_in.headers[header::LOCATION].to_str().unwrap();
+        assert_eq!(location.split_once('?').unwrap().0, redirect_uri);
+        url::Url::parse(location)
+            .unwrap()
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .unwrap()
+            .1
+            .into_owned()
+    }
+
+    const fn code_fields<'a>(&'a self, code: &'a str) -> [(&'static str, &'a str); 4] {
+        [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("client_id", self.client_id.as_str()),
+            ("code_verifier", VERIFIER),
+        ]
+    }
+
     /// Documents requested from the receiver so far.
     fn fetches(&mut self) -> usize {
         let mut count = 0;
@@ -183,40 +225,8 @@ async fn signs_in_and_gets_tokens(body: impl FnOnce(&str) -> Value) {
     assert_eq!(stored.redirect_uris, vec![REDIRECT.to_owned()]);
     assert_eq!(setup.fetches(), 1);
 
-    let marker = "name=\"request_id\" value=\"";
-    let start = page.body.find(marker).unwrap() + marker.len();
-    let request_id = &page.body[start..start + page.body[start..].find('"').unwrap()];
-    let signed_in = setup
-        .form(
-            "/authorize",
-            &[
-                ("request_id", request_id),
-                ("email", "user@example.com"),
-                ("password", "abcd-efgh-ijkl-mnop"),
-                ("action", "connect"),
-            ],
-        )
-        .await;
-    assert_eq!(
-        signed_in.status,
-        StatusCode::SEE_OTHER,
-        "{}",
-        signed_in.body
-    );
-    let location = url::Url::parse(signed_in.headers[header::LOCATION].to_str().unwrap()).unwrap();
-    assert!(location.as_str().starts_with(REDIRECT));
-    let code = location
-        .query_pairs()
-        .find(|(key, _)| key == "code")
-        .unwrap()
-        .1
-        .into_owned();
-    let exchange = [
-        ("grant_type", "authorization_code"),
-        ("code", code.as_str()),
-        ("client_id", client_id.as_str()),
-        ("code_verifier", VERIFIER),
-    ];
+    let code = setup.sign_in_for_code(&page, REDIRECT).await;
+    let exchange = setup.code_fields(&code);
     // A client using none must not authenticate (draft-03 section 5): a
     // secret, an assertion or Basic credentials are refused before the code
     // is used.
@@ -278,24 +288,102 @@ async fn a_client_that_lists_none_among_its_methods_signs_in_as_a_public_client(
 }
 
 #[tokio::test]
-async fn the_redirect_uri_must_match_exactly() {
+async fn loopback_port_is_flexible_at_authorization_and_bound_at_redemption() {
     let mut setup = setup(|_| {}).await;
-    let client_id = setup.client_id.clone();
     setup
         .documents
-        .reply_with([serve(&document(&client_id), "max-age=600")]);
-    // Registered native clients may change the loopback port; a metadata
-    // document client may not.
-    let page = setup
-        .authorize(&client_id, "http://127.0.0.1:8080/callback")
-        .await;
-    assert_eq!(page.status, StatusCode::BAD_REQUEST, "{}", page.body);
-    assert!(
-        page.body.contains("redirect address does not match"),
-        "{}",
-        page.body
-    );
+        .reply_with([serve(&document(&setup.client_id), "max-age=600")]);
+    for (redirect_uri, expected_status) in [
+        (
+            Some("http://127.0.0.1:9999/callback"),
+            StatusCode::BAD_REQUEST,
+        ),
+        (Some(REDIRECT), StatusCode::BAD_REQUEST),
+        (Some(EPHEMERAL_REDIRECT), StatusCode::OK),
+        (None, StatusCode::OK),
+    ] {
+        // A failed redemption consumes the code, so each case signs in again.
+        let page = setup.authorize(&setup.client_id, EPHEMERAL_REDIRECT).await;
+        assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+        let code = setup.sign_in_for_code(&page, EPHEMERAL_REDIRECT).await;
+        let mut fields = Vec::from(setup.code_fields(&code));
+        fields.extend(redirect_uri.map(|uri| ("redirect_uri", uri)));
+        let token = setup.form("/token", &fields).await;
+        assert_eq!(
+            token.status, expected_status,
+            "{redirect_uri:?}: {}",
+            token.body
+        );
+        let response: Value = serde_json::from_str(&token.body).unwrap();
+        if expected_status == StatusCode::OK {
+            assert!(response["access_token"].is_string());
+        } else {
+            assert_eq!(response["error"], "invalid_grant");
+            assert_eq!(response["error_description"], "redirect_uri does not match");
+        }
+    }
     assert_eq!(setup.fetches(), 1);
+}
+
+#[tokio::test]
+async fn localhost_ipv6_and_explicitly_registered_ports_accept_an_ephemeral_port() {
+    let setup = setup(|_| {}).await;
+    let mut body = document(&setup.client_id);
+    body["redirect_uris"] = json!([
+        "http://localhost/callback",
+        "http://[::1]/callback",
+        "http://127.0.0.1:9999/callback"
+    ]);
+    setup.documents.reply_with([serve(&body, "max-age=600")]);
+    for redirect_uri in [
+        "http://localhost:38159/callback",
+        "http://[::1]:38159/callback",
+        EPHEMERAL_REDIRECT,
+    ] {
+        let page = setup.authorize(&setup.client_id, redirect_uri).await;
+        assert_eq!(page.status, StatusCode::OK, "{redirect_uri}: {}", page.body);
+    }
+}
+
+#[tokio::test]
+async fn authorization_rejects_redirect_changes_other_than_a_loopback_port() {
+    let setup = setup(|_| {}).await;
+    let mut body = document(&setup.client_id);
+    body["redirect_uris"] = json!([
+        REDIRECT,
+        "https://client.example/cb",
+        "com.example.app:/callback"
+    ]);
+    setup.documents.reply_with([serve(&body, "max-age=600")]);
+    for redirect_uri in [
+        "https://client.example:8443/cb",
+        "https://client.example/cb/other",
+        "http://127.0.0.1:38159/other",
+        "http://127.0.0.1:38159/callback?extra=1",
+        "http://localhost:38159/callback",
+        "http://127.0.0.2:38159/callback",
+        "http://[::1]:38159/callback",
+        "http://user@127.0.0.1:38159/callback",
+        "http://127.0.0.1:38159/callback#frag",
+        "com.example.app:/other",
+    ] {
+        let page = setup.authorize(&setup.client_id, redirect_uri).await;
+        assert_eq!(
+            page.status,
+            StatusCode::BAD_REQUEST,
+            "{redirect_uri}: {}",
+            page.body
+        );
+        assert!(
+            page.body.contains("redirect address does not match"),
+            "{redirect_uri}: {}",
+            page.body
+        );
+        assert!(
+            !page.headers.contains_key(header::LOCATION),
+            "{redirect_uri}"
+        );
+    }
 }
 
 #[tokio::test]

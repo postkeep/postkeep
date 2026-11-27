@@ -55,26 +55,12 @@ pub async fn show(
     let Some(client_id) = query.client_id.as_deref() else {
         return invalid_link("The authorization request has no client_id.");
     };
-    let from_document = client_metadata::is_document_url(client_id);
     let client = match find_client(&state, client_id, &ip.key()).await {
         Ok(client) => client,
         Err(page) => return *page,
     };
-    // A metadata document client's redirect URI must match exactly
-    // (draft-ietf-oauth-client-id-metadata-document section 4.2), without
-    // the loopback port leeway that registered native clients get.
-    let registered = |uri: &str| {
-        if from_document {
-            client
-                .redirect_uris
-                .iter()
-                .any(|registered| registered == uri)
-        } else {
-            redirect::matches(&client.redirect_uris, uri)
-        }
-    };
     let redirect_uri = match query.redirect_uri.clone() {
-        Some(uri) if registered(&uri) => uri,
+        Some(uri) if redirect::matches(&client.redirect_uris, &uri) => uri,
         Some(_) => {
             return invalid_link("The redirect address does not match the app's registration.");
         }

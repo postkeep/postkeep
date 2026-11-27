@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{OAuthError, no_store};
 use crate::state::AuthState;
-use crate::{client_metadata, random, redirect};
+use crate::{client_metadata, random};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct TokenRequest {
@@ -106,7 +106,6 @@ async fn authorization_code(
     // the requirement when PKCE is used, so it may also be omitted.
     if let Some(uri) = request.redirect_uri.as_deref()
         && uri != grant.redirect_uri
-        && !redirect::matches(std::slice::from_ref(&grant.redirect_uri), uri)
     {
         return Err(OAuthError::invalid_grant("redirect_uri does not match"));
     }
