@@ -6,6 +6,8 @@ postkeep is a free, MIT-licensed MCP server for iCloud, Gmail, Outlook,
 Fastmail, Yahoo and IMAP mail. Your agent can search, read, reply and file,
 and a webhook can tell it when new mail arrives.
 
+<a href="https://glama.ai/mcp/servers/postkeep/postkeep"><img width="380" height="200" src="https://glama.ai/mcp/servers/postkeep/postkeep/badge" alt="Glama MCP Server"></a>
+
 ## Mailboxes
 
 | Mailbox | How you connect |
