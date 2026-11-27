@@ -1214,7 +1214,7 @@ async fn imap_gmail_checks_headers_and_refuses_text_before_searching() {
 
 #[tokio::test]
 async fn imap_moves_check_the_source_and_gmail_user_labels() {
-    for (mode, destination, previews) in [
+    for (mode, destination, cases) in [
         (
             imap::GMAIL,
             "Receipts",
@@ -1222,9 +1222,14 @@ async fn imap_moves_check_the_source_and_gmail_user_labels() {
                 (
                     true,
                     "dry run, nothing changed: would move 1 message to Receipts (1 already there)",
+                    0,
                 ),
-                (false, "2 messages: 1 moved to Receipts, 1 already there"),
-                (false, "2 messages: 2 already there"),
+                (
+                    false,
+                    "2 messages: 1 moved to Receipts, 1 already there; 1 without a new id from the server: search Receipts",
+                    1,
+                ),
+                (false, "2 messages: 2 already there", 0),
             ][..],
         ),
         (
@@ -1237,10 +1242,12 @@ async fn imap_moves_check_the_source_and_gmail_user_labels() {
                         "dry run, nothing changed: would move 2 messages to INBOX (2 of them: ",
                         "the source folder doesn't show what the destination already held)"
                     ),
+                    0,
                 ),
                 (
                     false,
-                    "2 messages: 2 moved to INBOX; the source folder doesn't show what the destination already held",
+                    "2 messages: 2 moved to INBOX; the source folder doesn't show what the destination already held; 2 without a new id from the server: search INBOX",
+                    2,
                 ),
             ][..],
         ),
@@ -1250,6 +1257,7 @@ async fn imap_moves_check_the_source_and_gmail_user_labels() {
             &[(
                 true,
                 "dry run, nothing changed: would move 2 messages to Receipts (2 of them: the source folder doesn't show what the destination already held)",
+                0,
             )][..],
         ),
     ] {
@@ -1276,7 +1284,7 @@ async fn imap_moves_check_the_source_and_gmail_user_labels() {
             }
         }
         let ids = [1, 2].map(|uid| postkeep::mailbox::id::imap_id("All", uid, Some(1)));
-        for (dry, expected) in previews {
+        for (dry, expected, unmapped) in cases {
             let result = harness
                 .call_ok(
                     &token,
@@ -1287,6 +1295,13 @@ async fn imap_moves_check_the_source_and_gmail_user_labels() {
             assert_eq!(
                 result["result"], *expected,
                 "{mode}: {destination}, dry={dry}"
+            );
+            assert!(result.get("new_ids").is_none(), "{result}");
+            let expected_unmapped = (*unmapped > 0).then(|| json!(ids[..*unmapped]));
+            assert_eq!(
+                result.get("unmapped_ids"),
+                expected_unmapped.as_ref(),
+                "{result}"
             );
         }
     }
@@ -1507,7 +1522,8 @@ async fn greenmail_end_to_end() {
     assert!(body.contains("Hello from the MCP test"));
     assert_eq!(forward["attachments"][0]["filename"], "forward.txt");
     // The bulk path shares validation, previews, set commands and COPYUID results.
-    for name in ["Bulk Archive", "Deleted Messages"] {
+    let trash_folder = "Deleted Messages";
+    for name in ["Bulk Archive", trash_folder] {
         harness
             .call_ok(&token, "create_folder", json!({ "name": name }))
             .await;
@@ -1664,7 +1680,7 @@ async fn greenmail_end_to_end() {
         .call_ok(
             &token,
             "move_message",
-            json!({ "ids": move_ids, "destination": "Bulk Archive", "list_all": true }),
+            json!({ "ids": move_ids, "destination": "Bulk Archive" }),
         )
         .await;
     assert_eq!(moved["new_ids"].as_object().unwrap().len(), 3, "{moved}");
@@ -1696,35 +1712,32 @@ async fn greenmail_end_to_end() {
         .call_ok(
             &token,
             "move_message",
-            json!({ "ids": [new_ids[0]], "destination": "inbox", "list_all": true }),
+            json!({ "id": new_ids[0], "destination": "inbox" }),
         )
         .await;
     let back_id = back["new_ids"][new_ids[0].as_str()].as_str().unwrap();
     assert_eq!(parse_imap_id(back_id).unwrap().0, "INBOX");
-    let restored = harness
-        .call_ok(
-            &token,
-            "move_message",
-            json!({ "ids": [back_id], "destination": "Bulk Archive", "list_all": true }),
-        )
+    let single = harness
+        .call_ok(&token, "delete_message", json!({ "id": back_id }))
         .await;
-    let mut new_ids = new_ids;
-    new_ids[0] = restored["new_ids"][back_id].as_str().unwrap().to_owned();
+    let trash_id = single["new_ids"][back_id].as_str().unwrap();
+    assert_eq!(parse_imap_id(trash_id).unwrap().0, trash_folder);
     let trashed = harness
         .call_ok(
             &token,
             "delete_message",
-            json!({ "ids": new_ids, "list_all": true }),
+            json!({ "ids": new_ids[1..], "list_all": true }),
         )
         .await;
-    assert_eq!(trashed["result"], "3 messages: 3 moved to the trash");
-    let trash_ids: Vec<_> = trashed["new_ids"]
+    assert_eq!(trashed["result"], "2 messages: 2 moved to the trash");
+    let mut trash_ids: Vec<_> = trashed["new_ids"]
         .as_object()
         .unwrap()
         .values()
         .map(|id| id.as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(trash_ids.len(), 3);
+    assert_eq!(trash_ids.len(), 2);
+    trash_ids.push(trash_id.to_owned());
     let already = harness
         .call_ok(&token, "delete_message", json!({ "ids": trash_ids }))
         .await;
@@ -1987,6 +2000,8 @@ async fn greenmail_end_to_end() {
         deleted["counts"],
         json!({ "changed": 1, "already": 0, "not_found": 0, "failed": 0, "not_reached": 0 })
     );
+    assert!(deleted.get("new_ids").is_none(), "{deleted}");
+    assert!(deleted.get("unmapped_ids").is_none(), "{deleted}");
     let empty = harness
         .call_ok(&token, "search_messages", json!({ "folder": folder }))
         .await;

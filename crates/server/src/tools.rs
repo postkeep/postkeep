@@ -106,11 +106,6 @@ macro_rules! dry_run_doc {
         "Say what would change, and change nothing."
     };
 }
-macro_rules! list_all_doc {
-    () => {
-        "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it."
-    };
-}
 macro_rules! most_ids {
     ($count:literal) => {
         /// Gmail's batchModify limit; also the limit advertised by the tools.
@@ -121,6 +116,31 @@ macro_rules! most_ids {
     };
 }
 most_ids!(1000);
+macro_rules! default_move_ids {
+    ($limit:literal) => {
+        const DEFAULT_MOVE_IDS: usize = $limit;
+        macro_rules! list_all_doc {
+            () => {
+                concat!(
+                    "List every id the call named or its selection listed, not only those that weren't changed. For a move or trash, include all new and unmapped ids. With explicit ids by default, each of those fields is omitted if it has more than ",
+                    stringify!($limit),
+                    " entries. The answer can be long; counts come without it."
+                )
+            };
+        }
+        macro_rules! move_ids_doc {
+            ($meaning:literal) => {
+                concat!(
+                    $meaning,
+                    " Returned by default for one message or when explicit `ids` yields at most ",
+                    stringify!($limit),
+                    " entries. Pass `list_all: true` on the original call for every entry or for a selection."
+                )
+            };
+        }
+    };
+}
+default_move_ids!(50);
 /// Sentence appended when a selection's listing excluded messages already in the asked state.
 pub const LEFT_OUT: &str = "messages already as asked aren't listed or counted";
 macro_rules! search_selection_doc { () => { "Only when more match than this page: every match of this search, not only this page, to pass as selection to update_flags, move_message or delete_message." }; }
@@ -1888,13 +1908,12 @@ pub struct ChangeOutput {
     #[doc = "With ids or a selection: the messages that failed or weren't reached, by outcome and reason; every one with list_all."]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<ChangeGroup>,
-    #[expect(
-        clippy::doc_markdown,
-        reason = "the protocol description uses plain argument names"
-    )]
-    #[doc = "With list_all: the new id of each moved message whose id changed."]
+    #[doc = move_ids_doc!("Old to new ids for messages given a new id after a move or trash.")]
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub new_ids: BTreeMap<String, String>,
+    #[doc = move_ids_doc!("Old IMAP ids for moved or trashed messages the server gave no new id; search the destination.")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unmapped_ids: Vec<String>,
 }
 
 impl ChangeOutput {
@@ -1904,7 +1923,60 @@ impl ChangeOutput {
             counts,
             messages: Vec::new(),
             new_ids: BTreeMap::new(),
+            unmapped_ids: Vec::new(),
         }
+    }
+
+    fn add_move_ids(
+        &mut self,
+        outcomes: Vec<ChangeOutcome>,
+        destination: &str,
+        bulk: bool,
+        list_all: bool,
+    ) {
+        for out in outcomes {
+            if !out.changed() {
+                continue;
+            }
+            if let Some(new) = out.new_id {
+                self.new_ids.insert(out.id, new);
+            } else if out.id.starts_with(IMAP_PREFIX) {
+                self.unmapped_ids.push(out.id);
+            }
+        }
+        let search_advised = bulk && !self.unmapped_ids.is_empty();
+        if search_advised {
+            self.result = format!(
+                "{}; {} without a new id from the server: search {destination}",
+                self.result,
+                count(self.unmapped_ids.len())
+            );
+        }
+        let omit_new = !list_all && self.new_ids.len() > DEFAULT_MOVE_IDS;
+        let omit_unmapped = !list_all && self.unmapped_ids.len() > DEFAULT_MOVE_IDS;
+        if omit_new {
+            self.new_ids.clear();
+        }
+        if omit_unmapped {
+            self.unmapped_ids.clear();
+        } else {
+            self.unmapped_ids.sort_unstable();
+        }
+        let omitted = match (omit_new, omit_unmapped) {
+            (true, true) => "new and unmapped ids",
+            (true, false) => "new ids",
+            (false, true) => "unmapped ids",
+            (false, false) => return,
+        };
+        let search = if search_advised {
+            String::new()
+        } else {
+            format!(": search {destination}")
+        };
+        self.result = format!(
+            "{}; {omitted} omitted{search}; pass list_all: true on future calls",
+            self.result
+        );
     }
 }
 
@@ -1972,7 +2044,7 @@ fn change_words(change: &Change, dry: bool) -> String {
 const fn move_destination(change: &Change) -> Option<&str> {
     match change {
         Change::Move(folder) => Some(folder.as_str()),
-        Change::Trash => Some("Trash"),
+        Change::Trash => Some("the trash folder"),
         Change::Flags { .. } => None,
     }
 }
@@ -2011,6 +2083,12 @@ fn single_summary(out: &ChangeOutcome, change: &Change) -> Result<String, String
             if let Some(new_id) = &out.new_id {
                 text = format!("{text}; its new id is {new_id}");
             } else if out.id.starts_with(IMAP_PREFIX) {
+                // Keep the original wording in single-message replies.
+                let folder = if matches!(change, Change::Trash) {
+                    "Trash"
+                } else {
+                    folder
+                };
                 text = format!("{text}; search {folder} for its new id");
             }
         }
@@ -2131,10 +2209,15 @@ fn summary(
     let counts = Counts::of(&outcomes);
     let dry = mode == Mode::DryRun;
     let list_all = list_all && bulk;
+    let destination = move_destination(change).filter(|_| !dry && (list_all || further.is_none()));
     if !bulk {
         let result = single_summary(&outcomes[0], change)?;
         if !dry {
-            return Ok(ChangeOutput::sentence(result, counts));
+            let mut output = ChangeOutput::sentence(result, counts);
+            if let Some(destination) = destination {
+                output.add_move_ids(outcomes, destination, false, list_all);
+            }
+            return Ok(output);
         }
     }
     let (sentences, messages) = change_groups(&outcomes, change, dry, list_all, further.is_some());
@@ -2177,35 +2260,14 @@ fn summary(
         result.push_str("; ");
         result.push_str(LEFT_OUT);
     }
-    if list_all
-        && !dry
-        && let Some(destination) = move_destination(change)
-    {
-        let missing = outcomes
-            .iter()
-            .filter(|out| out.changed() && out.id.starts_with(IMAP_PREFIX) && out.new_id.is_none())
-            .count();
-        if missing > 0 {
-            result = format!(
-                "{result}; {} without a new id from the server: search {destination}",
-                count(missing)
-            );
-        }
-    }
-    let new_ids = if list_all {
-        outcomes
-            .into_iter()
-            .filter_map(|out| out.new_id.map(|new| (out.id, new)))
-            .collect()
-    } else {
-        BTreeMap::new()
-    };
-    Ok(ChangeOutput {
-        result,
-        counts,
+    let mut output = ChangeOutput {
         messages,
-        new_ids,
-    })
+        ..ChangeOutput::sentence(result, counts)
+    };
+    if let Some(destination) = destination {
+        output.add_move_ids(outcomes, destination, bulk, list_all);
+    }
+    Ok(output)
 }
 
 fn finish_selection(
@@ -2252,17 +2314,11 @@ fn finish_selection(
         && outcomes
             .iter()
             .any(|out| out.status == Status::Failed && out.id.starts_with(IMAP_PREFIX))
+        && let Some(folder) = move_destination(change)
     {
-        let folder = match change {
-            Change::Move(folder) => Some(folder.as_str()),
-            Change::Trash => Some("the trash folder"),
-            Change::Flags { .. } => None,
-        };
-        if let Some(folder) = folder {
-            result.push_str("; a failed move can leave copies in ");
-            result.push_str(folder);
-            result.push_str(": search there before calling again");
-        }
+        result.push_str("; a failed move can leave copies in ");
+        result.push_str(folder);
+        result.push_str(": search there before calling again");
     }
 }
 
@@ -2948,7 +3004,7 @@ impl MailTools {
     /// Moves messages to another folder.
     #[tool(
         title = "Move message",
-        description = "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). Ids from current Outlook searches and Gmail ids (Sign in with Google) stay the same; on IMAP accounts, Gmail with an app password too, a moved message's old id finds nothing. Use any new id the answer gives (for one message, or with list_all); where an IMAP move gives none, search the destination.",
+        description = "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). Ids from current Outlook searches and Gmail ids (Sign in with Google) stay the same; on IMAP accounts, Gmail with an app password too, a moved message's old id finds nothing. Use the new ids in new_ids; for unmapped_ids, search the destination.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2970,7 +3026,7 @@ impl MailTools {
     /// Deletes messages.
     #[tool(
         title = "Delete message",
-        description = "Delete messages: moves them to the trash, or removes one for good with permanent=true (not on Gmail; cannot be undone; confirm with the user first).",
+        description = "Delete messages: moves them to the trash, or removes one for good with permanent=true (not on Gmail; cannot be undone; confirm with the user first). When trashing, use the new ids in new_ids; for unmapped_ids, search the trash.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -4291,6 +4347,8 @@ mod tests {
 
     #[test]
     fn single_change_sentences_and_errors_keep_their_contract() {
+        use std::collections::BTreeMap;
+
         use super::{Change, Counts, Mode, SEARCH_TIME_EXHAUSTED, Status, mail_error};
         let run = single_change_result;
         assert_eq!(
@@ -4301,40 +4359,52 @@ mod tests {
             changed: 1,
             ..Counts::default()
         };
-        for (change, expected) in [
+        let imap = crate::mailbox::id::imap_id("INBOX", 88, Some(7));
+        for (change, id, expected) in [
             (
                 Change::Flags {
                     read: Some(true),
                     flagged: Some(true),
                 },
-                "message id-1 marked as read and flagged",
+                imap.as_str(),
+                format!("message {imap} marked as read and flagged"),
             ),
             (
                 Change::Move("Archive".to_owned()),
-                "moved message id-1 to Archive; its new id is new-1",
+                "graph.old-1",
+                "moved message graph.old-1 to Archive; its new id is new-1".to_owned(),
             ),
             (
                 Change::Trash,
-                "moved message id-1 to the trash; its new id is new-1",
+                imap.as_str(),
+                format!("moved message {imap} to the trash; its new id is new-1"),
             ),
         ] {
             let out = run(
-                "id-1".to_owned(),
+                id.to_owned(),
                 Status::Ok,
                 Some("new-1"),
                 "",
                 &change,
                 Mode::Act,
-                true,
+                false,
             )
             .unwrap();
             assert_eq!(out.result, expected);
             assert_eq!(out.counts, one_changed);
-            assert!(out.messages.is_empty() && out.new_ids.is_empty());
+            assert!(out.messages.is_empty() && out.unmapped_ids.is_empty());
+            if matches!(change, Change::Flags { .. }) {
+                assert!(out.new_ids.is_empty());
+            } else {
+                assert_eq!(
+                    out.new_ids,
+                    BTreeMap::from([(id.to_owned(), "new-1".to_owned())])
+                );
+            }
             let preview = run(
-                "id-1".to_owned(),
+                id.to_owned(),
                 Status::Ok,
-                None,
+                Some("new-1"),
                 "",
                 &change,
                 Mode::DryRun,
@@ -4343,7 +4413,10 @@ mod tests {
             .unwrap();
             assert!(preview.result.starts_with("dry run, nothing changed:"));
             assert_eq!(preview.counts, one_changed);
-            assert!(preview.messages.is_empty() && preview.new_ids.is_empty());
+            let preview = serde_json::to_value(preview).unwrap();
+            for field in ["messages", "new_ids", "unmapped_ids"] {
+                assert!(preview.get(field).is_none(), "{preview}");
+            }
             for status in [Status::Failed, Status::NotFound, Status::NotReached] {
                 let reason = if status == Status::NotFound {
                     "no such message in INBOX; it may have been moved: search Archive"
@@ -4360,7 +4433,7 @@ mod tests {
 
     fn assert_single_already_and_no_new_id() {
         use super::{Change, Counts, Mode, Status};
-        let ok = |id: &str, reason, change| {
+        let ok = |id: &str, reason: &str, change: &Change| {
             single_change_result(
                 id.to_owned(),
                 Status::Ok,
@@ -4373,8 +4446,13 @@ mod tests {
             .unwrap()
         };
         let moved = Change::Move("Archive".to_owned());
-        let already = ok("id-1", "already there", &moved);
-        assert_eq!(already.result, "message id-1 is already in Archive");
+        let imap_id = crate::mailbox::id::imap_id("INBOX", 88, Some(7));
+        let already = ok(&imap_id, "already there", &moved);
+        assert_eq!(
+            already.result,
+            format!("message {imap_id} is already in Archive")
+        );
+        assert!(already.new_ids.is_empty() && already.unmapped_ids.is_empty());
         assert_eq!(
             already.counts,
             Counts {
@@ -4382,12 +4460,21 @@ mod tests {
                 ..Counts::default()
             }
         );
-        let imap_id = crate::mailbox::id::imap_id("INBOX", 88, Some(7));
-        let no_new_id = ok(&imap_id, "", &moved);
-        assert_eq!(
-            no_new_id.result,
-            format!("moved message {imap_id} to Archive; search Archive for its new id")
-        );
+        for (change, expected) in [
+            (
+                moved,
+                format!("moved message {imap_id} to Archive; search Archive for its new id"),
+            ),
+            (
+                Change::Trash,
+                format!("moved message {imap_id} to the trash; search Trash for its new id"),
+            ),
+        ] {
+            let no_new_id = ok(&imap_id, "", &change);
+            assert_eq!(no_new_id.result, expected);
+            assert!(no_new_id.new_ids.is_empty());
+            assert_eq!(no_new_id.unmapped_ids, [imap_id.as_str()]);
+        }
         let flag = Change::Flags {
             read: Some(true),
             flagged: None,
@@ -4397,7 +4484,7 @@ mod tests {
     }
     #[test]
     fn change_summary_reports_already_and_move_ids_including_trash() {
-        use super::{Change, ChangeOutcome, Mode, Status, single_summary, summary};
+        use super::{Change, ChangeOutcome, Mode, Status, summary};
         let out = |uid, reason: &str, new_id: Option<&str>| ChangeOutcome {
             id: crate::mailbox::id::imap_id("INBOX", uid, Some(1)),
             status: Status::Ok,
@@ -4428,24 +4515,112 @@ mod tests {
                 Mode::Act,
                 &Change::Trash,
                 vec![out(1, "", Some("new-1")), out(2, "", None)],
-                "2 messages: 2 moved to the trash; 1 without a new id from the server: search Trash",
+                "2 messages: 2 moved to the trash; 1 without a new id from the server: search the trash folder",
             ),
         ] {
             assert_eq!(
-                summary(ids, change, mode, true, true, None, false)
+                summary(ids, change, mode, true, false, None, false)
                     .unwrap()
                     .result,
                 expected
             );
         }
-        let trashed = out(1, "", Some("new-1"));
-        assert_eq!(
-            single_summary(&trashed, &Change::Trash).unwrap(),
-            format!(
-                "moved message {} to the trash; its new id is new-1",
-                trashed.id
-            )
-        );
+    }
+
+    #[test]
+    fn bulk_move_ids_are_capped_independently_and_serialized_in_order() {
+        use super::{Change, ChangeOutcome, IMAP_PREFIX, Mode, Status, summary};
+        let archive = Change::Move("Archive".to_owned());
+        for (change, destination, mapped, unmapped, omission) in [
+            (&archive, "Archive", 50, 50, None),
+            (&archive, "Archive", 51, 50, Some("new ids")),
+            (&archive, "Archive", 50, 51, Some("unmapped ids")),
+            (&archive, "Archive", 51, 51, Some("new and unmapped ids")),
+            (&Change::Trash, "the trash folder", 51, 0, Some("new ids")),
+            (
+                &Change::Trash,
+                "the trash folder",
+                0,
+                51,
+                Some("unmapped ids"),
+            ),
+        ] {
+            for further in [None, Some(false), Some(true)] {
+                for list_all in [false, true] {
+                    let missing_id = |i| format!("{IMAP_PREFIX}missing-{i:02}");
+                    let outcomes: Vec<_> = (0..mapped + unmapped)
+                        .rev()
+                        .map(|i| ChangeOutcome {
+                            id: if i < mapped {
+                                format!("old-{i:02}")
+                            } else {
+                                missing_id(i - mapped)
+                            },
+                            new_id: (i < mapped).then(|| format!("new-{i:02}")),
+                            status: Status::Ok,
+                            reason: String::new(),
+                        })
+                        .collect();
+                    let out = summary(outcomes, change, Mode::Act, true, list_all, further, false)
+                        .unwrap();
+                    let explicit = further.is_none();
+                    let serialized = serde_json::to_value(&out).unwrap();
+                    let new_entries = (list_all && mapped > 0) || (explicit && mapped == 50);
+                    let missing_entries =
+                        (list_all && unmapped > 0) || (explicit && unmapped == 50);
+                    assert_eq!(serialized.get("new_ids").is_some(), new_entries, "{out:?}");
+                    assert_eq!(
+                        serialized.get("unmapped_ids").is_some(),
+                        missing_entries,
+                        "{out:?}"
+                    );
+                    if new_entries {
+                        let pairs: Vec<_> = (0..mapped)
+                            .map(|i| format!(r#""old-{i:02}":"new-{i:02}""#))
+                            .collect();
+                        assert_eq!(
+                            serde_json::to_string(&out.new_ids).unwrap(),
+                            format!("{{{}}}", pairs.join(","))
+                        );
+                    }
+                    if missing_entries {
+                        assert_eq!(
+                            serialized["unmapped_ids"],
+                            serde_json::json!((0..unmapped).map(missing_id).collect::<Vec<_>>())
+                        );
+                    }
+                    let omission = omission.filter(|_| explicit && !list_all);
+                    let missing_notice = (list_all || explicit) && unmapped > 0;
+                    let search = format!(": search {destination}");
+                    assert_eq!(
+                        out.result.contains(&format!(
+                            "; {unmapped} without a new id from the server{search}"
+                        )),
+                        missing_notice,
+                        "{}",
+                        out.result
+                    );
+                    assert_eq!(
+                        out.result.matches(&search).count(),
+                        usize::from(missing_notice || omission.is_some()),
+                        "{}",
+                        out.result
+                    );
+                    let future = "pass list_all: true on future calls";
+                    if let Some(omitted) = omission {
+                        let recovery = if missing_notice { "" } else { search.as_str() };
+                        assert!(
+                            out.result
+                                .ends_with(&format!("; {omitted} omitted{recovery}; {future}")),
+                            "{}",
+                            out.result
+                        );
+                    } else {
+                        assert!(!out.result.contains("list_all: true"), "{}", out.result);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -4563,10 +4738,6 @@ mod tests {
                 "{pattern} {kind:?}"
             );
         }
-        assert_eq!(
-            out.new_ids.len(),
-            if list_all { expected.changed } else { 0 }
-        );
     }
 
     #[test]
@@ -4609,6 +4780,14 @@ mod tests {
                                 summary(outcomes, &change, mode, true, list_all, more, left_out)
                                     .unwrap();
                             assert_mix_groups(&out, &selected, list_all, pattern);
+                            let returns_ids = !matches!(change, Change::Flags { .. })
+                                && mode == Mode::Act
+                                && (list_all || more.is_none());
+                            assert_eq!(
+                                out.new_ids.len(),
+                                if returns_ids { out.counts.changed } else { 0 }
+                            );
+                            assert_eq!(out.unmapped_ids, [] as [String; 0]);
                             assert_eq!(
                                 out.result.starts_with("dry run, nothing changed:"),
                                 mode == Mode::DryRun
