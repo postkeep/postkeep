@@ -225,7 +225,7 @@ impl MailboxCapabilities {
                 AuthType::AppPassword
             },
             operations: OperationCapabilities {
-                create_draft: imap,
+                create_draft: true,
                 edit_draft: false,
                 permanent_delete,
                 permanent_delete_trash_only: false,
@@ -421,7 +421,6 @@ mod tests {
                 assert_eq!(
                     caps.operations,
                     OperationCapabilities {
-                        create_draft: false,
                         permanent_delete,
                         ..expected_operations
                     }

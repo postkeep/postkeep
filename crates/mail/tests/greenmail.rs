@@ -755,6 +755,9 @@ async fn saves_a_new_draft_without_sending_it() {
         .unwrap();
     assert_eq!(found.total, 1);
     let uid = found.messages[0].uid;
+    let (validity, appended) = saved.append_uid.unwrap();
+    assert_ne!(validity, 0);
+    assert_eq!(appended, uid);
     let (full, _) = imap.fetch_message("Drafts", uid, None).await.unwrap();
     assert_eq!(full.attachments.len(), 1);
     let file = imap
@@ -825,6 +828,9 @@ async fn saves_a_reply_draft_in_the_thread() {
         .await
         .unwrap();
     let uid = found.messages[0].uid;
+    let (validity, appended) = saved.append_uid.unwrap();
+    assert_ne!(validity, 0);
+    assert_eq!(appended, uid);
     let draft = imap.fetch_message("Drafts", uid, None).await.unwrap().0;
     imap.logout().await.unwrap();
     let original_id = original.headers.message_id.unwrap();

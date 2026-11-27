@@ -15,12 +15,12 @@ use std::time::Instant;
 
 use postkeep_mail::{
     AttachmentData, Check, DeleteMode, EmailAddress, Flag, Folder, ImapSession, InFlight,
-    MailClient, Message, MessageFlags, OutgoingMessage, Paging, Progress, Reply, SavedDraft,
-    SearchQuery, SendOptions, SentMessage, SpecialUse, UID_SET_MAX, Uid, already_in_trash,
-    same_folder,
+    MailClient, Message, MessageFlags, OutgoingMessage, Paging, Progress, Reply, SearchQuery,
+    SendOptions, SentMessage, SpecialUse, UID_SET_MAX, Uid, already_in_trash, same_folder,
 };
 use postkeep_store::{AccountId, Provider, Store};
 use postkeep_upstream::{ApiError, http::HttpError};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use self::selection::SearchSelection;
@@ -34,10 +34,6 @@ pub use capabilities::{
 use crate::metrics::Metrics;
 use crate::pool::{Fingerprint, ImapPool};
 use crate::tools::WebhookControl;
-
-/// The refusal of `create_draft` on accounts without IMAP.
-const NO_DRAFTS: &str =
-    "create_draft isn't available for Outlook or for Gmail with Sign in with Google";
 
 /// A folder of the mailbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,6 +412,8 @@ const fn unanswered(error: &ApiError) -> bool {
 
 const TOO_LARGE_TO_FORWARD: &str = "the message to forward is too large for postkeep to read";
 pub(crate) const MAY_HAVE_BEEN_SENT: &str = "The message may have been sent. Check Sent before trying again, but no copy there does not prove it was not sent.";
+pub(crate) const DRAFT_UNCONFIRMED: &str =
+    "The provider did not confirm the draft. Check Drafts before trying again.";
 
 fn provider_may_have_acted(error: &ApiError) -> bool {
     transport_may_have_acted(error)
@@ -1075,19 +1073,16 @@ impl Mailbox {
         }
     }
 
-    /// The mailbox that saves drafts: IMAP. Outlook and Gmail are refused.
-    pub(crate) fn drafts(&self) -> MailboxResult<&ImapMailbox> {
-        match self {
-            Self::Imap(imap) => Ok(imap),
-            Self::Graph(_) | Self::Gmail(_) => Err(MailboxError::Message(NO_DRAFTS.to_owned())),
-        }
-    }
-
     /// Saves a new draft.
     pub async fn create_draft(&self, message: &OutgoingMessage) -> MailboxResult<SavedDraft> {
-        let imap = self.drafts()?;
-        imap.session(async |session| imap.client.save_draft(session, message).await)
-            .await
+        match self {
+            Self::Imap(imap) => imap
+                .session(async |session| imap.client.save_draft(session, message).await)
+                .await
+                .map(imap_saved_draft),
+            Self::Graph(graph) => graph.create_draft(message).await,
+            Self::Gmail(gmail) => gmail.create_draft(message).await,
+        }
     }
 
     /// Saves a reply to a message as a draft.
@@ -1096,21 +1091,53 @@ impl Mailbox {
         selector: &Selector,
         reply: &Reply,
     ) -> MailboxResult<SavedDraft> {
-        let imap = self.drafts()?;
-        let target = selector.imap()?;
-        imap.session(async |session| {
-            imap.client
-                .save_draft_reply(
-                    session,
-                    &target.folder,
-                    target.uid,
-                    target.uid_validity,
-                    reply,
-                )
+        match self {
+            Self::Imap(imap) => {
+                let target = selector.imap()?;
+                imap.session(async |session| {
+                    imap.client
+                        .save_draft_reply(
+                            session,
+                            &target.folder,
+                            target.uid,
+                            target.uid_validity,
+                            reply,
+                        )
+                        .await
+                })
                 .await
-        })
-        .await
+                .map(imap_saved_draft)
+            }
+            Self::Graph(graph) => graph.create_reply_draft(selector, reply).await,
+            Self::Gmail(gmail) => gmail.create_reply_draft(selector, reply).await,
+        }
     }
+}
+
+/// A draft saved without sending it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct SavedDraft {
+    /// Opaque message id of the saved draft for immediate `get_message` readback, when the provider returns one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Message-ID of the draft, without angle brackets.
+    pub message_id: String,
+    /// The Drafts folder the draft was saved to.
+    pub folder: String,
+}
+
+fn imap_saved_draft(saved: postkeep_mail::SavedDraft) -> SavedDraft {
+    SavedDraft {
+        id: imap_draft_id(&saved.folder, saved.append_uid),
+        message_id: saved.message_id,
+        folder: saved.folder,
+    }
+}
+
+fn imap_draft_id(folder: &str, append_uid: Option<(u32, Uid)>) -> Option<String> {
+    let (uid_validity, uid) = append_uid?;
+    let candidate = id::imap_id(folder, uid, Some(uid_validity));
+    id::parse_imap_id(&candidate).is_some().then_some(candidate)
 }
 
 fn imap_run_end(
@@ -1648,6 +1675,19 @@ impl ImapMailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imap_saved_draft_omits_unusable_or_absent_id() {
+        assert_eq!(
+            imap_draft_id("Drafts", Some((42, 7))).as_deref(),
+            Some("imap.7.RHJhZnRz.42")
+        );
+        assert_eq!(imap_draft_id("Drafts", None), None);
+        assert_eq!(
+            imap_draft_id(&"d".repeat(id::MAX_ID_LEN), Some((42, 7))),
+            None
+        );
+    }
 
     #[test]
     fn imap_outcomes_keep_the_check_and_confirmed_writes_on_error() {

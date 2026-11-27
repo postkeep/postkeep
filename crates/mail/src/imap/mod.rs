@@ -529,13 +529,17 @@ impl ImapSession {
 
     /// Appends a composed draft to the Drafts folder.
     pub(crate) async fn save_draft(&mut self, draft: Composed) -> Result<SavedDraft> {
-        let folder = with_timeout(
+        let (folder, append_uid) = with_timeout(
             self.timeout,
             messages::save_draft(&mut self.conn, self.drafts_folder.as_deref(), &draft.raw),
         )
         .await?;
         let message_id = draft.message_id;
-        Ok(SavedDraft { message_id, folder })
+        Ok(SavedDraft {
+            message_id,
+            folder,
+            append_uid,
+        })
     }
 
     /// Whether the server supports `IDLE` (RFC 2177).

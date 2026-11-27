@@ -103,11 +103,14 @@ impl From<Result<Self>> for SentCopy {
 
 /// A draft saved by [`MailClient::save_draft`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SavedDraft {
     /// `Message-ID` of the draft, without angle brackets.
     pub message_id: String,
     /// The Drafts folder the draft was appended to.
     pub folder: String,
+    /// `(UIDVALIDITY, UID)` reported by RFC 4315 `APPENDUID`, when both are nonzero.
+    pub append_uid: Option<(u32, Uid)>,
 }
 
 impl MailClient {

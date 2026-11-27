@@ -24,19 +24,19 @@ use postkeep_mail::{
     SentCopy, SentMessage, mime,
 };
 use postkeep_store::Provider;
-use postkeep_upstream::http::{MESSAGE_LIMIT, join_segments};
+use postkeep_upstream::http::{JSON_LIMIT, MESSAGE_LIMIT, join_segments};
 use postkeep_upstream::{ApiClient, ApiError, HttpResponse};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use url::Url;
 
 use super::capabilities::SelectionFilterRules;
-use super::graph::{api_error_message, provider_error, provider_message_id};
+use super::graph::{api_error_message, provider_error, provider_message_id, submit_error};
 use super::id::{self, GMAIL_PREFIX};
 use super::{
-    Change, Criteria, Cutoff, Fetched, FolderEntry, IdsFrom, MailboxError, MailboxResult, Mode,
-    Outcome, Page, SENT_NO_ANSWER, Selected, Selector, SendError, Status, Summary, maybe_sent,
-    provider_outcomes, unanswered,
+    Change, Criteria, Cutoff, DRAFT_UNCONFIRMED, Fetched, FolderEntry, IdsFrom, MailboxError,
+    MailboxResult, Mode, Outcome, Page, SENT_NO_ANSWER, SavedDraft, Selected, Selector, SendError,
+    Status, Summary, maybe_sent, provider_may_have_acted, provider_outcomes, unanswered,
 };
 
 const USER_PATH: &[&str] = &["gmail", "v1", "users", "me"];
@@ -139,6 +139,11 @@ struct MessageList {
 #[derive(Debug, Deserialize)]
 struct MessageRef {
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GmailDraft {
+    message: Option<MessageRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,8 +272,8 @@ impl GmailMailbox {
         join_segments(&self.api.endpoints().gmail, &all)
     }
 
-    fn upload_url(&self) -> Url {
-        let all = [&["upload"][..], USER_PATH, &["messages", "send"]].concat();
+    fn upload_url(&self, segments: &[&str]) -> Url {
+        let all = [&["upload"][..], USER_PATH, segments].concat();
         let mut url = join_segments(&self.api.endpoints().gmail, &all);
         url.query_pairs_mut().append_pair("uploadType", "multipart");
         url
@@ -957,37 +962,60 @@ impl GmailMailbox {
 
     async fn submit(&self, raw: &[u8], thread: Option<&str>) -> MailboxResult<()> {
         let metadata = thread.map_or_else(|| json!({}), |id| json!({ "threadId": id }));
-        let boundary = loop {
-            let boundary = uuid::Uuid::new_v4().simple().to_string();
-            if !raw
-                .windows(boundary.len())
-                .any(|w| w == boundary.as_bytes())
-            {
-                break boundary;
-            }
-        };
-        let start = format!(
-            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n\
-             --{boundary}\r\nContent-Type: message/rfc822\r\n\r\n"
-        );
-        let end = format!("\r\n--{boundary}--\r\n");
-        let mut body = Vec::with_capacity(start.len() + raw.len() + end.len());
-        body.extend_from_slice(start.as_bytes());
-        body.extend_from_slice(raw);
-        body.extend_from_slice(end.as_bytes());
+        let (content_type, body) = multipart_body(&metadata, raw);
         self.api
             .call_status(
                 Method::POST,
-                &self.upload_url(),
-                &[(
-                    header::CONTENT_TYPE,
-                    format!("multipart/related; boundary={boundary}"),
-                )],
-                Bytes::from(body),
+                &self.upload_url(&["messages", "send"]),
+                &[(header::CONTENT_TYPE, content_type)],
+                body,
                 || true,
             )
             .await
             .map_err(|err| maybe_sent(SendError::Api(err, "Google")))
+    }
+
+    async fn upload_draft(
+        &self,
+        composed: mime::Composed,
+        thread: Option<&str>,
+    ) -> MailboxResult<SavedDraft> {
+        let metadata =
+            json!({ "message": thread.map_or_else(|| json!({}), |id| json!({ "threadId": id })) });
+        let (content_type, body) = multipart_body(&metadata, &composed.raw);
+        let answer = self
+            .api
+            .call(
+                Method::POST,
+                &self.upload_url(&["drafts"]),
+                &[(header::CONTENT_TYPE, content_type)],
+                body,
+                JSON_LIMIT,
+            )
+            .await
+            .map_err(|error| {
+                if provider_may_have_acted(&error) {
+                    DRAFT_UNCONFIRMED.to_owned().into()
+                } else {
+                    submit_error(&error, "Google")
+                }
+            })?;
+        let id = self
+            .api
+            .parse::<GmailDraft>(&answer)
+            .ok()
+            .and_then(|draft| draft.message)
+            .map(|message| id::provider_id(GMAIL_PREFIX, &message.id))
+            .filter(|candidate| id::parse_provider_id(GMAIL_PREFIX, candidate).is_some())
+            .ok_or_else(|| {
+                "Google did not return a valid draft id. Check Drafts before trying again."
+                    .to_owned()
+            })?;
+        Ok(SavedDraft {
+            id: Some(id),
+            message_id: composed.message_id,
+            folder: "Drafts".to_owned(),
+        })
     }
 
     /// Gmail always files sent mail under Sent.
@@ -1018,6 +1046,32 @@ impl GmailMailbox {
         reply: &Reply,
         options: SendOptions,
     ) -> MailboxResult<SentMessage> {
+        let (composed, thread) = self.compose_reply(selector, reply).await?;
+        self.submit(&composed.raw, thread.as_deref()).await?;
+        Ok(Self::sent(composed.message_id, options))
+    }
+
+    /// Saves a new message to Drafts without sending it.
+    pub async fn create_draft(&self, message: &OutgoingMessage) -> MailboxResult<SavedDraft> {
+        let composed = mime::compose(&EmailAddress::new(self.email.clone()), message)?;
+        self.upload_draft(composed, None).await
+    }
+
+    /// Saves a reply to Drafts, in the same Gmail thread, without sending it.
+    pub async fn create_reply_draft(
+        &self,
+        selector: &Selector,
+        reply: &Reply,
+    ) -> MailboxResult<SavedDraft> {
+        let (composed, thread) = self.compose_reply(selector, reply).await?;
+        self.upload_draft(composed, thread.as_deref()).await
+    }
+
+    async fn compose_reply(
+        &self,
+        selector: &Selector,
+        reply: &Reply,
+    ) -> MailboxResult<(mime::Composed, Option<String>)> {
         let message = Self::message_id(selector)?;
         let (metadata, raw) = self.raw(message).await?;
         let original = mime::parse_headers(&raw).ok_or_else(|| {
@@ -1025,10 +1079,33 @@ impl GmailMailbox {
         })?;
         let composed =
             mime::compose_reply(&EmailAddress::new(self.email.clone()), &original, reply)?;
-        self.submit(&composed.raw, metadata.thread_id.as_deref())
-            .await?;
-        Ok(Self::sent(composed.message_id, options))
+        Ok((composed, metadata.thread_id))
     }
+}
+
+fn multipart_body(metadata: &Value, raw: &[u8]) -> (String, Bytes) {
+    let boundary = loop {
+        let boundary = uuid::Uuid::new_v4().simple().to_string();
+        if !raw
+            .windows(boundary.len())
+            .any(|w| w == boundary.as_bytes())
+        {
+            break boundary;
+        }
+    };
+    let start = format!(
+        "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n\
+         --{boundary}\r\nContent-Type: message/rfc822\r\n\r\n"
+    );
+    let end = format!("\r\n--{boundary}--\r\n");
+    let mut body = Vec::with_capacity(start.len() + raw.len() + end.len());
+    body.extend_from_slice(start.as_bytes());
+    body.extend_from_slice(raw);
+    body.extend_from_slice(end.as_bytes());
+    (
+        format!("multipart/related; boundary={boundary}"),
+        Bytes::from(body),
+    )
 }
 
 /// Decodes Gmail's `raw` field (base64url, with or without padding).

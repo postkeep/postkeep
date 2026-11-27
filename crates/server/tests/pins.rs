@@ -35,6 +35,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig};
+use postkeep::tools::CreateDraftOutput;
 use postkeep::watch::{WatchConfig, Watchers};
 use postkeep_auth::{AuthConfig, CredentialVerifier, VerifyFuture};
 use postkeep_mail::{ImapServer, ImapServers};
@@ -756,6 +757,34 @@ async fn route_table(harness: &Harness) -> String {
         }
     }
     table
+}
+
+#[test]
+fn create_draft_output_schema_and_serialization() {
+    let mut draft = CreateDraftOutput {
+        id: Some("gmail.18d2".to_owned()),
+        message_id: "draft@example.com".to_owned(),
+        folder: "Drafts".to_owned(),
+    };
+    assert_eq!(serde_json::to_value(&draft).unwrap()["id"], "gmail.18d2");
+    draft.id = None;
+    assert_eq!(
+        serde_json::to_value(&draft).unwrap(),
+        json!({
+            "message_id": "draft@example.com", "folder": "Drafts"
+        })
+    );
+    let pin: Value =
+        serde_json::from_str(&std::fs::read_to_string(pin_path("tools-list.json")).unwrap())
+            .unwrap();
+    let tools = pin["result"]["tools"].as_array().unwrap();
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "create_draft")
+        .unwrap();
+    let schema = &tool["outputSchema"];
+    assert!(schema["properties"].get("id").is_some());
+    assert_eq!(schema["required"], json!(["message_id", "folder"]));
 }
 
 #[tokio::test]

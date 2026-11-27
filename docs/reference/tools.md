@@ -10,7 +10,7 @@ What each tool does, the parameters it takes, and how the providers differ.
 | `download_attachment` | Downloads one attachment of a message: images as images, text as text, other files as base64, or any file as base64 with `base64: true`, up to 3 MiB. It stays unread. |
 | `send_message` | Sends a new plain-text email with any attachments or forwards a message with its attachments. Saves a copy to Sent by default. |
 | `reply_to_message` | Replies, or replies to all, with any attachments, and keeps the thread together. |
-| `create_draft` | Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it. Not available for Outlook or for Gmail with Sign in with Google. |
+| `create_draft` | Saves a new draft or threaded reply, with any attachments, to the Drafts folder without sending it. |
 | `update_flags` | Marks a message read or unread, flagged or unflagged. |
 | `move_message` | Moves a message to another folder. |
 | `delete_message` | Moves a message to the trash, or deletes it for good when you ask. |
@@ -132,7 +132,7 @@ The tools behave the same for every provider, with these differences:
 | Already as asked | IMAP reads flags and a message's own folder. On Gmail over IMAP, a move out of All Mail into one of your labels checks for that label. A move out of All Mail into the inbox or another Gmail folder, or out of another server's All folder, can't see a copy already in the destination, and the answer says so. | Reads each message an id names before changing it; a selection's listing already shows it. | Reads each message an id names before changing it; a selection's listing already shows it. A move is already done when every label the move adds is present and none it removes is present. For example, a message with `Receipts` and `INBOX` still needs to move to `Receipts` to remove `INBOX`. |
 | `folder` + `uid` | Accepted | Not accepted; use `id` | Not accepted; use `id` |
 | Sent copy | Saved to Sent unless `save_to_sent` is false; Gmail saves its own, so none is added | Saved by Outlook | Saved by Gmail |
-| Drafts | Supported | Refused | Refused |
+| Drafts | Supported; returns `id` when `APPENDUID` yields a usable id; if the result has no `id`, call `search_messages` on the returned folder | Supported; returns `id` | Supported; returns `id` — use it for immediate `get_message`; Gmail does not support label moves/trash on drafts, and editing a draft changes its message id |
 | Permanent delete | Supported, except on Gmail: refused; delete without `permanent` to move it to Trash | Supported | Refused: postkeep doesn't request the scope that allows it, so messages go to Trash |
 | Search totals | Exact, or, when `from`, `to`, `subject`, `since` or `before` is given and the messages to check go past the page, an upper estimate: the server's count less what postkeep dropped so far. | For a search by date, unread or flagged alone, exact when Microsoft gives its count. By sender, recipient, subject or text, counted among the newest messages Microsoft's search returns, which it has been seen to cut off at a few hundred: past that an estimate; below it, the count of the listing Microsoft returned. | Exact up to as many matches as `ids` takes; past that Google's estimate. |
 | Search text | The server's search, then postkeep checks each message: `from`, `to` and `subject` must hold the text anywhere in the field as results show it, ignoring case, and `since` and `before` go by the day the `Date` header is written on (none: no match). Gmail's own search matches whole words, so it can find fewer. A selection can't use `text`. | Whole words, ignoring case and punctuation; `from`, `to` and `subject` must then hold the text as given. `text` searches the sender, subject and body, and a selection can use it only as one word of letters and digits. | Whole words in the given order, ignoring case and punctuation; a selection can't use `to`, and `from`, `subject` and `text` take only one word of letters and digits; `from` also accepts one address, but not `me`. |
@@ -271,9 +271,14 @@ With `id`, the draft is a reply that keeps the thread: the recipients, the
 the original, as in `reply_to_message`. The original is not marked as
 answered, since nothing is sent. Without `id`, it needs at least one
 recipient, in `to`, `cc` or `bcc`. The draft keeps its `bcc` recipients, as
-a mail app's draft does, and is never sent. Not available for Outlook or for
-Gmail with Sign in with Google. To find the draft, call `search_messages` on
-the returned folder; open it in a mail app to edit or send it.
+a mail app's draft does, and is never sent. Outlook and Gmail with Sign in
+with Google return the draft's `id`. IMAP returns `id` when `APPENDUID` yields
+a usable id. If the result has no `id`, call `search_messages` on the returned
+folder. On IMAP and Outlook, the draft id also works with `move_message` and
+`delete_message`.
+For Gmail drafts, use it for immediate `get_message`; Gmail does not support
+label moves/trash on drafts, and editing a draft changes its message id.
+Open a draft in a mail app to edit or send it.
 
 ## Files
 
@@ -297,11 +302,13 @@ See [`POSTKEEP_MAX_BODY_BYTES`](../configuration.md#request-limits).
 
 The tool schema gives the per-call file cap (`maxItems` on `attachments`).
 The mail provider can impose lower limits and decides which file types it
-accepts. With Sign in with Google, Gmail uses its upload route, up to 35 MiB
-for the encoded message. Outlook sends small new messages and replies as MIME.
+accepts. With Sign in with Google, Gmail uses its upload route for sends and
+saved drafts, up to 35 MiB for the encoded message. Outlook sends small new messages and replies as MIME.
 If the text, HTML and files together are over 2 MiB or the encoded request
 exceeds 4 MB, Outlook sends through a draft instead. Forwards also use a draft.
-Files under 3 MB go on the draft in one request; larger files upload in ranges.
+When Outlook uses a draft (forwards, large sends and saved drafts), files under
+3,000,000 bytes go on the draft in one request; larger files upload in 3.75 MiB
+ranges.
 postkeep carries all the files or refuses the message.
 `sent` means the provider took it, not that it was delivered: the recipient's
 server can still bounce a large or blocked file. If the provider did not answer

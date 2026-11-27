@@ -1812,14 +1812,7 @@ impl SendOutput {
     }
 }
 
-/// Result of `create_draft`.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct CreateDraftOutput {
-    /// Message-ID of the draft, without angle brackets.
-    pub message_id: String,
-    /// The Drafts folder the draft was saved to.
-    pub folder: String,
-}
+pub use crate::mailbox::SavedDraft as CreateDraftOutput;
 
 /// Result of actions that change a message or folder.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2956,8 +2949,8 @@ impl MailTools {
         description = format!("Save a new draft message with up to {MAX_ATTACHMENTS} attachments to the Drafts folder without sending it. Needs at least one \
                        recipient, in to, cc or bcc. To draft a reply that keeps the thread (Re: subject, \
                        In-Reply-To and References), pass the id of the message; the recipients are then derived \
-                       as in reply_to_message. Not available for Outlook or for Gmail with Sign in with Google. \
-                       To find the draft later, call search_messages on the returned folder."),
+                       as in reply_to_message. Returns the draft's id for immediate get_message readback \
+                       when the provider reports one; otherwise call search_messages on the returned folder."),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2969,6 +2962,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(mut params): Parameters<CreateDraftParams>,
+        cancel: CancellationToken,
     ) -> Result<Json<CreateDraftOutput>, String> {
         self.resolve(&parts, &mut params.attachments).await?;
         let files = files_line(&params.attachments);
@@ -2989,14 +2983,27 @@ impl MailTools {
                     ..Selector::default()
                 };
                 let mailbox = self.mailbox(&parts).await?;
-                mailbox.drafts().map_err(mailbox_error)?;
-                let _permit = uploads.reserve().await?;
+                let permit = uploads.reserve().await?;
                 uploads.load(bucket, &mut reply.attachments).await?;
-                let save = async {
-                    mailbox
-                        .create_reply_draft(&selector, &reply)
-                        .await
-                        .map_err(mailbox_error)
+                let save = async move {
+                    match mailbox {
+                        Mailbox::Graph(graph) => {
+                            graph
+                                .create_reply_draft_with_cancel(
+                                    &selector,
+                                    Cow::Owned(reply),
+                                    cancel,
+                                    permit,
+                                )
+                                .await
+                        }
+                        mailbox => {
+                            let saved = mailbox.create_reply_draft(&selector, &reply).await;
+                            drop(permit);
+                            saved
+                        }
+                    }
+                    .map_err(mailbox_error)
                 };
                 self.using_uploads(&parts, &uploads, save).await?
             } else {
@@ -3012,17 +3019,27 @@ impl MailTools {
                     params.attachments,
                 )?;
                 let mailbox = self.mailbox(&parts).await?;
-                mailbox.drafts().map_err(mailbox_error)?;
-                let _permit = uploads.reserve().await?;
+                let permit = uploads.reserve().await?;
                 uploads.load(bucket, &mut message.attachments).await?;
-                let save = async { mailbox.create_draft(&message).await.map_err(mailbox_error) };
+                let save = async move {
+                    match mailbox {
+                        Mailbox::Graph(graph) => {
+                            graph
+                                .create_draft_with_cancel(Cow::Owned(message), cancel, permit)
+                                .await
+                        }
+                        mailbox => {
+                            let saved = mailbox.create_draft(&message).await;
+                            drop(permit);
+                            saved
+                        }
+                    }
+                    .map_err(mailbox_error)
+                };
                 self.using_uploads(&parts, &uploads, save).await?
             };
             tracing::info!("draft saved");
-            Ok(Json(CreateDraftOutput {
-                message_id: saved.message_id,
-                folder: saved.folder,
-            }))
+            Ok(Json(saved))
         }
         .await
         .map_err(|error: String| with_files(&error, &files))
