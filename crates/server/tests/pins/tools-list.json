@@ -324,7 +324,7 @@
       {
         "name": "delete_message",
         "title": "Delete message",
-        "description": "Delete messages: moves them to the trash, or removes one for good with permanent=true (not on Gmail; cannot be undone; confirm with the user first).",
+        "description": "Delete messages: moves them to the trash, or removes one for good with permanent=true (not on Gmail; cannot be undone; confirm with the user first). When trashing, use the new ids in new_ids; for unmapped_ids, search the trash.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
@@ -363,7 +363,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it.",
+              "description": "List every id the call named or its selection listed, not only those that weren't changed. For a move or trash, include all new and unmapped ids. With explicit ids by default, each of those fields is omitted if it has more than 50 entries. The answer can be long; counts come without it.",
               "type": "boolean"
             },
             "permanent": {
@@ -482,12 +482,19 @@
               "additionalProperties": {
                 "type": "string"
               },
-              "description": "With list_all: the new id of each moved message whose id changed.",
+              "description": "Old to new ids for messages given a new id after a move or trash. Returned by default for one message or when explicit `ids` yields at most 50 entries. Pass `list_all: true` on the original call for every entry or for a selection.",
               "type": "object"
             },
             "result": {
               "description": "What was done, or would be done in a dry run.",
               "type": "string"
+            },
+            "unmapped_ids": {
+              "description": "Old IMAP ids for moved or trashed messages the server gave no new id; search the destination. Returned by default for one message or when explicit `ids` yields at most 50 entries. Pass `list_all: true` on the original call for every entry or for a selection.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
@@ -1279,7 +1286,7 @@
       {
         "name": "move_message",
         "title": "Move message",
-        "description": "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). Ids from current Outlook searches and Gmail ids (Sign in with Google) stay the same; on IMAP accounts, Gmail with an app password too, a moved message's old id finds nothing. Use any new id the answer gives (for one message, or with list_all); where an IMAP move gives none, search the destination.",
+        "description": "Move messages to another folder. To archive, move to the folder list_folders marks archive (All Mail on Gmail). Ids from current Outlook searches and Gmail ids (Sign in with Google) stay the same; on IMAP accounts, Gmail with an app password too, a moved message's old id finds nothing. Use the new ids in new_ids; for unmapped_ids, search the destination.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
@@ -1322,7 +1329,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it.",
+              "description": "List every id the call named or its selection listed, not only those that weren't changed. For a move or trash, include all new and unmapped ids. With explicit ids by default, each of those fields is omitted if it has more than 50 entries. The answer can be long; counts come without it.",
               "type": "boolean"
             },
             "selection": {
@@ -1439,12 +1446,19 @@
               "additionalProperties": {
                 "type": "string"
               },
-              "description": "With list_all: the new id of each moved message whose id changed.",
+              "description": "Old to new ids for messages given a new id after a move or trash. Returned by default for one message or when explicit `ids` yields at most 50 entries. Pass `list_all: true` on the original call for every entry or for a selection.",
               "type": "object"
             },
             "result": {
               "description": "What was done, or would be done in a dry run.",
               "type": "string"
+            },
+            "unmapped_ids": {
+              "description": "Old IMAP ids for moved or trashed messages the server gave no new id; search the destination. Returned by default for one message or when explicit `ids` yields at most 50 entries. Pass `list_all: true` on the original call for every entry or for a selection.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
@@ -2654,7 +2668,7 @@
             },
             "list_all": {
               "default": false,
-              "description": "List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it.",
+              "description": "List every id the call named or its selection listed, not only those that weren't changed. For a move or trash, include all new and unmapped ids. With explicit ids by default, each of those fields is omitted if it has more than 50 entries. The answer can be long; counts come without it.",
               "type": "boolean"
             },
             "read": {
@@ -2776,12 +2790,19 @@
               "additionalProperties": {
                 "type": "string"
               },
-              "description": "With list_all: the new id of each moved message whose id changed.",
+              "description": "Old to new ids for messages given a new id after a move or trash. Returned by default for one message or when explicit `ids` yields at most 50 entries. Pass `list_all: true` on the original call for every entry or for a selection.",
               "type": "object"
             },
             "result": {
               "description": "What was done, or would be done in a dry run.",
               "type": "string"
+            },
+            "unmapped_ids": {
+              "description": "Old IMAP ids for moved or trashed messages the server gave no new id; search the destination. Returned by default for one message or when explicit `ids` yields at most 50 entries. Pass `list_all: true` on the original call for every entry or for a selection.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [

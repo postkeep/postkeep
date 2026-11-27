@@ -2362,7 +2362,13 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
             vec![json!({ "id": "0", "status": 201, "body": { "id": "AAMk-1-new" } })],
         )
         .await;
-        let moved = harness.call_ok(&token, "move_message", json!({ "ids": ["graph.new-move"], "destination": "Inbox/Projects", "list_all": true })).await;
+        let moved = harness
+            .call_ok(
+                &token,
+                "move_message",
+                json!({ "id": "graph.new-move", "destination": "Inbox/Projects" }),
+            )
+            .await;
         assert_eq!(
             moved["new_ids"],
             json!({ "graph.new-move": "graph.AAMk-1-new" })
@@ -2386,6 +2392,10 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         assert_eq!(
             trashed["result"],
             "moved message graph.AAMk-2 to the trash; its new id is graph.AAMk-2-new"
+        );
+        assert_eq!(
+            trashed["new_ids"],
+            json!({ "graph.AAMk-2": "graph.AAMk-2-new" })
         );
     }
     {

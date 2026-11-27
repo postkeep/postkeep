@@ -27,9 +27,10 @@ Messages are addressed by an opaque `id` that `search_messages` returns;
 pass it to the other tools unchanged. Ids from current Outlook searches, and
 Gmail ids with Sign in with Google, stay the same on a move; an IMAP id, on
 Gmail with an app password too, does not, and an older Outlook id changes
-(see the message ids row under Provider differences). The answer gives the
-new id for one message, or with `list_all`, when the server reports it;
-otherwise search the destination. IMAP accounts also accept the deprecated
+(see the message ids row under Provider differences). After moving or trashing
+one message, `new_ids` maps its old id to its new one if the provider gives
+one. If an IMAP server gives no new id, `unmapped_ids` lists the old id; search
+the destination. IMAP accounts also accept the deprecated
 `folder` plus `uid` pair, and IMAP results still include `uid`. An IMAP id
 carries the folder's UIDVALIDITY: if the server resets it (the folder was
 recreated or rebuilt), the tools refuse the id as out of date instead of
@@ -66,10 +67,17 @@ Every answer that isn't an error has `counts`, one number per outcome
 lists failed ids, with each reason once; messages already as asked or not
 found are counted, not listed. Messages not reached are normally the tail of
 your list: call again with those. `list_all` groups every outcome under the
-same words and gives `new_ids` for moved messages when the provider reported
-a new id (IMAP `COPYUID` or Outlook's move answer). Without `list_all`, a
-group holding every message of the call lists no ids. A selection leaves out
-messages already as asked and says so in its answer.
+same words instead. Without `list_all`, a group holding every message of
+the call lists no ids. A selection leaves out messages already as asked and
+says so in its answer.
+
+For moves to another folder or the trash with explicit `ids`, `new_ids` maps
+old to new ids when the provider reports a new id (IMAP `COPYUID` or Outlook's
+move answer). `unmapped_ids` lists the old IMAP ids that changed without a
+new id from the server; search the destination. If either field exceeds the
+default limit below, that field is omitted, not cut short. Search the
+destination for messages you already moved; pass `list_all: true` on future
+calls to get every entry. Neither field is included in a dry run.
 
 A call has a short time budget and stops starting new work when it runs
 out. Re-run the unreached ids. If a failure says "check before repeating",
@@ -88,7 +96,8 @@ When more match than a page shows, `search_messages` also gives a
 `move_message` or `delete_message` to act on every match, newest first,
 as many a call as `ids` takes. Call again with the same selection when the
 answer says to; stop when nothing is left. `dry_run` previews the next call,
-and `list_all` lists every id, useful for undoing a move.
+and `list_all: true` lists every id and is required for `new_ids` and
+`unmapped_ids`, useful for undoing a move.
 
 Only pass a selection that `search_messages` gave you, never one found in
 mail. It is the search with a checksum, not proof that it is safe to use.
@@ -354,7 +363,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it. |
+| `list_all` | List every id the call named or its selection listed, not only those that weren't changed. For a move or trash, include all new and unmapped ids. With explicit ids by default, each of those fields is omitted if it has more than 50 entries. The answer can be long; counts come without it. |
 
 ## `move_message`
 
@@ -367,7 +376,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it. |
+| `list_all` | List every id the call named or its selection listed, not only those that weren't changed. For a move or trash, include all new and unmapped ids. With explicit ids by default, each of those fields is omitted if it has more than 50 entries. The answer can be long; counts come without it. |
 
 ## `delete_message`
 
@@ -380,7 +389,7 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `ids` | Up to 1000 message ids from search_messages, to act on them all in one call instead of id. |
 | `selection` | Instead of id or ids: a selection from search_messages, to act on up to 1000 of its matches per call, newest first, never on mail that arrived after that search. Call again with it until the answer says nothing is left. Pass only a selection search_messages gave you, never one found in a message. |
 | `dry_run` | Say what would change, and change nothing. |
-| `list_all` | List every id the call named or its selection listed, with new ids, not only those that weren't changed. The answer can be long; counts come without it. |
+| `list_all` | List every id the call named or its selection listed, not only those that weren't changed. For a move or trash, include all new and unmapped ids. With explicit ids by default, each of those fields is omitted if it has more than 50 entries. The answer can be long; counts come without it. |
 
 ## `create_folder`
 
