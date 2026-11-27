@@ -326,6 +326,13 @@ without them.
 The event never contains message bodies. Unknown fields may be added later;
 ignore them.
 
+### Untrusted fields and prompt injection
+
+The opt-in `from` and `subject` fields and other mail header values
+(such as `message_id`) can contain attacker-controlled text. If you put
+these values in an LLM prompt, label them as untrusted data and keep them
+separate from instructions. A valid webhook signature doesn't change this.
+
 ## Headers
 
 | Header | Description |

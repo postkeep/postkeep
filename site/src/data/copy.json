@@ -529,7 +529,7 @@
     },
     "home.tools[2].desc": {
       "n": "H80",
-      "text": "Reads one message: headers, the body as Markdown (links and images as references, never loaded) or plain text, and the attachment list with ids; body_format: \"html\" gives the raw HTML instead (Markdown is recommended for LLMs). It stays unread."
+      "text": "Reads one message: headers, the body as Markdown by default (links and images as references, never loaded) or plain text, and the attachment list with ids; body_format: \"text\" omits HTML link destinations and images, and body_format: \"html\" gives the raw HTML when present. It stays unread."
     },
     "home.tools[3].name": {
       "n": "H81",

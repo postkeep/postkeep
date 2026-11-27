@@ -6,7 +6,7 @@ What each tool does, the parameters it takes, and how the providers differ.
 | ---- | ------------ |
 | `list_folders` | Lists your folders and their roles, such as Inbox, Sent and Trash. |
 | `search_messages` | Searches a folder by sender, recipient, subject, text, date, unread or flagged, newest first. |
-| `get_message` | Reads one message: headers, the body as Markdown (links and images as references, never loaded) or plain text, and the attachment list with ids; `body_format: "html"` gives the raw HTML instead (Markdown is recommended for LLMs). It stays unread. |
+| `get_message` | Reads one message: headers, the body as Markdown by default (links and images as references, never loaded) or plain text, and the attachment list with ids; `body_format: "text"` omits HTML link destinations and images, and `body_format: "html"` gives the raw HTML when present. It stays unread. |
 | `download_attachment` | Downloads one attachment of a message: images as images, text as text, other files as base64, or any file as base64 with `base64: true`, up to 3 MiB. It stays unread. |
 | `send_message` | Sends a new plain-text email with any attachments or forwards a message with its attachments. Saves a copy to Sent by default. |
 | `reply_to_message` | Replies, or replies to all, with any attachments, and keeps the thread together. |
