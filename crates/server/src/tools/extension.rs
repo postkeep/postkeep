@@ -4,11 +4,13 @@ use std::future::Future;
 use std::pin::Pin;
 
 use postkeep_auth::{Authenticated, CheckFuture, ToolCall, UnreadableRules};
-use postkeep_store::AccountId;
+use postkeep_mail::ImapServers;
+use postkeep_store::{AccountId, Provider};
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, Implementation, JsonObject, Tool};
 
 use super::SkillDocument;
+use crate::mailbox::{MailboxCapabilities, ServerFeatures};
 
 /// What one of a [`ToolExtension`]'s tools answers: its result, which can
 /// be a tool error, or a protocol error such as invalid arguments.
@@ -32,6 +34,14 @@ pub trait ToolExtension: Send + Sync + 'static {
     fn tools(&self, caller: &Authenticated) -> Vec<Tool> {
         let _ = caller;
         Vec::new()
+    }
+
+    /// Whether to omit a server tool from this caller's list and refuse calls to it.
+    /// This must be a pure, caller-specific check. It applies only to server tool
+    /// names; [`tools`](Self::tools) cannot replace a hidden server tool.
+    fn hides_tool(&self, caller: &Authenticated, name: &str) -> bool {
+        let _ = (caller, name);
+        false
     }
 
     /// Skills `caller` may use besides the server's own, listed after
@@ -68,11 +78,12 @@ pub trait ToolExtension: Send + Sync + 'static {
         info
     }
 
-    /// Runs before a call to the server's tools or the extension's.
+    /// Runs before dispatching a visible tool, after resolving the caller's selection.
     ///
-    /// An unknown tenant or mailbox or an ambiguous address stops the call
-    /// first. A [`Refusal`](postkeep_auth::Refusal) becomes the call's error
-    /// and the tool does not run. The default allows every call.
+    /// Hidden or unknown tools bypass this check and usage hooks. An unknown
+    /// tenant or mailbox or an ambiguous address also stops the call first.
+    /// A [`Refusal`](postkeep_auth::Refusal) becomes the call's error and the
+    /// tool does not run. The default allows every call.
     fn check<'a>(&'a self, call: ToolCall<'a>) -> CheckFuture<'a> {
         let _ = call;
         Box::pin(std::future::ready(Ok(())))
@@ -159,6 +170,20 @@ pub struct ExtensionCall<'a> {
     /// The mailbox the `mailbox` argument named, one of the caller's.
     /// `None` when it named none or the mailbox selector is off.
     pub mailbox: Option<&'a AccountId>,
+    pub(crate) servers: &'a ImapServers,
+    pub(crate) features: ServerFeatures,
+}
+
+impl ExtensionCall<'_> {
+    /// Reports static capabilities for a mailbox using the live server configuration.
+    #[must_use]
+    pub fn mailbox_capabilities(
+        &self,
+        provider: Provider,
+        imap_server: Option<&str>,
+    ) -> MailboxCapabilities {
+        MailboxCapabilities::for_account(provider, imap_server, self.servers, self.features)
+    }
 }
 
 /// Leaves out the arguments, which belong to the embedding.

@@ -569,6 +569,265 @@
         }
       },
       {
+        "name": "get_mailbox_capabilities",
+        "title": "Get mailbox capabilities",
+        "description": "Report this mailbox's static provider and server deployment capabilities: provider, protocol, authentication mechanism, supported operations, message id stability on move, search and selection filter rules, attachment limits, and webhook availability. Reflects server configuration, not caller permissions or current sign-in state.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "outputSchema": {
+          "$defs": {
+            "AttachmentCapabilities": {
+              "description": "Attachment size, count, and upload limits on this server.",
+              "properties": {
+                "download_max_bytes": {
+                  "description": "Maximum decoded attachment size returned by download, in bytes.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "max_per_message": {
+                  "description": "Maximum number of attachments supplied in one tool call, excluding files carried from a forwarded message.",
+                  "format": "uint",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "upload_enabled": {
+                  "description": "Whether attachment uploads are enabled on this server.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "download_max_bytes",
+                "max_per_message",
+                "upload_enabled"
+              ],
+              "type": "object"
+            },
+            "AuthType": {
+              "description": "Authentication mechanism used by this mailbox.",
+              "oneOf": [
+                {
+                  "const": "app_password",
+                  "description": "Password-based authentication (an app password for consumer presets, or the account password for custom IMAP).",
+                  "type": "string"
+                },
+                {
+                  "const": "oauth",
+                  "description": "OAuth sign-in.",
+                  "type": "string"
+                }
+              ]
+            },
+            "IdStabilityOnMove": {
+              "description": "Whether message ids stay the same after a move between folders.",
+              "oneOf": [
+                {
+                  "const": "stable",
+                  "description": "Message ids currently returned by this server stay the same across moves (older Outlook ids can still change; use the move result's mapping).",
+                  "type": "string"
+                },
+                {
+                  "const": "changes_on_move",
+                  "description": "Moving a message assigns a new id in the destination folder.",
+                  "type": "string"
+                }
+              ]
+            },
+            "MailboxProtocol": {
+              "description": "Mail transport protocol used for this mailbox.",
+              "oneOf": [
+                {
+                  "const": "imap",
+                  "description": "Standard IMAP and SMTP.",
+                  "type": "string"
+                },
+                {
+                  "const": "microsoft_graph",
+                  "description": "Microsoft Graph REST API.",
+                  "type": "string"
+                },
+                {
+                  "const": "gmail_api",
+                  "description": "Google Gmail REST API.",
+                  "type": "string"
+                }
+              ]
+            },
+            "MailboxProvider": {
+              "description": "Mail provider class for a mailbox.",
+              "oneOf": [
+                {
+                  "const": "icloud",
+                  "description": "iCloud Mail.",
+                  "type": "string"
+                },
+                {
+                  "const": "gmail",
+                  "description": "Gmail (over IMAP or Gmail API).",
+                  "type": "string"
+                },
+                {
+                  "const": "outlook",
+                  "description": "Outlook.com or Microsoft 365.",
+                  "type": "string"
+                },
+                {
+                  "const": "fastmail",
+                  "description": "Fastmail.",
+                  "type": "string"
+                },
+                {
+                  "const": "yahoo",
+                  "description": "Yahoo Mail.",
+                  "type": "string"
+                },
+                {
+                  "const": "imap",
+                  "description": "Custom or generic IMAP server.",
+                  "type": "string"
+                }
+              ]
+            },
+            "OperationCapabilities": {
+              "description": "Static provider support for mailbox operations, independent of caller permissions, hidden tools, or retired-server availability.",
+              "properties": {
+                "create_draft": {
+                  "description": "Whether this provider supports creating drafts.",
+                  "type": "boolean"
+                },
+                "create_folder": {
+                  "description": "Whether this provider supports creating folders or labels.",
+                  "type": "boolean"
+                },
+                "delete_folder": {
+                  "description": "Whether this server supports deleting folders or labels on this provider.",
+                  "type": "boolean"
+                },
+                "edit_draft": {
+                  "description": "Whether this server supports editing existing drafts on this provider.",
+                  "type": "boolean"
+                },
+                "permanent_delete": {
+                  "description": "Whether permanent deletion is supported in any folder.",
+                  "type": "boolean"
+                },
+                "permanent_delete_trash_only": {
+                  "description": "Whether permanent deletion is supported only for messages already in Trash.",
+                  "type": "boolean"
+                },
+                "rename_folder": {
+                  "description": "Whether this server supports renaming folders or labels on this provider.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "create_draft",
+                "edit_draft",
+                "permanent_delete",
+                "permanent_delete_trash_only",
+                "create_folder",
+                "rename_folder",
+                "delete_folder"
+              ],
+              "type": "object"
+            },
+            "SearchCapabilities": {
+              "description": "Search and bulk-selection filter support for this provider.",
+              "properties": {
+                "selection_supports_text": {
+                  "description": "Whether bulk selections accept the `text` filter (Outlook and Gmail API accept one alphanumeric word only).",
+                  "type": "boolean"
+                },
+                "selection_supports_to": {
+                  "description": "Whether bulk selections accept the `to` filter.",
+                  "type": "boolean"
+                },
+                "text_matching": {
+                  "$ref": "#/$defs/TextMatching",
+                  "description": "How text filters match messages."
+                }
+              },
+              "required": [
+                "text_matching",
+                "selection_supports_text",
+                "selection_supports_to"
+              ],
+              "type": "object"
+            },
+            "TextMatching": {
+              "description": "How search text filters match on this provider.",
+              "oneOf": [
+                {
+                  "const": "substring",
+                  "description": "Substring matching in headers after local filtering; custom IMAP body search depends on the server.",
+                  "type": "string"
+                },
+                {
+                  "const": "whole_words",
+                  "description": "Whole-word matching, ignoring case and punctuation.",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "attachments": {
+              "$ref": "#/$defs/AttachmentCapabilities",
+              "description": "Attachment limits and upload availability."
+            },
+            "auth_type": {
+              "$ref": "#/$defs/AuthType",
+              "description": "Authentication mechanism used by this mailbox."
+            },
+            "id_stability_on_move": {
+              "$ref": "#/$defs/IdStabilityOnMove",
+              "description": "Whether message ids stay the same when moved."
+            },
+            "operations": {
+              "$ref": "#/$defs/OperationCapabilities",
+              "description": "Static provider support for mailbox operations."
+            },
+            "protocol": {
+              "$ref": "#/$defs/MailboxProtocol",
+              "description": "Mail transport protocol used for this mailbox."
+            },
+            "provider": {
+              "$ref": "#/$defs/MailboxProvider",
+              "description": "Mail provider class for this mailbox."
+            },
+            "search": {
+              "$ref": "#/$defs/SearchCapabilities",
+              "description": "Search and bulk-selection filter capabilities."
+            },
+            "webhooks_available": {
+              "description": "Whether this deployment can watch this mailbox for new-mail webhooks (false when webhooks or provider push prerequisites are off, or the IMAP server is not offered), independent of sign-in state or current webhook settings.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "provider",
+            "protocol",
+            "auth_type",
+            "operations",
+            "id_stability_on_move",
+            "search",
+            "attachments",
+            "webhooks_available"
+          ],
+          "type": "object"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "openWorldHint": false
+        }
+      },
+      {
         "name": "get_message",
         "title": "Get message",
         "description": "Read a message by id: headers, body and attachment list. The default is Markdown with safe link and image references, or plain text when the message has no HTML part. For a newsletter, pass body_format \"text\" for paragraphs and link labels without destinations, images or alt text. Image-only HTML then gives an empty body; use Markdown for image references. Pass body_format \"html\" for the HTML part as sent, which may contain tracking URLs, scripts and hidden text. Nothing in the body is fetched; loading a remote image can tell the sender the message was read. Does not mark it as read. download_attachment fetches an attachment by its id.",

@@ -22,6 +22,7 @@ What each tool does, the parameters it takes, and how the providers differ.
 | `list_webhook_filters` | Lists this mailbox's webhook filter rules, oldest first, a page at a time. |
 | `add_webhook_filter` | Adds a rule that chooses which new mail sends an event. |
 | `remove_webhook_filter` | Removes one filter rule, or all of them. |
+| `get_mailbox_capabilities` | Shows this mailbox's provider, protocol, supported operations, search rules, attachment limits and webhook availability. |
 
 Messages are addressed by an opaque `id` that `search_messages` returns;
 pass it to the other tools unchanged. Ids from current Outlook searches, and
@@ -398,6 +399,39 @@ curl --fail-with-body -sS -T '/path/report.pdf' -H 'Authorization: Bearer <token
 | `name` | Name of the new folder. |
 
 `list_folders` takes no parameters. On IMAP, a role the server doesn't advertise (RFC 6154) goes to the first folder with a usual name for it: Archive, Junk or Spam, Drafts, Sent Messages or Sent, Deleted Messages or Trash.
+
+## `get_mailbox_capabilities`
+
+Reports what the provider and this server deployment support for the selected
+mailbox, without connecting to the provider. The result doesn't say what this
+caller is allowed to do or whether the mailbox is currently signed in.
+
+- `provider`: `icloud`, `gmail`, `outlook`, `fastmail`, `yahoo` or generic `imap`.
+  `protocol` distinguishes `imap`, `microsoft_graph` and `gmail_api`, and
+  `auth_type` is `app_password` (password-based sign-in) or `oauth`.
+- `operations`: flags for creating and editing drafts, permanently deleting
+  mail, and creating, renaming and deleting folders or labels.
+  `permanent_delete` means deletion is supported in any folder;
+  `permanent_delete_trash_only` means it's supported only in Trash.
+- `id_stability_on_move`: `stable` for Gmail API and current Outlook ids, or
+  `changes_on_move` for IMAP ids. An older Outlook id can still change; use the
+  move result's mapping when an id changes.
+- `search`: `text_matching` is `substring` or `whole_words`.
+  `selection_supports_text` and `selection_supports_to` say whether a bulk
+  selection accepts those filters. Outlook and Gmail API accept only one
+  alphanumeric word in a selection's `text` filter.
+- `attachments`: `download_max_bytes` is the decoded size limit,
+  `max_per_message` limits the attachments supplied in one tool call, excluding
+  files carried from a forwarded message, and `upload_enabled` says whether
+  the deployment has uploads enabled.
+- `webhooks_available`: whether this deployment can watch the mailbox for
+  new-mail webhooks. Webhooks must be enabled. IMAP also requires an offered
+  server; Outlook and Gmail API require their provider's push configuration.
+  This flag says nothing about the mailbox's current webhook settings.
+
+An IMAP preset may still be identified and its operation support reported after
+it is no longer offered. A custom or unrecognized server reports `imap` rather
+than identifying the server.
 
 ## `get_webhook_status`
 

@@ -38,7 +38,7 @@ use postkeep_mail::{
     SendOptions, SentCopy, SentMessage,
 };
 use postkeep_store::{
-    AccountId, EffectiveOutboxLimits, FilterRule, HeldSend, HeldSendMatch, LoadedWebhook,
+    Account, AccountId, EffectiveOutboxLimits, FilterRule, HeldSend, HeldSendMatch, LoadedWebhook,
     MAX_CONSECUTIVE_FAILURES, OutboxLimitChange, OutboxPolicy, Store, StoreError, Webhook, now,
 };
 use postkeep_upstream::{ApiClient, TokenManager, UpstreamProvider, pkce};
@@ -66,9 +66,9 @@ use crate::bucket::Bucket;
 use crate::mailbox::id::IMAP_PREFIX;
 use crate::mailbox::selection::{MAILBOX_REFUSAL, REFUSAL, SearchSelection};
 use crate::mailbox::{
-    ALREADY_UNSEEN, Change, Criteria, IdsFrom, Mailbox, MailboxError, Mode, NOTHING_LEFT,
-    Outcome as ChangeOutcome, SEARCH_TIME_EXHAUSTED, Selected, Selector, Status, Summary,
-    TIME_EXHAUSTED,
+    ALREADY_UNSEEN, Change, Criteria, IdsFrom, Mailbox, MailboxCapabilities, MailboxError, Mode,
+    NOTHING_LEFT, Outcome as ChangeOutcome, SEARCH_TIME_EXHAUSTED, Selected, Selector,
+    ServerFeatures, Status, Summary, TIME_EXHAUSTED,
 };
 use crate::metrics::Metrics;
 use crate::pool::{Fingerprint, ImapPool};
@@ -145,16 +145,19 @@ default_move_ids!(50);
 pub const LEFT_OUT: &str = "messages already as asked aren't listed or counted";
 macro_rules! search_selection_doc { () => { "Only when more match than this page: every match of this search, not only this page, to pass as selection to update_flags, move_message or delete_message." }; }
 
+/// The read-only tool that reports the mailbox's static capabilities.
+pub const GET_MAILBOX_CAPABILITIES: &str = "get_mailbox_capabilities";
+
 mod attachments;
 mod extension;
 mod filters;
 mod skills;
 
-pub(crate) use attachments::FileDigest;
 pub use attachments::{DownloadAttachmentParams, NewAttachment};
+pub(crate) use attachments::{FileDigest, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS};
 use attachments::{
-    MAX_ATTACHMENT_MIB, MAX_ATTACHMENTS, NewAttachmentWire, Uploads, caller, files_line,
-    files_named, owner, read_attachments, split, uploads_end, with_files,
+    MAX_ATTACHMENT_MIB, NewAttachmentWire, Uploads, caller, files_line, files_named, owner,
+    read_attachments, split, uploads_end, with_files,
 };
 pub use extension::{
     ExtensionCall, RejectedPassword, ToolExtension, ToolFuture, WebhookProblem, WebhookProblemKind,
@@ -363,6 +366,8 @@ struct Context {
     tokens: Option<TokenManager>,
     /// `None` when the operator turned webhooks off.
     webhooks: Option<WebhookControl>,
+    graph_push: bool,
+    google_push: bool,
     router: ToolRouter<MailTools>,
     instructions: String,
     select_mailboxes: bool,
@@ -373,6 +378,17 @@ struct Context {
     /// The public URL of `/upload`, and the bucket that turns uploads on.
     upload_url: String,
     bucket: Option<Arc<dyn Bucket>>,
+}
+
+impl Context {
+    fn server_features(&self) -> ServerFeatures {
+        ServerFeatures {
+            webhooks_enabled: self.webhooks.is_some(),
+            graph_push_enabled: self.graph_push,
+            google_push_enabled: self.google_push,
+            upload_enabled: self.bucket.is_some(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Context {
@@ -402,6 +418,8 @@ impl MailTools {
     /// error. `webhooks` is `None` when the operator turned webhooks off.
     /// With `select_mailboxes`, every tool advertises the optional
     /// `mailbox` argument that the mailbox selector middleware resolves.
+    /// Direct callers outside [`crate::app::router`] or [`crate::app::router_with`]
+    /// report Outlook and Gmail API push watching as unavailable.
     #[must_use]
     pub fn new(
         store: Store,
@@ -424,6 +442,8 @@ impl MailTools {
                 pool,
                 tokens,
                 webhooks,
+                graph_push: false,
+                google_push: false,
                 router,
                 instructions,
                 select_mailboxes,
@@ -487,6 +507,15 @@ impl MailTools {
         }
     }
 
+    pub(crate) fn with_push(self, graph: bool, google: bool) -> Self {
+        let mut context = Arc::unwrap_or_clone(self.context);
+        context.graph_push = graph;
+        context.google_push = google;
+        Self {
+            context: Arc::new(context),
+        }
+    }
+
     /// State of the middleware that resolves the `mailbox` argument, when
     /// the tools advertise it.
     pub(crate) fn mailbox_selector(
@@ -506,11 +535,9 @@ impl MailTools {
         selector::account(&parts.extensions)
     }
 
-    /// Opens the mailbox of the account a tool call acts on.
-    async fn mailbox(&self, parts: &Parts) -> Result<Mailbox, String> {
+    async fn load_account(&self, parts: &Parts) -> Result<Account, String> {
         let account_id = Self::require_account(parts)?;
-        let account = self
-            .context
+        self.context
             .store
             .account(&account_id)
             .await
@@ -520,7 +547,12 @@ impl MailTools {
             })?
             .ok_or_else(|| {
                 "this account is no longer connected; reconnect it from your MCP client".to_owned()
-            })?;
+            })
+    }
+
+    /// Opens the mailbox of the account a tool call acts on.
+    async fn mailbox(&self, parts: &Parts) -> Result<Mailbox, String> {
+        let account = self.load_account(parts).await?;
         if let Some(provider) = UpstreamProvider::for_mail_provider(account.provider) {
             let tokens = self
                 .context
@@ -542,7 +574,7 @@ impl MailTools {
         let stored = self
             .context
             .store
-            .credentials(&account_id)
+            .credentials(&account.id)
             .await
             .map_err(|err| {
                 tracing::error!(error = %err, "could not load credentials");
@@ -566,7 +598,7 @@ impl MailTools {
         let client = server
             .client(&stored.email, &stored.password)
             .map_err(mail_error)?;
-        let mailbox = Mailbox::imap(account_id, client, fingerprint, self.context.pool.clone())
+        let mailbox = Mailbox::imap(account.id, client, fingerprint, self.context.pool.clone())
             .noting_password(self.context.store.clone(), self.context.webhooks.clone());
         Ok(match &self.context.metrics {
             Some(metrics) => mailbox.counting(metrics.clone(), server.id.id()),
@@ -670,7 +702,7 @@ fn folder_or_inbox(folder: Option<String>) -> String {
 
 // ---- Parameters -----------------------------------------------------------
 
-/// Parameters for `list_folders` and `get_webhook_status`: none.
+/// Parameters for tools that take none.
 ///
 /// Like every tool's parameters, an argument it does not list is refused,
 /// naming it. The schema keeps the empty `properties` these tools always
@@ -2472,6 +2504,30 @@ fn describe_sent_copy(copy: SentCopy) -> String {
 
 #[tool_router]
 impl MailTools {
+    /// Reports the static capabilities of the selected mailbox.
+    #[tool(
+        title = "Get mailbox capabilities",
+        description = "Report this mailbox's static provider and server deployment capabilities: provider, protocol, authentication mechanism, supported operations, message id stability on move, search and selection filter rules, attachment limits, and webhook availability. Reflects server configuration, not caller permissions or current sign-in state.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn get_mailbox_capabilities(
+        &self,
+        Extension(parts): Extension<Parts>,
+        _: Parameters<NoArguments>,
+    ) -> Result<Json<MailboxCapabilities>, String> {
+        let account = self.load_account(&parts).await?;
+        Ok(Json(MailboxCapabilities::for_account(
+            account.provider,
+            account.imap_server.as_deref(),
+            &self.context.servers,
+            self.context.server_features(),
+        )))
+    }
+
     /// Lists the folders of the mailbox.
     #[tool(
         title = "List folders",
@@ -3683,6 +3739,11 @@ impl MailTools {
         ))
     }
 
+    fn is_hidden(&self, parts: Option<&Parts>, name: &str) -> bool {
+        self.extension_caller(parts)
+            .is_some_and(|(extension, caller)| extension.hides_tool(caller, name))
+    }
+
     fn cache_hints(&self, context: &RequestContext<RoleServer>) -> Option<(u64, CacheScope)> {
         if !context
             .protocol_version()
@@ -3747,7 +3808,12 @@ impl MailTools {
         let Some(caller) = parts.and_then(|parts| parts.extensions.get::<Authenticated>()) else {
             return self.call_own(request, context).await;
         };
-        let own = self.context.router.get(&request.name).cloned();
+        let own = self
+            .context
+            .router
+            .get(&request.name)
+            .filter(|_| !self.is_hidden(parts, &request.name))
+            .cloned();
         let is_own = own.is_some();
         let Some(tool) = own.or_else(|| {
             self.extension_tools(extension?, caller)
@@ -3793,6 +3859,8 @@ impl MailTools {
                     arguments: request.arguments.clone(),
                     caller,
                     mailbox,
+                    servers: &self.context.servers,
+                    features: self.context.server_features(),
                 };
                 extension.call(call).await.map(CallToolResponse::from)
             }
@@ -4050,6 +4118,7 @@ impl ServerHandler for MailTools {
         // Before the call, so an answer the timeout cuts off still names it.
         if let Some(note) = &note
             && self.context.router.has_route(&request.name)
+            && !self.is_hidden(parts, &request.name)
         {
             note.tool(&request.name);
         }
@@ -4077,6 +4146,7 @@ impl ServerHandler for MailTools {
         let mut tools = self.context.router.list_all();
         if let Some((extension, caller)) = self.extension_caller(context.extensions.get::<Parts>())
         {
+            tools.retain(|tool| !extension.hides_tool(caller, &tool.name));
             tools.extend(self.extension_tools(extension, caller));
         }
         let (ttl_ms, cache_scope) = self.cache_hints(&context).unzip();
@@ -4215,6 +4285,22 @@ mod tests {
         pin_forward, redact_delivery_summary, upload_next,
     };
     use postkeep_mail::MessageFlags;
+
+    #[test]
+    fn capabilities_operations_match_registered_tool_router() {
+        let router = MailTools::tool_router();
+        assert!(router.has_route(super::GET_MAILBOX_CAPABILITIES));
+        assert!(router.has_route("create_folder"));
+        // Registering one of these requires a per-provider capability and dispatch test.
+        for absent in [
+            "edit_draft",
+            "update_draft",
+            "rename_folder",
+            "delete_folder",
+        ] {
+            assert!(!router.has_route(absent), "{absent}");
+        }
+    }
 
     #[test]
     fn an_upload_says_how_to_send_its_file_and_that_it_goes_once() {

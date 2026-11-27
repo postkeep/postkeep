@@ -26,8 +26,8 @@ use postkeep::app::{self, AppConfig, Extensions};
 use postkeep::cli::{Cli, Command, ServeArgs};
 use postkeep::readiness::{ReadinessCheck, ReadinessFuture};
 use postkeep::tools::{
-    ExtensionCall, RejectedPassword, SkillDocument, ToolExtension, ToolFuture, WebhookProblem,
-    WebhookProblemKind,
+    ExtensionCall, GET_MAILBOX_CAPABILITIES, RejectedPassword, SkillDocument, ToolExtension,
+    ToolFuture, WebhookProblem, WebhookProblemKind,
 };
 use postkeep::watch::{SharedJob, WatchConfig, WatchOwnership, WatchSignal, Watchers};
 use postkeep_auth::{
@@ -258,6 +258,10 @@ impl ToolExtension for Embedding {
 
     fn call<'a>(&'a self, call: ExtensionCall<'a>) -> ToolFuture<'a> {
         self.push(format!("call {}", call.name));
+        assert!(!self.hides_tool(call.caller, GET_MAILBOX_CAPABILITIES));
+        let caps = call.mailbox_capabilities(Provider::Imap, None);
+        assert!(caps.webhooks_available);
+        assert!(!caps.attachments.upload_enabled);
         let result = CallToolResult::structured(json!({ "plan": "team" }));
         Box::pin(async move { Ok(result) })
     }
@@ -824,7 +828,7 @@ async fn every_builder_addition_reaches_the_server_it_runs() {
             Some((400, CALLBACK_PAGE.to_owned()))
         );
         let listed = mcp_at(addr, "tools/list", json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 20);
         let listed = mcp_at(addr, "skills/list", json!({})).await;
         let skills = listed["result"]["skills"].as_array().unwrap();
         assert_eq!(
@@ -884,7 +888,7 @@ async fn the_principal_resolver_decides_mcp_access() {
     let (status, body) = mcp(&app, "embedding-key", "tools/list").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let listed: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 18);
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
 
     let (status, _) = mcp(&app, "some-token", "tools/list").await;
@@ -1098,7 +1102,12 @@ async fn the_tool_extension_lists_checks_and_runs_its_tools() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let listed: Value = serde_json::from_str(&body).unwrap();
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!((tools.len(), &tools[18]["name"]), (19, &json!("get_plan")));
+    assert_eq!((tools.len(), &tools[19]["name"]), (20, &json!("get_plan")));
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool["name"] == GET_MAILBOX_CAPABILITIES)
+    );
     assert_eq!(h.embedding.take(), ["tools tenant-a"]);
 
     let (status, body) = mcp(&h.app, "embedding-key", "skills/list").await;

@@ -23,6 +23,7 @@ use postkeep_mail::{
     AttachmentData, EmailAddress, Message, MessageFlags, OutgoingAttachment, OutgoingMessage,
     Paging, Reply, SendOptions, SentCopy, SentMessage, holds, holds_addresses, mime,
 };
+use postkeep_store::Provider;
 use postkeep_upstream::http::{HttpError, JSON_LIMIT, MESSAGE_LIMIT, join_segments};
 use postkeep_upstream::{ApiClient, ApiError, UpstreamProvider};
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ use crate::forward::{self, Forwarded};
 use crate::text::prefix_html;
 use crate::tools::format_address;
 
+use super::capabilities::SelectionFilterRules;
 use super::id::{self, GRAPH_PREFIX};
 use super::{
     Change, Criteria, Cutoff, Fetched, FolderEntry, IdsFrom, MAY_HAVE_BEEN_SENT, MailboxError,
@@ -662,7 +664,10 @@ impl GraphMailbox {
         most: usize,
         deadline: Instant,
     ) -> MailboxResult<Selected> {
-        criteria.exact_for_selection(&["text"], &[], "Outlook")?;
+        criteria.exact_for_selection(
+            &SelectionFilterRules::for_provider(Provider::Graph),
+            "Outlook",
+        )?;
         let kql = keyword_query(criteria)?;
         let mailbox = Self::new(self.api.until(deadline), self.email.clone());
         let source = mailbox.resolve(folder).await?;

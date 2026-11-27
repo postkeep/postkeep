@@ -30,7 +30,7 @@ use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig};
 use postkeep::mailbox::graph::{LISTING_TRUSTED, MAX_SEARCH_WINDOW};
 use postkeep::mailbox::{Criteria, Cutoff, NOTHING_LEFT, selection::SearchSelection};
-use postkeep::tools::{LEFT_OUT, MOST_IDS};
+use postkeep::tools::{GET_MAILBOX_CAPABILITIES, LEFT_OUT, MOST_IDS};
 use postkeep_auth::{AuthConfig, CredentialVerifier, VerifyFuture};
 use postkeep_mail::ImapServer;
 use postkeep_store::{MasterKey, Store};
@@ -195,6 +195,70 @@ fn config(
                 service_account: PUSH_ACCOUNT.to_owned(),
             },
         )),
+    }
+}
+
+#[tokio::test]
+async fn get_mailbox_capabilities_tracks_provider_push_prerequisites() {
+    // The mocked providers return the same address, so sign in to separate stores.
+    for (provider, protocol, topics) in [
+        ("microsoft", "microsoft_graph", &[true][..]),
+        ("google", "gmail_api", &[false, true]),
+    ] {
+        let mut harness = harness().await;
+        if provider == "microsoft" {
+            mock_microsoft_sign_in(&harness.server).await;
+        } else {
+            mock_google_sign_in(&harness.server).await;
+        }
+        let token = harness.sign_in(provider).await;
+        let unconfigured = OAuthClient::new(
+            Http::for_tests(),
+            harness.upstream.endpoints().clone(),
+            url::Url::parse(ORIGIN).unwrap(),
+            None,
+            None,
+        );
+        for &has_topic in topics {
+            let auth = AuthConfig::new(ORIGIN, app::MCP_PATH).unwrap();
+            // Each router installs its push configuration once into its watchers.
+            let watchers = postkeep::watch::Watchers::new(
+                harness.store.clone(),
+                auth.imap_servers.clone(),
+                harness.receiver.deliverer.clone(),
+                postkeep::watch::WatchConfig::default(),
+                CancellationToken::new(),
+            );
+            let upstream = if has_topic {
+                &unconfigured
+            } else {
+                &harness.upstream
+            };
+            let mut config = config(
+                auth,
+                app::RequestLimits::default(),
+                &watchers,
+                upstream,
+                None,
+            );
+            if !has_topic {
+                config.google_push = None;
+            }
+            harness.app = app::router(
+                config,
+                harness.store.clone(),
+                NoImap,
+                CancellationToken::new(),
+            );
+            let caps = harness
+                .call_ok(&token, GET_MAILBOX_CAPABILITIES, json!({}))
+                .await;
+            assert_eq!(caps["protocol"], protocol);
+            assert_eq!(
+                caps["webhooks_available"], false,
+                "{provider}, topic: {has_topic}"
+            );
+        }
     }
 }
 
@@ -2648,6 +2712,21 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
     let draft = json!({ "to": ["someone@example.com"], "subject": "s", "body": "b" });
     let err = harness.call_err(&token, "create_draft", draft).await;
     assert!(err.contains("isn't available"), "{err}");
+
+    let caps = harness
+        .call_ok(&token, GET_MAILBOX_CAPABILITIES, json!({}))
+        .await;
+    assert_eq!(caps["provider"], "outlook");
+    assert_eq!(caps["protocol"], "microsoft_graph");
+    assert_eq!(
+        caps["operations"]["permanent_delete"],
+        deleted["counts"]["changed"] == 1
+    );
+    assert_eq!(caps["operations"]["permanent_delete_trash_only"], false);
+    assert_eq!(caps["operations"]["create_folder"], true);
+    assert_eq!(caps["operations"]["create_draft"], false);
+    assert_eq!(caps["webhooks_available"], true);
+    assert_eq!(caps["attachments"]["upload_enabled"], true);
 }
 
 #[tokio::test]
@@ -4230,6 +4309,18 @@ async fn gmail_accounts_work_through_the_gmail_api() {
     let draft = json!({ "id": "gmail.18c1", "body": "b" });
     let err = harness.call_err(&token, "create_draft", draft).await;
     assert!(err.contains("isn't available"), "{err}");
+
+    let caps = harness
+        .call_ok(&token, GET_MAILBOX_CAPABILITIES, json!({}))
+        .await;
+    assert_eq!(caps["provider"], "gmail");
+    assert_eq!(caps["protocol"], "gmail_api");
+    assert_eq!(caps["operations"]["permanent_delete"], false);
+    assert_eq!(caps["operations"]["permanent_delete_trash_only"], false);
+    assert_eq!(caps["operations"]["create_folder"], true);
+    assert_eq!(caps["operations"]["create_draft"], false);
+    assert_eq!(caps["webhooks_available"], true);
+    assert_eq!(caps["attachments"]["upload_enabled"], true);
 }
 
 /// A sender that does not read as one address, alone or after a name, is shown whole, with its

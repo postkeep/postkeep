@@ -28,13 +28,15 @@ use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig};
 use postkeep::mailbox::id::{imap_id, parse_imap_id};
 use postkeep::mailbox::{
-    Change, Criteria, Cutoff, Mailbox, NOTHING_LEFT, Selected,
+    Change, Criteria, Cutoff, Mailbox, MailboxCapabilities, NOTHING_LEFT, Selected, ServerFeatures,
     selection::{REFUSAL, SearchSelection},
 };
-use postkeep::tools::LEFT_OUT;
+use postkeep::tools::{GET_MAILBOX_CAPABILITIES, LEFT_OUT};
 use postkeep::watch::{WatchConfig, Watchers};
 use postkeep_auth::{AuthConfig, CredentialVerifier, MailVerifier, VerifyFuture};
-use postkeep_mail::{ImapSecurity, ImapServer, ImapServers, MailConfig, Paging, SmtpSecurity};
+use postkeep_mail::{
+    ImapPreset, ImapSecurity, ImapServer, ImapServers, MailConfig, Paging, SmtpSecurity,
+};
 use postkeep_store::{
     AccountId, DeliveryRecord, MasterKey, NewFilterRule, Provider, Store, StoreError, WatchCursor,
     WebhookSettings,
@@ -667,6 +669,7 @@ async fn mcp_endpoint_lists_tools_and_reports_mail_errors() {
             "create_folder",
             "delete_message",
             "download_attachment",
+            GET_MAILBOX_CAPABILITIES,
             "get_message",
             "get_webhook_status",
             "list_folders",
@@ -720,6 +723,7 @@ async fn mcp_endpoint_lists_tools_and_reports_mail_errors() {
     assert_eq!(hints("add_webhook_filter"), [no, no, no, no]);
     assert_eq!(hints("remove_webhook_filter"), [no, yes, yes, no]);
     assert_eq!(hints("download_attachment"), [yes, no, None, no]);
+    assert_eq!(hints(GET_MAILBOX_CAPABILITIES), [yes, no, None, no]);
     let limits_description = limits_tool["description"].as_str().unwrap();
     assert!(
         limits_description.contains("oldest") && limits_description.contains("not delivered"),
@@ -790,6 +794,69 @@ async fn mcp_endpoint_lists_tools_and_reports_mail_errors() {
     }
 }
 
+#[tokio::test]
+async fn get_mailbox_capabilities_reflects_server_features_and_retired_imap() {
+    let mut harness = harness(unreachable_mail(), AcceptAll).await;
+    let email = "mailbox@example.com";
+    let password = "test-password";
+    let token = harness.sign_in(email, password).await;
+    let bucket_server = wiremock::MockServer::start().await;
+    let (_, bucket) = bucket::stand_in(&bucket_server).await;
+    let bucket: Arc<dyn postkeep::bucket::Bucket> = Arc::new(bucket);
+    let unknown = "unoffered-id";
+    for enabled in [false, true] {
+        let mut auth = AuthConfig::new(&format!("https://{HOST}"), app::MCP_PATH).unwrap();
+        auth.imap_servers = ImapServers::new(vec![ImapPreset::ICloud, ImapPreset::Gmail], None);
+        let watchers = enabled.then(|| {
+            Watchers::new(
+                harness.store.clone(),
+                auth.imap_servers.clone(),
+                postkeep_webhook::Deliverer::new("postkeep-test"),
+                WatchConfig::default(),
+                CancellationToken::new(),
+            )
+        });
+        let config = AppConfig {
+            bucket: enabled.then(|| bucket.clone()),
+            auth,
+            extra_allowed_hosts: Vec::new(),
+            extra_allowed_origins: Vec::new(),
+            limits: app::RequestLimits::default(),
+            pool: postkeep::pool::PoolConfig::default(),
+            watchers,
+            upstream: None,
+            google_push: None,
+        };
+        harness.app = app::router(
+            config,
+            harness.store.clone(),
+            AcceptAll,
+            CancellationToken::new(),
+        );
+        for (id, provider, deletes, offered) in [
+            (ImapPreset::ICloud.id(), "icloud", true, true),
+            (ImapPreset::Gmail.id(), "gmail", false, true),
+            (ImapPreset::Yahoo.id(), "yahoo", true, false),
+            (unknown, "imap", true, false),
+        ] {
+            harness
+                .store
+                .upsert_imap_account(email, &SecretString::from(password), Some(id))
+                .await
+                .unwrap();
+            let caps = harness
+                .call_ok(&token, GET_MAILBOX_CAPABILITIES, json!({}))
+                .await;
+            assert_eq!(caps["provider"], provider);
+            assert_eq!(caps["protocol"], "imap");
+            assert_eq!(caps["operations"]["permanent_delete"], deletes);
+            assert_eq!(caps["webhooks_available"], enabled && offered);
+            assert_eq!(caps["attachments"]["upload_enabled"], enabled);
+            assert!(!caps.to_string().contains(unknown));
+        }
+    }
+}
+
 /// Every tool refuses an argument it does not take, before it runs, with a
 /// tool error that names it, such as `importance` on `send_message`.
 #[tokio::test]
@@ -798,7 +865,7 @@ async fn tools_refuse_arguments_they_do_not_take() {
     let token = harness
         .sign_in("me@icloud.com", "abcd-efgh-ijkl-mnop")
         .await;
-    // Arguments each tool takes, for all eighteen.
+    // Arguments each tool takes, for all nineteen.
     let calls = json!({
         "list_folders": {},
         "search_messages": { "text": "budget" },
@@ -811,6 +878,7 @@ async fn tools_refuse_arguments_they_do_not_take() {
         "move_message": { "id": "imap.1", "destination": "Archive" },
         "delete_message": { "id": "imap.1" },
         "create_folder": { "name": "Receipts" },
+        (GET_MAILBOX_CAPABILITIES): {},
         "get_webhook_status": {},
         "set_webhook_enabled": { "enabled": true },
         "set_webhook_outbox_limits": { "reset": true },
@@ -820,7 +888,7 @@ async fn tools_refuse_arguments_they_do_not_take() {
         "upload_attachment": {},
     });
     let calls = calls.as_object().unwrap();
-    assert_eq!(calls.len(), 18);
+    assert_eq!(calls.len(), 19);
     for (tool, arguments) in calls {
         let mut arguments = arguments.clone();
         arguments["importance"] = json!("high");
@@ -2007,6 +2075,18 @@ async fn greenmail_end_to_end() {
         .await;
     assert_eq!(empty["total"], 0);
 
+    let caps = harness
+        .call_ok(&token, GET_MAILBOX_CAPABILITIES, json!({}))
+        .await;
+    assert_eq!(caps["operations"]["create_draft"], true);
+    assert_eq!(caps["operations"]["create_folder"], true);
+    assert_eq!(
+        caps["operations"]["permanent_delete"],
+        deleted["counts"]["changed"] == 1
+    );
+    assert_eq!(caps["id_stability_on_move"], "changes_on_move");
+    assert_eq!(caps["attachments"]["upload_enabled"], true);
+
     let missing = harness
         .call(
             &token,
@@ -2109,7 +2189,13 @@ async fn greenmail_sent_copy_follows_the_server_and_the_caller() {
 #[ignore = "requires GreenMail"]
 async fn greenmail_permanent_delete_is_refused_where_it_only_removes_a_label() {
     let mut mail = greenmail_config();
-    mail.permanent_delete = false;
+    mail.permanent_delete = ImapPreset::Gmail.config().permanent_delete;
+    let gmail_caps = MailboxCapabilities::for_account(
+        Provider::Imap,
+        Some(ImapPreset::Gmail.id()),
+        &ImapServers::default(),
+        ServerFeatures::default(),
+    );
     let harness = harness(mail, MailVerifier).await;
     let subject = format!("label {}", uuid::Uuid::new_v4().simple());
     let user = new_mailbox(&subject).await;
@@ -2122,7 +2208,10 @@ async fn greenmail_permanent_delete_is_refused_where_it_only_removes_a_label() {
 
     let args = json!({ "id": id, "permanent": true });
     let refused = harness.call(&token, "delete_message", args).await;
-    assert_eq!(refused["isError"], true, "{refused}");
+    assert_eq!(
+        refused["isError"], !gmail_caps.operations.permanent_delete,
+        "{refused}"
+    );
     let text = refused.to_string();
     assert!(text.contains("keep the message in All Mail"), "{text}");
     assert!(text.contains("Delete without `permanent`"), "{text}");
@@ -2145,7 +2234,22 @@ async fn greenmail_permanent_delete_is_refused_where_it_only_removes_a_label() {
     let args = json!({ "id": id });
     harness.call_ok(&token, "delete_message", args).await;
     wait_for_messages(&harness, &token, "INBOX", &subject, 0).await;
-    wait_for_messages(&harness, &token, trash, &subject, 1).await;
+    let in_trash = wait_for_messages(&harness, &token, trash, &subject, 1).await;
+    let in_trash_delete = harness
+        .call(
+            &token,
+            "delete_message",
+            json!({
+                "id": in_trash["messages"][0]["id"], "permanent": true,
+            }),
+        )
+        .await;
+    assert_eq!(
+        in_trash_delete["isError"],
+        !(gmail_caps.operations.permanent_delete
+            || gmail_caps.operations.permanent_delete_trash_only),
+        "{in_trash_delete}"
+    );
 }
 
 /// After the server renumbers a folder, every tool that acts on a message

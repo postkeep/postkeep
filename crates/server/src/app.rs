@@ -47,6 +47,8 @@ pub struct AppConfig {
     /// IMAP session pool settings.
     pub pool: PoolConfig,
     /// New-mail webhook watchers; `None` hides webhooks.
+    /// Use the same IMAP server configuration as `auth.imap_servers` so
+    /// reported IMAP webhook availability matches what the watchers resolve.
     pub watchers: Option<Watchers>,
     /// Sign-in with Microsoft and Google; `None` hides both buttons.
     pub upstream: Option<postkeep_upstream::OAuthClient>,
@@ -210,8 +212,10 @@ impl Extensions {
     }
 
     /// Lists the extension's tools and skills beside the server's to the
-    /// callers it picks, adds its paragraph to the instructions and runs its
-    /// check before every tool call; see [`ToolExtension`].
+    /// callers it picks and adds its paragraph to the instructions.
+    /// Runs its check before dispatching a visible tool, after resolving the
+    /// caller's selection. Hidden and unknown tools bypass checks and usage
+    /// hooks; see [`ToolExtension`].
     #[must_use]
     pub fn tool_extension(mut self, extension: Arc<dyn ToolExtension>) -> Self {
         self.tool_extension = Some(extension);
@@ -324,6 +328,10 @@ pub fn router(
 }
 
 /// [`router`] with an embedding's [`Extensions`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps the order of router and middleware setup visible"
+)]
 pub fn router_with(
     config: AppConfig,
     store: Store,
@@ -388,6 +396,13 @@ pub fn router_with(
                 });
                 Some(crate::push::router(watchers.clone()))
             });
+    let (graph_push, google_push) = config
+        .watchers
+        .as_ref()
+        .and_then(Watchers::push)
+        .map_or((false, false), |push| {
+            (push.graph_enabled(), push.google_enabled())
+        });
     let webhook_control = config.watchers.as_ref().map(|watchers| {
         let interval = watchers.retry_interval();
         auth.set_webhook_retry_interval(interval);
@@ -411,7 +426,8 @@ pub fn router_with(
     let uploads = crate::upload::router(store.clone(), config.bucket.clone(), auth.clone());
     let upload_url = format!("{}{}", auth.config().issuer(), crate::upload::UPLOAD_PATH);
     let tools = MailTools::new(store, servers, pool, tokens, webhook_control, selecting)
-        .with_uploads(upload_url, config.bucket);
+        .with_uploads(upload_url, config.bucket)
+        .with_push(graph_push, google_push);
     let tools = install_tool_extensions(tools, &extensions);
     let protected = mcp_routes(tools, &auth, hosts, origins, limits, cancel, tenant_arg);
 
