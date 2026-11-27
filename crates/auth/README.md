@@ -179,8 +179,10 @@ state (such as pooled IMAP sessions) when an account is revoked or deleted.
   again revokes the grant and all of its tokens (RFC 9700 section 4.14.2),
   except a refresh token presented again within 30 seconds of its first use:
   it issues a separate pair, without extending that window.
-- Redirect URIs must match the registered ones exactly. `http` is accepted
-  only for loopback addresses, where any port matches (RFC 8252).
+- At `/authorize`, redirect URIs must match the registered or documented ones
+  exactly, except that loopback `http` can use any port (RFC 8252). Only
+  loopback addresses allow `http`. If supplied at `/token`, the URI must
+  exactly match the one used at `/authorize`, including its port.
   Private-use schemes such as `com.example.app:`, `cursor://`, `vscode://`
   and `claude://` are accepted. Browser and OS handlers are not, including
   `microsoft-edge*`, `ms-*`, `googlechrome*` (and `googlechromes`),

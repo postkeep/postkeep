@@ -137,7 +137,7 @@ MCP client ──HTTPS──▶ reverse proxy / Fly edge ──▶ postkeep ─�
 | Stolen authorization code redeemed | PKCE `S256` mandatory; codes last 5 min and work once; a replayed code revokes the grant made from it |
 | Stolen refresh token | Rotation on every use. A replay of a used refresh token revokes the whole grant (RFC 9700 §4.14.2), except when presented again within 30 seconds of its first use: it issues a separate pair without extending that window |
 | Token for another resource (confused deputy) | RFC 8707 `resource` checked at `/authorize`, `/token` and on every bearer request; no token passthrough (the server uses the stored app password or the stored provider tokens, never the client's token). An embedding that serves several hosts turns on per-request resources: each allowed host is its own resource, and so is each name under a resource prefix (such as `/w/<name>/mcp`) when the embedding sets one. `resource` is required at `/authorize` and `/token`, and a token is accepted only at the exact resource it names (not the issuer, not another host or name, never without one). Requests for hosts the server does not serve are refused before authentication |
-| Redirect URI manipulation | Exact match (any port only for loopback, RFC 8252); `https` or loopback `http` or private-use schemes; fragments, whitespace, control characters and dangerous schemes refused at registration and again at `/authorize` |
+| Redirect URI manipulation | At `/authorize`, exact match except for loopback `http` ports (RFC 8252); at `/token`, a supplied URI must exactly match the one bound to the code; `https` or loopback `http` or private-use schemes; fragments, whitespace, control characters and dangerous schemes refused at registration and again at `/authorize` |
 | Open redirector via error redirects | Invalid requests for web redirect URIs show an error page instead of redirecting (RFC 9700 §4.11.1) |
 | Mix-up attacks | `iss` returned with every authorization response (RFC 9207) |
 | Sign-in for an embedding's own resources | An embedding's sign-in hook gets only the `/authorize` requests for the resources it claims; a request without a resource always gets the mailbox sign-in. The mailbox sign-in page and Microsoft or Google sign-in can neither finish nor cancel those requests, and the embedding cannot approve or deny any other request. Codes and tokens for its principals follow the same PKCE, single-use, rotation, replay and audience rules, and never act for a mailbox account: the default principal resolver refuses them, so only a resolver the embedding installs can accept them. The hook's response is sent with `Cache-Control: no-store`, and the pending request's ID, which is all it takes to approve or deny it, is kept secret |
@@ -385,10 +385,12 @@ include `none`, name no shared-secret method and hold any
 `token_endpoint_auth_method` given (null included); without the list, that
 method must be `none`, null or absent. At `/token` and `/revoke`, such a
 client's secret, Basic credentials or `client_assertion` gets
-`invalid_client`. Redirect URIs pass the registration rules and must then
-match exactly, with no loopback port leeway. A valid document is reused for
-its `Cache-Control: max-age`, clamped to 5 minutes to 24 hours, which limits
-how often `/authorize` can make the server fetch. Errors are never cached.
+`invalid_client`. Redirect URIs pass the registration rules. At `/authorize`,
+only the port of a loopback `http` URI may differ from the document (RFC 8252).
+At `/token`, a supplied URI must exactly match the URI bound to the code,
+including the port. A valid document is reused for its `Cache-Control: max-age`,
+clamped to 5 minutes to 24 hours, which limits how often `/authorize` can
+make the server fetch. Errors are never cached.
 Fetches count against the per-IP request limit; a new client counts against
 the per-IP registration limit and the client limit, like a registration. The
 sign-in page shows the host that published the document next to the
