@@ -92,7 +92,7 @@ pub use bearer::{
     Authenticated, BearerRequest, DEFAULT_TENANT, PrincipalResolver, Resolution, ResolveFuture,
     TokenResolver, require_bearer,
 };
-pub use check::{CheckFuture, Refusal, ToolCall};
+pub use check::{CheckFuture, Refusal, ToolCall, ToolErrorCode};
 pub use client_ip::ClientIp;
 pub use config::{AuthConfig, ConfigError, ResourcePrefix};
 pub use continuation::{ContinuationHook, ContinuedSignIn};

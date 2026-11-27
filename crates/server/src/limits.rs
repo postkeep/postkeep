@@ -29,30 +29,36 @@ pub(crate) fn megabytes(size: usize) -> String {
     format!("{}.{} MB", size / 1_000_000, size % 1_000_000 / 100_000)
 }
 
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum LargeMessageError {
+    #[error("{0}")]
+    TooLarge(String),
+    #[error("Not sent: postkeep is busy with other large messages; try again in a minute.")]
+    Busy,
+}
+
 pub(crate) async fn large_message(
     size: usize,
-) -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+) -> Result<tokio::sync::SemaphorePermit<'static>, LargeMessageError> {
     large_message_in(&LARGE_MESSAGES, size).await
 }
 
 async fn large_message_in(
     budget: &Semaphore,
     size: usize,
-) -> Result<tokio::sync::SemaphorePermit<'_>, String> {
-    const BUSY: &str =
-        "Not sent: postkeep is busy with other large messages; try again in a minute.";
+) -> Result<tokio::sync::SemaphorePermit<'_>, LargeMessageError> {
     if size > LARGE_MESSAGE_LIMIT {
         let size = megabytes(size);
-        return Err(format!(
+        return Err(LargeMessageError::TooLarge(format!(
             "Not sent: this message ({size}) is {}.",
             beyond_budget()
-        ));
+        )));
     }
-    let permits = u32::try_from(size.max(1)).map_err(|_| BUSY)?;
+    let permits = u32::try_from(size.max(1)).map_err(|_| LargeMessageError::Busy)?;
     tokio::time::timeout(ACCOUNT_WAIT, budget.acquire_many(permits))
         .await
-        .map_err(|_| BUSY)?
-        .map_err(|_| BUSY.to_owned())
+        .map_err(|_| LargeMessageError::Busy)?
+        .map_err(|_| LargeMessageError::Busy)
 }
 
 /// Rejects requests with `503` once `max` are in flight.
@@ -173,14 +179,16 @@ mod tests {
         let second = second.unwrap();
         let start = tokio::time::Instant::now();
         let busy = large_message_in(&budget, size).await.unwrap_err();
-        assert!(busy.contains("busy with other large messages"));
+        assert_eq!(busy, LargeMessageError::Busy);
         assert_eq!(start.elapsed(), ACCOUNT_WAIT);
         drop(second);
         let start = tokio::time::Instant::now();
         let over = large_message_in(&budget, LARGE_MESSAGE_LIMIT + 1)
             .await
             .unwrap_err();
-        assert!(over.contains("more than postkeep sends at once"));
+        assert!(
+            matches!(over, LargeMessageError::TooLarge(message) if message.contains("more than postkeep sends at once"))
+        );
         assert_eq!(start.elapsed(), std::time::Duration::ZERO);
     }
 
@@ -239,7 +247,11 @@ mod tests {
         );
         assert_eq!(send(None).await, StatusCode::OK);
         assert_eq!(
-            send(Some(Selection::Refused("unknown mailbox".to_owned()))).await,
+            send(Some(Selection::Refused {
+                code: postkeep_auth::ToolErrorCode::NotFound,
+                message: "unknown mailbox".to_owned()
+            }))
+            .await,
             StatusCode::OK
         );
         drop(busy_b);

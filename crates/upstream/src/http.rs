@@ -31,6 +31,35 @@ pub const JSON_LIMIT: usize = 2 * 1024 * 1024;
 /// Response size limit for raw messages (Graph `$value`, Gmail `raw`).
 pub const MESSAGE_LIMIT: usize = 48 * 1024 * 1024;
 
+/// Maximum numeric `Retry-After` delay, in seconds (24 hours).
+pub const MAX_RETRY_AFTER_SECS: u64 = 86_400;
+
+/// Parses a decimal `Retry-After` delay in seconds, clamped to 24 hours.
+/// Signed values and HTTP dates are not supported.
+#[must_use]
+pub fn parse_retry_after_str(value: &str) -> Option<u64> {
+    let value = value.trim_ascii();
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(
+        value
+            .parse::<u64>()
+            .unwrap_or(MAX_RETRY_AFTER_SECS)
+            .min(MAX_RETRY_AFTER_SECS),
+    )
+}
+
+/// Reads a bounded numeric `Retry-After` delay from response headers.
+#[must_use]
+pub fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()
+        .and_then(parse_retry_after_str)
+}
+
 /// An HTTP failure before a complete response arrived.
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -363,6 +392,34 @@ pub fn request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_accepts_only_bounded_decimal_seconds() {
+        for (input, expected) in [
+            ("17", Some(17)),
+            (" \t0\r\n", Some(0)),
+            ("00042", Some(42)),
+            ("86400", Some(MAX_RETRY_AFTER_SECS)),
+            ("86401", Some(MAX_RETRY_AFTER_SECS)),
+            ("18446744073709551616", Some(MAX_RETRY_AFTER_SECS)),
+            ("", None),
+            ("   ", None),
+            ("+3", None),
+            ("-3", None),
+            ("1 2", None),
+            ("２", None),
+            ("Sat, 28 Nov 2026 00:00:00 GMT", None),
+        ] {
+            assert_eq!(parse_retry_after_str(input), expected, "{input:?}");
+        }
+        let mut headers = HeaderMap::new();
+        assert_eq!(parse_retry_after(&headers), None);
+        headers.insert(
+            http::header::RETRY_AFTER,
+            http::HeaderValue::from_static("10"),
+        );
+        assert_eq!(parse_retry_after(&headers), Some(10));
+    }
 
     #[test]
     fn joins_and_encodes_segments() {

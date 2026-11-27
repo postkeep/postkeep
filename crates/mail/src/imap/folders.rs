@@ -3,7 +3,7 @@
 use async_imap::types::{Name, NameAttribute};
 use futures::TryStreamExt;
 
-use super::Conn;
+use super::{Conn, WritePhase};
 use crate::{Error, Result, utf7};
 
 /// A mail folder (IMAP mailbox).
@@ -146,10 +146,11 @@ fn infer_roles(folders: &mut [Folder]) {
 }
 
 /// Creates a folder named `name`.
-pub(super) async fn create(conn: &mut Conn, name: &str) -> Result<()> {
+pub(super) async fn create(conn: &mut Conn, name: &str, phase: &mut WritePhase) -> Result<()> {
     if name.trim().is_empty() {
         return Err(Error::invalid("folder names must not be empty"));
     }
+    *phase = WritePhase::Started;
     conn.create(utf7::encode(name)).await?;
     Ok(())
 }

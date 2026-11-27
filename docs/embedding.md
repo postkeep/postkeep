@@ -403,6 +403,20 @@ Keep the app's own confirmation prompt on. An agent can make both calls,
 so a hold is not proof that the user said yes. An app may ask at both calls;
 its prompt is the one an agent steered by untrusted mail cannot answer.
 
+## Tool errors
+
+A tool check can use `Refusal::with_code(postkeep_auth::ToolErrorCode::…)`
+with its existing message. An uncoded refusal becomes `permission_denied`.
+Use `Refusal::with_retry_after(seconds)` to suggest a bounded delay; it is
+only exposed for a retryable code.
+
+An extension tool can return `Ok(ToolError::new(code, message).into_result())`
+using `postkeep::tools::ToolError`. This uses the same two-block format as
+[core tool errors](reference/tools.md#errors). The server standardizes its
+own tool errors, selection failures, and tool check refusals. It forwards
+extension tool results as returned and does not turn JSON-RPC protocol
+errors into tool errors.
+
 ## Rules for hooks
 
 - Call `AuthState::start_upstream_sign_in` only for a same-origin `POST`

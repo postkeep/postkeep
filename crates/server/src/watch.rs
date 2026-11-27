@@ -3020,6 +3020,7 @@ mod catch_up_retry_tests {
             status: code,
             code: None,
             reason: None,
+            retry_after: None,
             message: "no".to_owned(),
         }))
     }
@@ -3037,6 +3038,7 @@ mod catch_up_retry_tests {
                 status: StatusCode::FORBIDDEN,
                 code: Some("PERMISSION_DENIED".to_owned()),
                 reason: reason.map(str::to_owned),
+                retry_after: None,
                 message: "no".to_owned(),
             }))
         };

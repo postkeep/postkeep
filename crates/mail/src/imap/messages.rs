@@ -14,7 +14,7 @@ use super::search::{
     UID_SET_MAX, done_error, read_until_done, run_until_done, search_uids, uid_chunks, uid_set,
     uid_sets,
 };
-use super::{Conn, select};
+use super::{Conn, WritePhase, select};
 use crate::query::{self, Literals};
 use crate::{
     AttachmentData, Error, Flag, IMAP_MESSAGE_LIMIT, Message, MessageFlags, Result, SearchQuery,
@@ -404,6 +404,7 @@ pub(super) async fn delete(
     folder: &str,
     uid: Uid,
     uid_validity: Option<u32>,
+    phase: &mut WritePhase,
 ) -> Result<Option<u32>> {
     if !permanent_delete {
         return Err(Error::invalid(
@@ -415,7 +416,7 @@ pub(super) async fn delete(
     let changed = find_messages(conn, folder, &[uid], uid_validity, Check::Exists).await?;
     let seen = changed.single(folder, uid)?;
     ensure_single_expunge(conn, capabilities, &[uid]).await?;
-    expunge(conn, capabilities, &[uid]).await?;
+    expunge(conn, capabilities, &[uid], Some(phase)).await?;
     Ok(seen)
 }
 
@@ -434,7 +435,7 @@ pub(super) async fn save_sent_copy(
     if !conn.uid_search(&criteria).await?.is_empty() {
         return Ok(SentCopy::AlreadyPresent { folder });
     }
-    append(conn, &folder, "\\Seen", raw).await?;
+    append(conn, &folder, "\\Seen", raw, &mut WritePhase::Idle).await?;
     Ok(SentCopy::Saved { folder })
 }
 
@@ -442,9 +443,10 @@ pub(super) async fn save_draft(
     conn: &mut Conn,
     drafts_folder: Option<&str>,
     raw: &[u8],
+    phase: &mut WritePhase,
 ) -> Result<(String, Option<(u32, Uid)>)> {
     let folder = folders::resolve(conn, SpecialUse::Drafts, drafts_folder).await?;
-    let append_uid = append(conn, &folder, "\\Seen \\Draft", raw).await?;
+    let append_uid = append(conn, &folder, "\\Seen \\Draft", raw, phase).await?;
     Ok((folder, append_uid))
 }
 
@@ -453,6 +455,7 @@ async fn append(
     folder: &str,
     flags: &str,
     raw: &[u8],
+    phase: &mut WritePhase,
 ) -> Result<Option<(u32, Uid)>> {
     let mailbox = query::imap_string(&utf7::encode(folder), Literals::Unsupported)?;
     let tag = conn
@@ -476,6 +479,7 @@ async fn append(
         }
     }
     let stream = conn.get_mut();
+    *phase = WritePhase::Started;
     stream.write_all(raw).await?;
     stream.write_all(b"\r\n").await?;
     stream.flush().await?;
@@ -540,7 +544,7 @@ pub(super) async fn transfer(
         collect_copy_uid(&mut codes, result?);
         if !moving {
             progress.in_flight = InFlight::Partial;
-            expunge(conn, capabilities, chunk).await.map_err(|error| match error {
+            expunge(conn, capabilities, chunk, None).await.map_err(|error| match error {
                 Error::Unsupported(_) => Error::Unsupported(
                     "UIDPLUS; copies may now be in the destination; search it before calling again",
                 ),
@@ -647,8 +651,19 @@ fn copy_uids(codes: &[ResponseCode<'_>]) -> (Option<u32>, HashMap<Uid, Uid>) {
 /// Marks our UIDs `\Deleted` and expunges them. Callers check
 /// [`ensure_single_expunge`] first. Without UIDPLUS, a second check narrows
 /// the gap to one round trip before EXPUNGE; it cannot close that race.
-async fn expunge(conn: &mut Conn, capabilities: &Capabilities, uids: &[Uid]) -> Result<()> {
+async fn expunge(
+    conn: &mut Conn,
+    capabilities: &Capabilities,
+    uids: &[Uid],
+    mut phase: Option<&mut WritePhase>,
+) -> Result<()> {
+    if let Some(phase) = phase.as_deref_mut() {
+        *phase = WritePhase::Started;
+    }
     store_flag(conn, uids, "\\Deleted", true).await?;
+    if let Some(phase) = phase {
+        *phase = WritePhase::Dirty;
+    }
     if capabilities.has_str("UIDPLUS") {
         for set in uid_sets(uids, "UID EXPUNGE ".len())? {
             run_until_done(conn, &format!("UID EXPUNGE {set}"), |_| {}).await?;

@@ -9,23 +9,27 @@ use std::time::{Duration, Instant};
 
 use postkeep_mail::{
     Check, Credentials, DeleteMode, EmailAddress, Error, Flag, ImapConfig, ImapSecurity,
-    ImapSession, InFlight, MailClient, MailConfig, NaiveDate, OutgoingMessage, Paging, Result,
-    SearchQuery, SearchResults, SecretString, UID_SET_MAX,
+    ImapSession, InFlight, MailClient, MailConfig, NaiveDate, OutgoingMessage, Paging,
+    ProtocolErrorKind, Result, SearchQuery, SearchResults, SecretString, UID_SET_MAX,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+
+const WAIT: &str = "<wait for disconnect>";
+const SHORT_TIMEOUT: Duration = Duration::from_millis(450);
 
 /// Starts a server with command-specific replies (`TAG` is replaced by its tag).
 async fn server(
     capabilities: &'static str,
     answer: impl FnMut(&str) -> Option<String> + Send + 'static,
 ) -> (ImapSession, tokio::task::JoinHandle<Vec<String>>) {
-    let (_, imap, server) = server_with_client(capabilities, answer).await;
+    let (_, imap, server) = server_with_client(capabilities, Duration::from_secs(5), answer).await;
     (imap, server)
 }
 
 async fn server_with_client(
     capabilities: &'static str,
+    timeout: Duration,
     mut answer: impl FnMut(&str) -> Option<String> + Send + 'static,
 ) -> (
     MailClient,
@@ -46,6 +50,10 @@ async fn server_with_client(
             commands.push(command.to_owned());
             let answer = answer(command);
             if answer.as_deref() == Some("") {
+                break;
+            }
+            if answer.as_deref() == Some(WAIT) {
+                read.read_to_end(&mut Vec::new()).await.unwrap();
                 break;
             }
             let reply = answer.map_or_else(
@@ -77,7 +85,14 @@ async fn server_with_client(
                         .windows(b"Message-ID:".len())
                         .any(|part| part == b"Message-ID:")
                 );
-                write.write_all(&reply.as_bytes()[end..]).await.unwrap();
+                match reply[end..].trim_end_matches("\r\n") {
+                    "" => break,
+                    WAIT => {
+                        read.read_to_end(&mut Vec::new()).await.unwrap();
+                        break;
+                    }
+                    _ => write.write_all(&reply.as_bytes()[end..]).await.unwrap(),
+                }
             } else {
                 write.write_all(reply.as_bytes()).await.unwrap();
             }
@@ -91,7 +106,7 @@ async fn server_with_client(
             port,
             security: ImapSecurity::Plaintext,
         },
-        timeout: Duration::from_secs(5),
+        timeout,
         ..MailConfig::default()
     };
     let credentials =
@@ -119,18 +134,22 @@ async fn save_draft_parses_appenduid_handles_untagged_and_refusals() {
         ("+ Ready\r\nTAG OK [APPENDUID 42 0] done", Ok(None)),
         ("+ Ready\r\nTAG OK [APPENDUID 42 1:2] done", Ok(None)),
         ("TAG NO [TRYCREATE] refused", Err("no")),
+        ("+ Ready\r\nTAG NO [TRYCREATE] refused", Err("no")),
+        ("+ Ready", Err("unconfirmed")),
+        ("+ Ready\r\n<wait for disconnect>", Err("unconfirmed")),
         ("TAG BAD refused", Err("bad")),
         ("TAG OK without continuation", Err("bad")),
         ("", Err("eof")),
     ] {
-        let (client, mut imap, server) = server_with_client("IMAP4rev1 UIDPLUS", move |command| {
-            if command.starts_with("LIST") {
-                Some("* LIST (\\Drafts) \"/\" \"Drafts\"\r\nTAG OK done".to_owned())
-            } else {
-                command.starts_with("APPEND").then(|| reply.to_owned())
-            }
-        })
-        .await;
+        let (client, mut imap, server) =
+            server_with_client("IMAP4rev1 UIDPLUS", SHORT_TIMEOUT, move |command| {
+                if command.starts_with("LIST") {
+                    Some("* LIST (\\Drafts) \"/\" \"Drafts\"\r\nTAG OK done".to_owned())
+                } else {
+                    command.starts_with("APPEND").then(|| reply.to_owned())
+                }
+            })
+            .await;
         let saved = client.save_draft(&mut imap, &message).await;
         match expected {
             Ok(uid) => {
@@ -141,7 +160,14 @@ async fn save_draft_parses_appenduid_handles_untagged_and_refusals() {
             Err(kind) => {
                 let error = saved.unwrap_err();
                 assert_eq!(error.leaves_session_usable(), kind == "no", "{error}");
+                let protocol = match kind {
+                    "no" | "bad" => Some(ProtocolErrorKind::Rejected),
+                    "eof" => Some(ProtocolErrorKind::Transient),
+                    _ => None,
+                };
+                assert_eq!(error.protocol_error_kind(), protocol);
                 match kind {
+                    "unconfirmed" => assert!(matches!(error, Error::WriteUnconfirmed)),
                     "no" => {
                         assert!(
                             matches!(error, Error::Imap(async_imap::error::Error::No(ref text)) if text.contains("TryCreate"))
@@ -174,6 +200,87 @@ async fn save_draft_parses_appenduid_handles_untagged_and_refusals() {
                 &[]
             }
         );
+    }
+}
+
+#[tokio::test]
+async fn permanent_delete_does_not_clear_an_unconfirmed_deleted_mark() {
+    for (capabilities, refusal, reply) in [
+        ("IMAP4rev1 UIDPLUS", "UID STORE", "TAG NO cannot mark"),
+        ("IMAP4rev1 UIDPLUS", "UID EXPUNGE", "TAG NO cannot expunge"),
+        ("IMAP4rev1", "EXPUNGE", ""),
+        ("IMAP4rev1", "EXPUNGE", WAIT),
+    ] {
+        // For UID EXPUNGE, another client already marked this UID before our STORE.
+        let mut marked = refusal == "UID EXPUNGE";
+        let (_, mut imap, server) =
+            server_with_client(capabilities, SHORT_TIMEOUT, move |command| {
+                if command.starts_with(refusal) {
+                    assert!(refusal == "UID STORE" || marked);
+                    return Some(reply.to_owned());
+                }
+                if command.starts_with("UID STORE") {
+                    marked = command.contains("+FLAGS");
+                }
+                if command == "UID SEARCH DELETED" {
+                    return Some(
+                        if marked {
+                            "* SEARCH 1\r\nTAG OK done"
+                        } else {
+                            "* SEARCH\r\nTAG OK done"
+                        }
+                        .to_owned(),
+                    );
+                }
+                echo_uid_search(command)
+            })
+            .await;
+        let error = imap
+            .delete_message("INBOX", 1, Some(7), DeleteMode::Permanent)
+            .await
+            .unwrap_err();
+        if refusal == "UID STORE" {
+            assert_eq!(
+                error.protocol_error_kind(),
+                Some(ProtocolErrorKind::Rejected)
+            );
+        } else {
+            assert!(matches!(error, Error::WriteUnconfirmed), "{error}");
+            assert!(!error.leaves_session_usable());
+        }
+        drop(imap);
+        let commands = server.await.unwrap();
+        assert!(
+            commands.last().unwrap().starts_with(refusal),
+            "{commands:?}"
+        );
+        assert!(
+            !commands.iter().any(|command| command.contains("-FLAGS")),
+            "{commands:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn folder_create_distinguishes_a_rejection_from_a_missing_reply() {
+    for reply in ["TAG NO [ALREADYEXISTS] exists", "", WAIT] {
+        let (_, mut imap, server) =
+            server_with_client("IMAP4rev1", SHORT_TIMEOUT, move |command| {
+                command.starts_with("CREATE ").then(|| reply.to_owned())
+            })
+            .await;
+        let error = imap.create_folder("Archive").await.unwrap_err();
+        if reply.starts_with("TAG NO") {
+            assert_eq!(
+                error.protocol_error_kind(),
+                Some(ProtocolErrorKind::Rejected)
+            );
+        } else {
+            assert!(matches!(error, Error::WriteUnconfirmed), "{error}");
+            assert!(!error.leaves_session_usable());
+        }
+        drop(imap);
+        assert!(server.await.unwrap().last().unwrap().starts_with("CREATE "));
     }
 }
 

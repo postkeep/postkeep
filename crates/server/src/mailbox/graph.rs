@@ -19,13 +19,17 @@ use std::time::{Duration, Instant};
 use axum::body::Bytes;
 use axum::http::{HeaderName, Method, StatusCode, header};
 use base64::Engine as _;
+use postkeep_auth::ToolErrorCode;
 use postkeep_mail::{
     AttachmentData, EmailAddress, Message, MessageFlags, OutgoingAttachment, OutgoingMessage,
     Paging, Reply, SendOptions, SentCopy, SentMessage, holds, holds_addresses, mime,
 };
 use postkeep_store::Provider;
-use postkeep_upstream::http::{HttpError, JSON_LIMIT, MESSAGE_LIMIT, join_segments};
-use postkeep_upstream::{ApiClient, ApiError, UpstreamProvider};
+use postkeep_upstream::http::{
+    HttpError, JSON_LIMIT, MAX_RETRY_AFTER_SECS, MESSAGE_LIMIT, join_segments,
+    parse_retry_after_str,
+};
+use postkeep_upstream::{ApiClient, ApiError, OAuthError, TokenError, UpstreamProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::SemaphorePermit;
@@ -41,7 +45,7 @@ use super::id::{self, GRAPH_PREFIX};
 use super::{
     Change, Criteria, Cutoff, DRAFT_UNCONFIRMED, Fetched, FolderEntry, IdsFrom, MAY_HAVE_BEEN_SENT,
     MailboxError, MailboxResult, Mode, NOTHING_LEFT, Outcome, Page, SENT_NO_ANSWER, SavedDraft,
-    Selected, Selector, SendError, Status, Summary, TIME_EXHAUSTED, maybe_sent,
+    Selected, Selector, SendError, Status, Summary, TIME_EXHAUSTED, account_store_code, maybe_sent,
     provider_may_have_acted, provider_outcomes, too_large_to_forward, unanswered,
 };
 
@@ -134,17 +138,22 @@ impl Batch {
                                 .ok()
                                 .and_then(|state| already(&state, change, *destination));
                         match is_already {
-                            Some(true) => out.finish(Status::Ok, change.already_reason(true)),
-                            Some(false) if *mode == Mode::DryRun => out.finish(Status::Ok, ""),
-                            Some(false) => ready.push(index),
-                            None => out.finish(
+                            Some(true) => out.ok(change.already_reason(true)),
+                            Some(false) if *mode == Mode::DryRun => out.ok(""),
+                            Some(false) => {
+                                out.reset_pending();
+                                ready.push(index);
+                            }
+                            None => out.fail(
                                 Status::Failed,
                                 "Microsoft's answer left out the message's state",
+                                ToolErrorCode::ProviderUnavailable,
+                                None,
                             ),
                         }
                     }
                     BatchStage::Write { moved } => {
-                        out.finish(Status::Ok, "");
+                        out.ok("");
                         if *moved
                             && let Some(new) =
                                 response.body["id"].as_str().filter(|id| !id.is_empty())
@@ -157,24 +166,44 @@ impl Batch {
                     }
                 },
                 Some(response) if response.status == 429 => {
-                    out.reason = api_error_message(&response.error(), "Microsoft");
+                    let error = response.error();
+                    out.fail(
+                        Status::NotReached,
+                        api_error_message(&error, "Microsoft"),
+                        ToolErrorCode::RateLimited,
+                        error.retry_after(),
+                    );
                     delay = delay.max(response.retry_after());
                     retry.push(request.clone());
                 }
-                Some(response) => out.finish(
-                    if response.status == 404 {
+                Some(response) => {
+                    let err = response.error();
+                    let (code, retry_after) = classify_api_error(&err);
+                    let status = if response.status == 404 {
                         Status::NotFound
                     } else {
                         Status::Failed
-                    },
-                    api_error_message(&response.error(), "Microsoft"),
-                ),
+                    };
+                    out.fail(
+                        status,
+                        api_error_message(&err, "Microsoft"),
+                        code,
+                        retry_after,
+                    );
+                }
                 None => match stage {
-                    BatchStage::Read { .. } => out.finish(
+                    BatchStage::Read { .. } => out.fail(
                         Status::NotReached,
                         "Microsoft's batch answer omitted or repeated this request",
+                        ToolErrorCode::ProviderUnavailable,
+                        None,
                     ),
-                    BatchStage::Write { .. } => out.finish(Status::Failed, SENT_NO_ANSWER),
+                    BatchStage::Write { .. } => out.fail(
+                        Status::Failed,
+                        SENT_NO_ANSWER,
+                        ToolErrorCode::SubmissionUncertain,
+                        None,
+                    ),
                 },
             }
         }
@@ -182,10 +211,14 @@ impl Batch {
     }
 }
 
-fn pending_reason(outcomes: &mut [Outcome], reason: &str) {
+fn pending_reason(
+    outcomes: &mut [Outcome],
+    reason: &str,
+    (code, retry_after): (ToolErrorCode, Option<u64>),
+) {
     for out in outcomes {
         if out.status == Status::NotReached && out.reason == TIME_EXHAUSTED {
-            reason.clone_into(&mut out.reason);
+            out.fail(Status::NotReached, reason, code, retry_after);
         }
     }
 }
@@ -199,23 +232,33 @@ impl BatchResponse {
             status: StatusCode::from_u16(self.status).unwrap_or(StatusCode::BAD_GATEWAY),
             code,
             reason: None,
+            retry_after: if matches!(self.status, 429 | 503) {
+                self.retry_after_seconds()
+            } else {
+                None
+            },
             message,
         }
     }
 
-    fn retry_after(&self) -> Duration {
-        let seconds = self
-            .headers
+    fn retry_after_seconds(&self) -> Option<u64> {
+        self.headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
             .and_then(|(_, value)| {
-                value
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .or_else(|| value.as_u64())
+                value.as_str().map_or_else(
+                    || {
+                        value
+                            .as_u64()
+                            .map(|seconds| seconds.min(MAX_RETRY_AFTER_SECS))
+                    },
+                    parse_retry_after_str,
+                )
             })
-            .unwrap_or(1);
-        Duration::from_secs(seconds)
+    }
+
+    fn retry_after(&self) -> Duration {
+        Duration::from_secs(self.retry_after_seconds().unwrap_or(1))
     }
 }
 
@@ -559,9 +602,10 @@ impl GraphMailbox {
             .or_else(|| folders.iter().find(|(_, folder)| folder.id == name))
             .map(|(_, folder)| FolderRef(folder.id.clone()))
             .ok_or_else(|| {
-                MailboxError::Message(format!(
-                    "there is no folder named {name:?}; use a name from list_folders"
-                ))
+                MailboxError::coded(
+                    ToolErrorCode::NotFound,
+                    format!("there is no folder named {name:?}; use a name from list_folders"),
+                )
             })
     }
 
@@ -707,7 +751,7 @@ impl GraphMailbox {
         };
         let window = kql.is_some() && more;
         if window && matches!(change, Change::Flags { .. }) {
-            return Err(MailboxError::Message(
+            return Err(MailboxError::coded(ToolErrorCode::InvalidInput,
                 "a change of read or flagged can't be sure to reach every message Outlook finds by sender, recipient, subject or text; narrow the search with since or before"
                     .to_owned(),
             ));
@@ -741,9 +785,12 @@ impl GraphMailbox {
         paging: Paging,
     ) -> MailboxResult<Page> {
         if paging.offset >= MAX_SEARCH_WINDOW {
-            return Err(MailboxError::Message(format!(
-                "keyword searches on Outlook reach the first {MAX_SEARCH_WINDOW} matches; narrow the search"
-            )));
+            return Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
+                format!(
+                    "keyword searches on Outlook reach the first {MAX_SEARCH_WINDOW} matches; narrow the search"
+                ),
+            ));
         }
         let url = self.keyword_url(folder, kql, MAX_SEARCH_WINDOW, &keyword_fields(criteria));
         let (mut matching, further) = self
@@ -828,7 +875,8 @@ impl GraphMailbox {
         let metadata = metadata?;
         let raw = raw?;
         let parsed: Message = mime::parse_message(&raw, metadata.flags()).ok_or_else(|| {
-            MailboxError::Message(
+            MailboxError::coded(
+                ToolErrorCode::Unsupported,
                 "Microsoft returned a message that could not be parsed".to_owned(),
             )
         })?;
@@ -899,7 +947,7 @@ impl GraphMailbox {
             .await
             .map_err(graph_error)?;
         let answer: Collection<Translated> = self.api.parse(&response).map_err(graph_error)?;
-        let no_stable_id = || MailboxError::Message(NO_STABLE_ID.to_owned());
+        let no_stable_id = || MailboxError::coded(ToolErrorCode::ProviderUnavailable, NO_STABLE_ID);
         let mut translated = HashMap::with_capacity(asked.len());
         for entry in answer.value {
             let Some(target) = entry.target_id else {
@@ -1018,7 +1066,7 @@ impl GraphMailbox {
         };
         if ids_from == IdsFrom::Selection && mode == Mode::DryRun {
             for (index, _) in valid {
-                outcomes[index].finish(Status::Ok, "");
+                outcomes[index].ok("");
             }
             return Ok(outcomes);
         }
@@ -1097,16 +1145,22 @@ impl GraphMailbox {
                         return Err(graph_error(err));
                     }
                     let reason = api_error_message(&err, "Microsoft");
-                    pending_reason(outcomes, &reason);
-                    if writing && no_answer || err.status().is_some() && !err.is_rate_limited() {
-                        let reason = if writing && no_answer {
-                            SENT_NO_ANSWER
-                        } else {
-                            &reason
-                        };
-                        for index in requests.iter().filter_map(batch_index) {
-                            outcomes[index].finish(Status::Failed, reason);
-                        }
+                    let (code, retry_after) = classify_api_error(&err);
+                    pending_reason(outcomes, &reason, (code, retry_after));
+                    let (status, reason, code, retry_after) = if writing && no_answer {
+                        (
+                            Status::Failed,
+                            SENT_NO_ANSWER,
+                            ToolErrorCode::SubmissionUncertain,
+                            None,
+                        )
+                    } else if err.is_rate_limited() || err.status().is_none() {
+                        (Status::NotReached, reason.as_str(), code, retry_after)
+                    } else {
+                        (Status::Failed, reason.as_str(), code, retry_after)
+                    };
+                    for index in requests.iter().filter_map(batch_index) {
+                        outcomes[index].fail(status, reason, code, retry_after);
                     }
                     return Ok(false);
                 }
@@ -1121,12 +1175,11 @@ impl GraphMailbox {
                     .checked_add(delay)
                     .is_none_or(|next| next >= deadline)
             {
-                if let Some(reason) = retry
-                    .first()
-                    .and_then(batch_index)
-                    .map(|index| outcomes[index].reason.clone())
+                if let Some(index) = retry.first().and_then(batch_index)
+                    && let Some(error) = outcomes[index].error
                 {
-                    pending_reason(outcomes, &reason);
+                    let reason = outcomes[index].reason.clone();
+                    pending_reason(outcomes, &reason, error);
                 }
                 return Ok(false);
             }
@@ -1151,7 +1204,7 @@ impl GraphMailbox {
             || true,
         )
         .await
-        .map_err(graph_error)
+        .map_err(|err| write_error(err, "Microsoft"))
     }
 
     /// Creates a folder; `Parent/Child` creates a child folder.
@@ -1162,7 +1215,10 @@ impl GraphMailbox {
             None => (None, name),
         };
         if leaf.trim().is_empty() {
-            return Err(MailboxError::Message("the folder name is empty".to_owned()));
+            return Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
+                "the folder name is empty",
+            ));
         }
         let url = parent.as_ref().map_or_else(
             || self.url(&["mailFolders"]),
@@ -1179,10 +1235,11 @@ impl GraphMailbox {
             .await
         {
             Ok(_) => Ok(()),
-            Err(err) if err.status() == Some(StatusCode::CONFLICT) => Err(MailboxError::Message(
+            Err(err) if err.status() == Some(StatusCode::CONFLICT) => Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
                 format!("a folder named {name:?} already exists"),
             )),
-            Err(err) => Err(graph_error(err)),
+            Err(err) => Err(write_error(err, "Microsoft")),
         }
     }
 
@@ -1236,10 +1293,18 @@ impl GraphMailbox {
             .as_ref()
             .map(format_address)
             .unwrap_or_default();
-        let body = serde_json::to_vec(&original.body)
-            .map_err(|_| "could not pin the forwarded body".to_owned())?;
-        let pinned_files = serde_json::to_vec(&files)
-            .map_err(|_| "could not pin the forwarded files".to_owned())?;
+        let body = serde_json::to_vec(&original.body).map_err(|_| {
+            MailboxError::coded(
+                ToolErrorCode::ProviderUnavailable,
+                "could not pin the forwarded body",
+            )
+        })?;
+        let pinned_files = serde_json::to_vec(&files).map_err(|_| {
+            MailboxError::coded(
+                ToolErrorCode::ProviderUnavailable,
+                "could not pin the forwarded files",
+            )
+        })?;
         Ok(Forwarded {
             pin: forward::pin([
                 body.as_slice(),
@@ -1270,9 +1335,12 @@ impl GraphMailbox {
             let Some(next) = page.next_link else {
                 return Ok(files);
             };
-            url = self
-                .next_page(Some(&next))
-                .ok_or_else(|| "Outlook did not return a complete file list".to_owned())?;
+            url = self.next_page(Some(&next)).ok_or_else(|| {
+                MailboxError::coded(
+                    ToolErrorCode::ProviderUnavailable,
+                    "Outlook did not return a complete file list",
+                )
+            })?;
         }
     }
 
@@ -1352,7 +1420,7 @@ impl GraphMailbox {
             } else {
                 DRAFT_UNCONFIRMED
             };
-            MailboxError::Message(message.to_owned())
+            MailboxError::coded(ToolErrorCode::SubmissionUncertain, message)
         })?
     }
 
@@ -1415,40 +1483,38 @@ impl GraphMailbox {
                 } else {
                     ""
                 };
-                MailboxError::Message(format!(
-                    "Not sent: {}.{draft}",
-                    submit_error(&error, "Microsoft")
-                ))
+                submit_error(&error, "Microsoft")
+                    .map_message(|message| format!("Not sent: {message}.{draft}"))
             } else if uncertain {
-                DRAFT_UNCONFIRMED.to_owned().into()
+                MailboxError::coded(ToolErrorCode::SubmissionUncertain, DRAFT_UNCONFIRMED)
             } else {
                 match submit_error(&error, "Microsoft") {
                     MailboxError::Deadline => MailboxError::Deadline,
-                    other => MailboxError::Message(format!("Draft not saved: {other}.")),
+                    other => other.map_message(|message| format!("Draft not saved: {message}.")),
                 }
             }
         })?;
         let invalid = "Outlook did not return a valid draft id. Check Drafts before trying again.";
-        let draft: Draft = self.api.parse(&answer).map_err(|_| {
+        let invalid_id = |not_sent| {
             if send {
-                "Not sent: Outlook did not return the draft's id. A draft may remain in Drafts."
+                MailboxError::coded(ToolErrorCode::ProviderUnavailable, not_sent)
             } else {
-                invalid
+                MailboxError::coded(ToolErrorCode::SubmissionUncertain, invalid)
             }
-            .to_owned()
+        };
+        let draft: Draft = self.api.parse(&answer).map_err(|_| {
+            invalid_id(
+                "Not sent: Outlook did not return the draft's id. A draft may remain in Drafts.",
+            )
         })?;
         if draft.id.is_empty()
             || original == Some(draft.id.as_str())
             || id::parse_provider_id(GRAPH_PREFIX, &id::provider_id(GRAPH_PREFIX, &draft.id))
                 .is_none()
         {
-            return Err(if send {
-                "Not sent: Outlook did not return a new draft id. A draft may remain in Drafts."
-            } else {
-                invalid
-            }
-            .to_owned()
-            .into());
+            return Err(invalid_id(
+                "Not sent: Outlook did not return a new draft id. A draft may remain in Drafts.",
+            ));
         }
         Ok(draft)
     }
@@ -1467,7 +1533,7 @@ impl GraphMailbox {
         };
         let prefix = if send { "Not sent" } else { "Draft not saved" };
         if cancel.is_cancelled() {
-            return Err(cancelled.to_owned().into());
+            return Err(MailboxError::coded(ToolErrorCode::Timeout, cancelled));
         }
         let mut draft = self.post_draft(&start, &message, send).await?;
         let draft_id = &draft.id;
@@ -1485,7 +1551,7 @@ impl GraphMailbox {
                     .map_err(|err| submit_error(&err, "Microsoft"))?;
                     // Outlook can copy inline files from the original into the reply draft.
                     let files: Vec<IdOnly> = tokio::select! {
-                        () = cancel.cancelled() => return Err(cancelled.to_owned().into()),
+                        () = cancel.cancelled() => return Err(MailboxError::coded(ToolErrorCode::Timeout, cancelled)),
                         files = self.message_files(draft_id, "id") => files?,
                     };
                     for file in files {
@@ -1528,12 +1594,15 @@ impl GraphMailbox {
                     // A gateway can fail after Exchange accepts the send. The immutable id
                     // could now name the Sent copy, so do not delete it or retry.
                     Err(error) if provider_may_have_acted(&error) => {
-                        return Err(MAY_HAVE_BEEN_SENT.to_owned().into());
+                        return Err(MailboxError::coded(
+                            ToolErrorCode::SubmissionUncertain,
+                            MAY_HAVE_BEEN_SENT,
+                        ));
                     }
                     Err(error) => submit_error(&error, "Microsoft"),
                 }
             }
-            Ok(()) => cancelled.to_owned().into(),
+            Ok(()) => MailboxError::coded(ToolErrorCode::Timeout, cancelled),
             Err(error) => error,
         };
         let cleanup = if self.permanent_delete(draft_id).await.is_ok() {
@@ -1541,7 +1610,13 @@ impl GraphMailbox {
         } else {
             " A draft may remain in Drafts."
         };
-        Err(format!("{prefix}: {error}.{cleanup}").into())
+        if !send && !cleanup.is_empty() {
+            return Err(MailboxError::coded(
+                ToolErrorCode::SubmissionUncertain,
+                DRAFT_UNCONFIRMED,
+            ));
+        }
+        Err(error.map_message(|message| format!("{prefix}: {message}.{cleanup}")))
     }
 
     async fn update_forward(
@@ -1553,10 +1628,15 @@ impl GraphMailbox {
         cancel: &CancellationToken,
     ) -> MailboxResult<()> {
         if cancel.is_cancelled() {
-            return Err(DRAFT_CANCELLED.to_owned().into());
+            return Err(MailboxError::coded(ToolErrorCode::Timeout, DRAFT_CANCELLED));
         }
-        let mut body: ForwardBody = serde_json::from_value(body.unwrap_or_default())
-            .map_err(|_| "Outlook returned a forward draft without its body".to_owned())?;
+        let mut body: ForwardBody =
+            serde_json::from_value(body.unwrap_or_default()).map_err(|_| {
+                MailboxError::coded(
+                    ToolErrorCode::ProviderUnavailable,
+                    "Outlook returned a forward draft without its body",
+                )
+            })?;
         if body.content_type.eq_ignore_ascii_case("html") {
             body.content = prefix_html(
                 &body.content,
@@ -1565,9 +1645,10 @@ impl GraphMailbox {
         } else if body.content_type.eq_ignore_ascii_case("text") {
             body.content = format!("{}\n\n{}", message.text_body, body.content);
         } else {
-            return Err("Outlook returned a forward draft with an unknown body type"
-                .to_owned()
-                .into());
+            return Err(MailboxError::coded(
+                ToolErrorCode::Unsupported,
+                "Outlook returned a forward draft with an unknown body type",
+            ));
         }
         self.draft_write(
             Method::PATCH,
@@ -1581,7 +1662,7 @@ impl GraphMailbox {
         .await
         .map_err(|error| submit_error(&error, "Microsoft"))?;
         let files: Vec<AttachmentName> = tokio::select! {
-            () = cancel.cancelled() => return Err(DRAFT_CANCELLED.to_owned().into()),
+            () = cancel.cancelled() => return Err(MailboxError::coded(ToolErrorCode::Timeout, DRAFT_CANCELLED)),
             files = self.message_files(id, "name") => files?,
         };
         let mut matched = files.len() == expected.len();
@@ -1597,7 +1678,10 @@ impl GraphMailbox {
             true
         });
         if !matched {
-            return Err("Outlook did not carry every file of the message into the forward; nothing was sent".to_owned().into());
+            return Err(MailboxError::coded(
+                ToolErrorCode::ProviderUnavailable,
+                "Outlook did not carry every file of the message into the forward; nothing was sent",
+            ));
         }
         Ok(())
     }
@@ -1611,12 +1695,16 @@ impl GraphMailbox {
     ) -> MailboxResult<()> {
         for file in files {
             if cancel.is_cancelled() {
-                return Err(cancelled.to_owned().into());
+                return Err(MailboxError::coded(ToolErrorCode::Timeout, cancelled));
             }
             if file.content.len() >= GRAPH_NEW_FILE_LIMIT {
                 let name = forward::display_file(&file.filename);
-                if !self.upload_file(id, file, cancel).await {
-                    return Err(format!("Outlook did not confirm the file {name:?}").into());
+                if let Err((code, retry_after_seconds)) = self.upload_file(id, file, cancel).await {
+                    return Err(MailboxError::Coded {
+                        code,
+                        retry_after_seconds,
+                        message: format!("Outlook did not confirm the file {name:?}"),
+                    });
                 }
                 continue;
             }
@@ -1643,7 +1731,8 @@ impl GraphMailbox {
         id: &str,
         file: OutgoingAttachment,
         cancel: &CancellationToken,
-    ) -> bool {
+    ) -> Result<(), (ToolErrorCode, Option<u64>)> {
+        let malformed = (ToolErrorCode::ProviderUnavailable, None);
         let size = file.content.len();
         let session = self
             .api
@@ -1656,32 +1745,32 @@ impl GraphMailbox {
                     "size": size, "contentType": file.content_type,
                 }}),
             )
-            .await;
-        let Some(url) = session.ok().and_then(|answer| {
-            let answer: Value = answer.json().ok()?;
-            Url::parse(answer.get("uploadUrl")?.as_str()?).ok()
-        }) else {
-            return false;
-        };
+            .await
+            .map_err(|err| classify_api_error(&err))?;
+        let answer: Value = session.json().map_err(|_| malformed)?;
+        let url = answer["uploadUrl"]
+            .as_str()
+            .and_then(|url| Url::parse(url).ok())
+            .ok_or(malformed)?;
         let data = Bytes::from(file.content);
         for range in upload_ranges(size) {
             let next = range.end;
             let header = format!("bytes {}-{}/{size}", range.start, next - 1);
-            let Ok((status, body)) = self
+            let (status, body) = self
                 .api
                 .put_range(&url, header, data.slice(range), || !cancel.is_cancelled())
                 .await
-            else {
-                return false;
-            };
+                .map_err(|err| classify_api_error(&err))?;
             if next == size {
-                return status == StatusCode::CREATED;
+                return (status == StatusCode::CREATED)
+                    .then_some(())
+                    .ok_or(malformed);
             }
             if status != StatusCode::OK || next_expected_range(&body) != Some(next) {
-                return false;
+                return Err(malformed);
             }
         }
-        false
+        Err(malformed)
     }
 
     /// Outlook always stores the message in Sent Items, so `options`
@@ -1812,7 +1901,10 @@ impl GraphMailbox {
     async fn fetch_original(&self, id: &str) -> MailboxResult<postkeep_mail::MessageHeaders> {
         let raw = self.raw(id).await?;
         mime::parse_headers(&raw).ok_or_else(|| {
-            MailboxError::Message("the original message could not be parsed".to_owned())
+            MailboxError::coded(
+                ToolErrorCode::Unsupported,
+                "the original message could not be parsed",
+            )
         })
     }
 
@@ -1915,13 +2007,14 @@ pub(super) fn provider_message_id<'a>(
         .map(str::trim)
         .filter(|id| !id.is_empty());
     let given = given.ok_or_else(|| {
-        MailboxError::Message(
+        MailboxError::coded(ToolErrorCode::InvalidInput,
             "pass the message's id from search_messages (folder and uid only work for IMAP accounts)"
                 .to_owned(),
         )
     })?;
     id::parse_provider_id(prefix, given).ok_or_else(|| {
-        MailboxError::Message(
+        MailboxError::coded(
+            ToolErrorCode::InvalidInput,
             "the id is not a message id of this account; take ids from search_messages".to_owned(),
         )
     })
@@ -2110,20 +2203,98 @@ pub(super) fn graph_error(err: ApiError) -> MailboxError {
     provider_error(&err, "Microsoft")
 }
 
+pub(super) fn classify_api_error(err: &ApiError) -> (ToolErrorCode, Option<u64>) {
+    const fn http_code(err: &HttpError) -> ToolErrorCode {
+        match err {
+            HttpError::Deadline | HttpError::Timeout(_) => ToolErrorCode::Timeout,
+            HttpError::TooLarge(_) => ToolErrorCode::PayloadTooLarge,
+            HttpError::Request(_) => ToolErrorCode::InvalidInput,
+            _ => ToolErrorCode::ProviderUnavailable,
+        }
+    }
+    let code = match err {
+        ApiError::Token(
+            TokenError::NotConnected(_)
+            | TokenError::NeedsReauth { .. }
+            | TokenError::OAuth(
+                OAuthError::NeedsReauth { .. }
+                | OAuthError::MissingScopes(_)
+                | OAuthError::NoMailbox(_),
+            ),
+        ) => ToolErrorCode::AuthRequired,
+        ApiError::Token(TokenError::Store(err)) => account_store_code(err),
+        ApiError::Token(TokenError::OAuth(OAuthError::NotConfigured(_))) => {
+            ToolErrorCode::Unsupported
+        }
+        ApiError::Token(TokenError::OAuth(OAuthError::Http(err))) | ApiError::Http(err) => {
+            http_code(err)
+        }
+        ApiError::Token(TokenError::OAuth(err)) if err.is_rate_limited() => {
+            return (ToolErrorCode::RateLimited, err.retry_after());
+        }
+        ApiError::Token(TokenError::OAuth(err)) if err.is_server_unavailable() => {
+            return (ToolErrorCode::ProviderUnavailable, err.retry_after());
+        }
+        ApiError::Token(TokenError::OAuth(OAuthError::Rejected { status, .. }))
+            if status.is_client_error() =>
+        {
+            ToolErrorCode::AuthRequired
+        }
+        ApiError::Status { .. } if err.is_any_rate_limit() => {
+            return (ToolErrorCode::RateLimited, err.retry_after());
+        }
+        ApiError::Status { status, .. } => match *status {
+            StatusCode::UNAUTHORIZED => ToolErrorCode::AuthRequired,
+            StatusCode::FORBIDDEN => ToolErrorCode::PermissionDenied,
+            StatusCode::NOT_FOUND => ToolErrorCode::NotFound,
+            StatusCode::REQUEST_TIMEOUT => ToolErrorCode::Timeout,
+            StatusCode::PAYLOAD_TOO_LARGE => ToolErrorCode::PayloadTooLarge,
+            status if status.is_client_error() => ToolErrorCode::InvalidInput,
+            status if status.is_server_error() => {
+                return (ToolErrorCode::ProviderUnavailable, err.retry_after());
+            }
+            _ => ToolErrorCode::ProviderUnavailable,
+        },
+        _ => ToolErrorCode::ProviderUnavailable,
+    };
+    (code, None)
+}
+
 pub(super) fn provider_error(err: &ApiError, who: &str) -> MailboxError {
     if err.is_deadline() {
         MailboxError::Deadline
     } else {
-        MailboxError::Message(api_error_message(err, who))
+        let (code, retry_after_seconds) = classify_api_error(err);
+        MailboxError::Coded {
+            code,
+            retry_after_seconds,
+            message: api_error_message(err, who),
+        }
+    }
+}
+
+pub(crate) const WRITE_UNCONFIRMED: &str =
+    "The provider did not confirm the change. Check before trying again.";
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "used to convert owned errors at write call sites"
+)]
+pub(super) fn write_error(err: ApiError, who: &str) -> MailboxError {
+    if provider_may_have_acted(&err) {
+        MailboxError::coded(ToolErrorCode::SubmissionUncertain, WRITE_UNCONFIRMED)
+    } else {
+        provider_error(&err, who)
     }
 }
 
 /// Phrases a provider refusal of a message being submitted.
 pub(super) fn submit_error(err: &ApiError, who: &str) -> MailboxError {
+    let error = provider_error(err, who);
     if err.status() == Some(StatusCode::PAYLOAD_TOO_LARGE) {
-        MailboxError::Message(format!("{who} refused the message as too large"))
+        error.map_message(|_| format!("{who} refused the message as too large"))
     } else {
-        provider_error(err, who)
+        error
     }
 }
 
@@ -2134,7 +2305,7 @@ pub(super) fn api_error_message(err: &ApiError, who: &str) -> String {
         ApiError::Status { status, .. } if *status == StatusCode::NOT_FOUND => {
             "no such message or folder (it may have been moved or deleted); search again".to_owned()
         }
-        ApiError::Status { reason, .. } if reason.as_deref() == Some("dailyLimitExceeded") => {
+        ApiError::Status { .. } if err.is_daily_limit_exceeded() => {
             format!(
                 "{who}'s daily request limit for this server is used up; try again later. \
                  Signing in again won't help"
@@ -3590,7 +3761,112 @@ mod tests {
                 .await;
             let err = mailbox.list_folders().await.unwrap_err();
             assert_eq!(err.to_string(), advice, "{status}");
+            assert!(!err.code().outcome_uncertain());
         }
+    }
+
+    #[test]
+    fn classifies_redirect_and_token_errors() {
+        use postkeep_store::StoreError;
+
+        let redirect = ApiError::Status {
+            provider: UpstreamProvider::Microsoft,
+            status: StatusCode::FOUND,
+            code: None,
+            reason: None,
+            message: "redirect".into(),
+            retry_after: None,
+        };
+        assert_eq!(
+            classify_api_error(&redirect),
+            (ToolErrorCode::ProviderUnavailable, None)
+        );
+        for (status, code, expected) in [
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "temporarily_unavailable",
+                ToolErrorCode::ProviderUnavailable,
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "slow_down",
+                ToolErrorCode::RateLimited,
+            ),
+        ] {
+            let err = ApiError::Token(TokenError::OAuth(OAuthError::Rejected {
+                provider: UpstreamProvider::Microsoft,
+                status,
+                code: code.into(),
+                description: None,
+                retry_after: Some(13),
+            }));
+            assert_eq!(classify_api_error(&err), (expected, Some(13)));
+        }
+        for (err, code) in [
+            (StoreError::Decrypt, ToolErrorCode::AuthRequired),
+            (StoreError::KeysDestroyed, ToolErrorCode::AuthRequired),
+            (StoreError::AccountDeleted, ToolErrorCode::AuthRequired),
+            (
+                StoreError::KeyWrap("unavailable".into()),
+                ToolErrorCode::ProviderUnavailable,
+            ),
+        ] {
+            let err = ApiError::Token(TokenError::Store(err));
+            assert_eq!(classify_api_error(&err), (code, None));
+        }
+    }
+
+    #[test]
+    fn batch_retry_after_is_bounded_and_only_used_on_eligible_statuses() {
+        let mut response: BatchResponse =
+            serde_json::from_value(json!({"id":"0","status":503})).unwrap();
+        for (value, expected) in [
+            (json!(" 0 "), Some(0)),
+            (json!("+1"), None),
+            (json!("18446744073709551616"), Some(86_400)),
+            (json!(90_000), Some(86_400)),
+            (json!(-1), None),
+        ] {
+            response.headers.insert("ReTrY-AfTeR".to_owned(), value);
+            assert_eq!(response.retry_after_seconds(), expected);
+            assert_eq!(
+                response.retry_after(),
+                Duration::from_secs(expected.unwrap_or(1))
+            );
+            response.status = 503;
+            assert_eq!(response.error().retry_after(), expected);
+            response.status = 413;
+            assert_eq!(response.error().retry_after(), None);
+        }
+    }
+
+    #[test]
+    fn a_retried_read_that_is_ready_does_not_keep_its_old_rate_limit() {
+        let mut outcomes = [Outcome::pending("graph.message".into())];
+        outcomes[0].fail(
+            Status::NotReached,
+            "limited",
+            ToolErrorCode::RateLimited,
+            Some(3),
+        );
+        let mut ready = Vec::new();
+        let stage = &mut BatchStage::Read {
+            change: &Change::Flags {
+                read: Some(true),
+                flagged: None,
+            },
+            destination: None,
+            mode: Mode::Act,
+            ready: &mut ready,
+        };
+        let batch: Batch = serde_json::from_value(json!({"responses":[{
+            "id":"0", "status":200, "body":{"id":"message","isRead":false}
+        }]}))
+        .unwrap();
+        batch.finish(&[json!({"id":"0"})], &mut outcomes, stage);
+        assert_eq!(ready, [0]);
+        assert_eq!(outcomes[0].reason, TIME_EXHAUSTED);
+        assert_eq!(outcomes[0].error, Some((ToolErrorCode::Timeout, None)));
     }
 
     /// Gmail's rate limits that come as a 403 read as advice to wait, not as a
@@ -3603,6 +3879,7 @@ mod tests {
             status: StatusCode::FORBIDDEN,
             code: Some("PERMISSION_DENIED".to_owned()),
             reason: Some(reason.to_owned()),
+            retry_after: None,
             message: "no".to_owned(),
         };
         for reason in ["userRateLimitExceeded", "rateLimitExceeded"] {

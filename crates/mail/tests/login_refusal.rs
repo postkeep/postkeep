@@ -11,11 +11,13 @@ use std::time::Duration;
 
 use postkeep_mail::{
     Credentials, EmailAddress, Error, ImapConfig, ImapSecurity, MailClient, MailConfig,
-    OutgoingMessage, SecretString, SendOptions, SmtpConfig, SmtpSecurity,
+    OutgoingMessage, ProtocolErrorKind, SecretString, SendOptions, SmtpConfig, SmtpSecurity,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+
+const WAIT: &str = "<wait for disconnect>";
 
 /// A server for one connection on 127.0.0.1: it sends `greeting`, answers
 /// each line with `reply(line)`, and ends when the client hangs up. Returns
@@ -35,6 +37,10 @@ async fn serve(
         while let Ok(Some(line)) = lines.next_line().await {
             count += 1;
             let Some(answer) = reply(&line) else { break };
+            if answer == WAIT {
+                assert!(lines.next_line().await.unwrap().is_none());
+                break;
+            }
             let _ = write.write_all(answer.as_bytes()).await;
         }
         count
@@ -43,6 +49,15 @@ async fn serve(
 }
 
 fn client(email: &str, imap_port: u16, smtp_port: u16) -> MailClient {
+    client_with_timeout(email, imap_port, smtp_port, Duration::from_secs(5))
+}
+
+fn client_with_timeout(
+    email: &str,
+    imap_port: u16,
+    smtp_port: u16,
+    timeout: Duration,
+) -> MailClient {
     let config = MailConfig {
         imap: ImapConfig {
             host: "127.0.0.1".to_owned(),
@@ -54,7 +69,7 @@ fn client(email: &str, imap_port: u16, smtp_port: u16) -> MailClient {
             port: smtp_port,
             security: SmtpSecurity::Plaintext,
         },
-        timeout: Duration::from_secs(5),
+        timeout,
         ..MailConfig::default()
     };
     let credentials = Credentials::new(email, &SecretString::from("secret".to_owned())).unwrap();
@@ -108,6 +123,10 @@ async fn smtp_send(reply: &'static str) -> String {
 }
 
 async fn send_message(port: u16) -> Error {
+    send_message_with_timeout(port, Duration::from_secs(5)).await
+}
+
+async fn send_message_with_timeout(port: u16, timeout: Duration) -> Error {
     let message = OutgoingMessage {
         to: vec![EmailAddress::new("bob@example.com")],
         subject: "hello".to_owned(),
@@ -117,7 +136,7 @@ async fn send_message(port: u16) -> Error {
     let options = SendOptions {
         save_to_sent: false,
     };
-    let client = client("alice@example.com", 1, port);
+    let client = client_with_timeout("alice@example.com", 1, port, timeout);
     client.send(&message, options).await.unwrap_err()
 }
 
@@ -199,7 +218,31 @@ fn a_temporary_refusal_reads_the_same_for_every_command() {
 
 #[tokio::test]
 async fn smtp_distinguishes_a_lost_acceptance_reply_from_a_definite_failure() {
-    for (drop_at, final_reply) in [("DATA", ""), (".", ""), (".", "550 message rejected\r\n")] {
+    for (drop_at, final_reply, protocol) in [
+        ("DATA", "", Some(ProtocolErrorKind::Transient)),
+        (".", "", None),
+        (
+            ".",
+            "550 message rejected\r\n",
+            Some(ProtocolErrorKind::Rejected),
+        ),
+        (
+            "DATA",
+            "530 authentication required\r\n",
+            Some(ProtocolErrorKind::Rejected),
+        ),
+        (
+            ".",
+            "552 message too large\r\n",
+            Some(ProtocolErrorKind::TooLarge),
+        ),
+        (
+            "DATA",
+            "421 temporarily unavailable\r\n",
+            Some(ProtocolErrorKind::Transient),
+        ),
+        ("DATA", WAIT, None),
+    ] {
         let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed = reached.clone();
         let (port, server) = serve("220 test ready\r\n", move |line| {
@@ -224,13 +267,14 @@ async fn smtp_distinguishes_a_lost_acceptance_reply_from_a_definite_failure() {
             })
         })
         .await;
-        let error = send_message(port).await;
+        let error = send_message_with_timeout(port, Duration::from_millis(450)).await;
         server.await.unwrap();
+        assert_eq!(error.protocol_error_kind(), protocol, "{error}");
         assert!(reached.load(std::sync::atomic::Ordering::Relaxed));
         match (drop_at, final_reply, error) {
-            (".", "", Error::SubmissionUnconfirmed) => (),
+            (".", "", Error::SubmissionUnconfirmed) | ("DATA", WAIT, Error::Timeout) => (),
             ("DATA", "", Error::Smtp(err)) if err.status().is_none() => (),
-            (".", _, Error::Smtp(err)) if err.is_permanent() => (),
+            (_, _, Error::Smtp(err)) if err.status().is_some() => (),
             (_, _, other) => panic!("unexpected error: {other:?}"),
         }
     }

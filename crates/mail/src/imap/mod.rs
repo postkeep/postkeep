@@ -21,12 +21,35 @@ use crate::mime::Composed;
 use crate::query::Literals;
 use crate::tls::{self, MaybeTlsStream};
 use crate::{
-    AttachmentData, Credentials, Error, Flag, ImapSecurity, MailConfig, Message, Paging, Result,
-    SavedDraft, SearchQuery, SearchResults, SentCopy, Uid, utf7,
+    AttachmentData, Credentials, Error, Flag, ImapSecurity, MailConfig, Message, Paging,
+    ProtocolErrorKind, Result, SavedDraft, SearchQuery, SearchResults, SentCopy, Uid, utf7,
 };
 
 /// The underlying async-imap session type.
 type Conn = async_imap::Session<MaybeTlsStream>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "write phases are shared only within the IMAP implementation"
+)]
+pub(super) enum WritePhase {
+    Idle,
+    Started,
+    Dirty,
+}
+
+fn unconfirmed_if_started<T>(result: Result<T>, phase: WritePhase) -> Result<T> {
+    match (result, phase) {
+        (Err(_), WritePhase::Dirty) => Err(Error::WriteUnconfirmed),
+        (Err(err), WritePhase::Started)
+            if err.protocol_error_kind() != Some(ProtocolErrorKind::Rejected) =>
+        {
+            Err(Error::WriteUnconfirmed)
+        }
+        (other, _) => other,
+    }
+}
 
 /// An authenticated IMAP connection.
 ///
@@ -103,9 +126,16 @@ impl ImapSession {
     /// # Errors
     ///
     /// Returns an error if the folder already exists, the name is invalid, or
-    /// the connection fails.
+    /// the connection fails. Returns [`Error::WriteUnconfirmed`] if creation
+    /// started without a definite outcome; check for the folder before retrying.
     pub async fn create_folder(&mut self, name: &str) -> Result<()> {
-        with_timeout(self.timeout, folders::create(&mut self.conn, name)).await
+        let mut phase = WritePhase::Idle;
+        let result = with_timeout(
+            self.timeout,
+            folders::create(&mut self.conn, name, &mut phase),
+        )
+        .await;
+        unconfirmed_if_started(result, phase)
     }
 
     /// Searches `folder` and returns one page of summaries, newest first: by
@@ -469,7 +499,8 @@ impl ImapSession {
     /// [`Error::FolderNotFound`] if no Trash folder can be identified,
     /// [`Error::StaleId`] if the UIDVALIDITY differs,
     /// [`Error::MessageNotFound`] if no message has this UID, or a protocol
-    /// error.
+    /// error. With [`DeleteMode::Permanent`], returns [`Error::WriteUnconfirmed`]
+    /// if the operation may have changed the message without confirming deletion.
     pub async fn delete_message(
         &mut self,
         folder: &str,
@@ -477,7 +508,8 @@ impl ImapSession {
         uid_validity: Option<u32>,
         mode: DeleteMode,
     ) -> Result<Option<u32>> {
-        with_timeout(self.timeout, async {
+        let mut phase = WritePhase::Idle;
+        let result = with_timeout(self.timeout, async {
             match mode {
                 DeleteMode::Trash => {
                     let trash = self.trash_folder().await?;
@@ -505,12 +537,14 @@ impl ImapSession {
                         folder,
                         uid,
                         uid_validity,
+                        &mut phase,
                     )
                     .await
                 }
             }
         })
-        .await
+        .await;
+        unconfirmed_if_started(result, phase)
     }
 
     /// Appends a sent message to the Sent folder unless a message with the
@@ -529,11 +563,18 @@ impl ImapSession {
 
     /// Appends a composed draft to the Drafts folder.
     pub(crate) async fn save_draft(&mut self, draft: Composed) -> Result<SavedDraft> {
-        let (folder, append_uid) = with_timeout(
+        let mut phase = WritePhase::Idle;
+        let result = with_timeout(
             self.timeout,
-            messages::save_draft(&mut self.conn, self.drafts_folder.as_deref(), &draft.raw),
+            messages::save_draft(
+                &mut self.conn,
+                self.drafts_folder.as_deref(),
+                &draft.raw,
+                &mut phase,
+            ),
         )
-        .await?;
+        .await;
+        let (folder, append_uid) = unconfirmed_if_started(result, phase)?;
         let message_id = draft.message_id;
         Ok(SavedDraft {
             message_id,

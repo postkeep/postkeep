@@ -438,7 +438,7 @@ impl Harness {
     async fn call_err(&self, token: &str, tool: &str, arguments: Value) -> String {
         let result = self.call(token, tool, arguments).await;
         assert_eq!(result["isError"], json!(true), "{tool}: {result}");
-        result["content"][0]["text"].as_str().unwrap().to_owned()
+        error_text(&result).to_owned()
     }
 
     /// `PUT /upload` with `authorization` and `body`, declaring `length` when given.
@@ -759,6 +759,10 @@ fn graph_read(index: usize, id: &str) -> Value {
     json!({ "id": index.to_string(), "method": "GET",
         "url": format!("/me/messages/{id}?$select=id,isRead,flag,parentFolderId"),
         "headers": { "Prefer": IMMUTABLE } })
+}
+
+fn error_text(result: &Value) -> &str {
+    result["content"][0]["text"].as_str().unwrap()
 }
 
 fn graph_state(id: &str, folder: &str, is_read: bool) -> Value {
@@ -2647,9 +2651,14 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         .expect(1)
         .mount(server)
         .await;
-    let refused = harness
-        .call_err(&token, "send_message", send_with_files("Refused"))
+    let result = harness
+        .call(&token, "send_message", send_with_files("Refused"))
         .await;
+    assert_eq!(
+        common::error_meta(&result),
+        json!({"code":"payload_too_large","retryable":false})
+    );
+    let refused = error_text(&result);
     assert!(
         refused.starts_with("Microsoft refused the message as too large"),
         "{refused}"
@@ -2782,7 +2791,7 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         .mount(server)
         .await;
     let error = harness
-        .call_err(
+        .call(
             &token,
             "create_draft",
             json!({
@@ -2791,8 +2800,12 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         )
         .await;
     assert_eq!(
-        error,
+        error_text(&error),
         "The provider did not confirm the draft. Check Drafts before trying again."
+    );
+    assert_eq!(
+        common::error_meta(&error),
+        json!({"code":"submission_uncertain","retryable":false,"outcome_uncertain":true})
     );
 
     let caps = harness
@@ -4502,7 +4515,7 @@ async fn gmail_accounts_work_through_the_gmail_api() {
             .mount_as_scoped(server)
             .await;
         let error = harness
-            .call_err(
+            .call(
                 &token,
                 "create_draft",
                 json!({
@@ -4510,7 +4523,11 @@ async fn gmail_accounts_work_through_the_gmail_api() {
                 }),
             )
             .await;
-        assert_eq!(error, message);
+        assert_eq!(error_text(&error), message);
+        assert_eq!(
+            common::error_meta(&error),
+            json!({"code":"submission_uncertain","retryable":false,"outcome_uncertain":true})
+        );
     }
 
     let caps = harness
@@ -5737,7 +5754,12 @@ async fn outlook_forward_uploading(case: OutlookForward) -> (Harness, String, Va
 #[tokio::test]
 async fn outlook_keeps_the_draft_when_forward_send_returns_504() {
     let (harness, token, args) = outlook_forward_uploading(OutlookForward::SendUncertain).await;
-    let error = harness.call_err(&token, "send_message", args.clone()).await;
+    let result = harness.call(&token, "send_message", args.clone()).await;
+    assert_eq!(
+        common::error_meta(&result),
+        json!({"code":"submission_uncertain","retryable":false,"outcome_uncertain":true})
+    );
+    let error = error_text(&result);
     assert!(error.contains("may have been sent"), "{error}");
     assert!(
         error.ends_with("Its uploaded files went with this try: upload them again to send them.")
@@ -6169,7 +6191,12 @@ async fn outlook_refuses_unconfirmed_range_receipts() {
             .await;
         }
         outlook_draft_end(server, None, None).await;
-        let error = harness.call_err(&token, "send_message", args).await;
+        let result = harness.call(&token, "send_message", args).await;
+        assert_eq!(
+            common::error_meta(&result),
+            json!({"code":"provider_unavailable","retryable":true})
+        );
+        let error = error_text(&result);
         assert!(
             error.starts_with("Not sent: Outlook did not confirm the file \"big.txt\""),
             "{error}"
@@ -6263,40 +6290,52 @@ async fn outlook_keeps_the_upload_token_out_of_errors_and_logs() {
     use std::io::{Read as _, Seek as _};
 
     ask_every_dispatcher();
-    let (harness, token, args) = outlook_new_mail().await;
-    let server = &harness.server;
-    let url = outlook_upload_url(server);
-    outlook_new_draft(server).await;
-    outlook_session(server, "big.txt", OUTLOOK_LARGE_FILE, &url).await;
-    let refused = ResponseTemplate::new(403)
-        .set_body_json(json!({"error": {"code": "Rejected", "message": url}}));
-    outlook_range(server, 0..OUTLOOK_CHUNK, OUTLOOK_LARGE_FILE, b'x', refused).await;
-    outlook_draft_end(server, None, None).await;
-    let mut log = tempfile::tempfile().unwrap();
-    let writer = log.try_clone().unwrap();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                "off,postkeep=trace,postkeep_upstream=trace,hyper=trace,hyper_util=trace",
-            )
-            .with_writer(move || writer.try_clone().unwrap())
-            .finish(),
-    );
-    let error = harness.call_err(&token, "send_message", args).await;
-    assert!(
-        error.starts_with("Not sent: Outlook did not confirm the file"),
-        "{error}"
-    );
-    assert!(!error.contains(UPLOAD_CANARY));
-    log.rewind().unwrap();
-    let mut lines = String::new();
-    log.read_to_string(&mut lines).unwrap();
-    assert!(!lines.is_empty(), "expected HTTP trace logs");
-    assert!(
-        !lines.contains(UPLOAD_CANARY),
-        "upload token reached the logs"
-    );
-    server.verify().await;
+    for (status, meta) in [
+        (403, json!({"code":"permission_denied","retryable":false})),
+        (
+            429,
+            json!({"code":"rate_limited","retryable":true,"retry_after_seconds":17}),
+        ),
+    ] {
+        let (harness, token, args) = outlook_new_mail().await;
+        let server = &harness.server;
+        let url = outlook_upload_url(server);
+        outlook_new_draft(server).await;
+        outlook_session(server, "big.txt", OUTLOOK_LARGE_FILE, &url).await;
+        let refused = ResponseTemplate::new(status)
+            .insert_header("Retry-After", "17")
+            .set_body_json(json!({"error": {"code": "Rejected", "message": url}}));
+        outlook_range(server, 0..OUTLOOK_CHUNK, OUTLOOK_LARGE_FILE, b'x', refused).await;
+        outlook_draft_end(server, None, None).await;
+        let mut log = tempfile::tempfile().unwrap();
+        let writer = log.try_clone().unwrap();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    "off,postkeep=trace,postkeep_upstream=trace,hyper=trace,hyper_util=trace",
+                )
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish(),
+        );
+        let result = harness.call(&token, "send_message", args).await;
+        assert_eq!(common::error_meta(&result), meta);
+        assert!(!result.to_string().contains(UPLOAD_CANARY));
+        let error = error_text(&result);
+        assert!(
+            error.starts_with("Not sent: Outlook did not confirm the file"),
+            "{error}"
+        );
+        assert!(!error.contains(UPLOAD_CANARY));
+        log.rewind().unwrap();
+        let mut lines = String::new();
+        log.read_to_string(&mut lines).unwrap();
+        assert!(!lines.is_empty(), "expected HTTP trace logs");
+        assert!(
+            !lines.contains(UPLOAD_CANARY),
+            "upload token reached the logs"
+        );
+        server.verify().await;
+    }
 }
 
 #[tokio::test]
@@ -6798,32 +6837,42 @@ async fn a_bucket_that_fails_a_piece_ends_the_upload_and_logs_fixed_reasons_only
 
 #[tokio::test]
 async fn a_send_refused_after_the_mark_uses_its_uploads() {
-    let harness = harness().await;
-    mock_google_sign_in(&harness.server).await;
-    gmail_send()
-        .respond_with(
-            ResponseTemplate::new(400)
-                .set_body_json(json!({"error": {"message": "Invalid To header"}})),
-        )
-        .mount(&harness.server)
-        .await;
-    let token = harness.sign_in("google").await;
-    let id = harness.upload(&token, b"data", 4).await;
-    let message = message_with(&json!([uploaded(&id, "a.bin")]));
-    let error = harness
-        .call_err(&token, "send_message", message.clone())
-        .await;
-    let went = "\nIts uploaded files went with this try: upload them again to send them.";
-    assert!(
-        error.ends_with(&format!(
-            "\nAttachments in this message: a.bin (4 bytes).{went}"
-        )),
-        "{error}"
-    );
-    harness.until_uploads_gone().await;
-    let again = harness.call_err(&token, "send_message", message).await;
-    assert!(again.contains(NO_UPLOAD), "{again}");
-    assert_eq!(sends(&harness.server).await, 1);
+    for (status, meta) in [
+        (400, json!({"code":"invalid_input","retryable":false})),
+        (
+            429,
+            json!({"code":"rate_limited","retryable":true,"retry_after_seconds":11}),
+        ),
+    ] {
+        let harness = harness().await;
+        mock_google_sign_in(&harness.server).await;
+        gmail_send()
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("Retry-After", "11")
+                    .set_body_json(json!({"error": {"message": "Invalid To header"}})),
+            )
+            .mount(&harness.server)
+            .await;
+        let token = harness.sign_in("google").await;
+        let id = harness.upload(&token, b"data", 4).await;
+        let message = message_with(&json!([uploaded(&id, "a.bin")]));
+        let result = harness.call(&token, "send_message", message.clone()).await;
+        assert_eq!(common::error_meta(&result), meta);
+        let error = error_text(&result);
+        let went = "\nIts uploaded files went with this try: upload them again to send them.";
+        assert!(
+            error.ends_with(&format!(
+                "\nAttachments in this message: a.bin (4 bytes).{went}"
+            )),
+            "{error}"
+        );
+        harness.until_uploads_gone().await;
+        let again = harness.call(&token, "send_message", message).await;
+        assert_eq!(common::error_meta(&again)["code"], "not_found");
+        assert!(error_text(&again).contains(NO_UPLOAD), "{again}");
+        assert_eq!(sends(&harness.server).await, 1);
+    }
 }
 
 #[tokio::test]
@@ -6938,4 +6987,253 @@ async fn a_forward_and_its_uploads_over_the_budget_are_refused_at_once() {
         "{error}"
     );
     harness.server.verify().await;
+}
+
+#[tokio::test]
+async fn graph_single_read_preserves_outer_batch_errors_and_missing_replies() {
+    let harness = harness().await;
+    let server = &harness.server;
+    mock_microsoft_sign_in(server).await;
+    let token = harness.sign_in("microsoft").await;
+    // A zero-second inner throttle leads to one retry; the outer error wins.
+    for (id, answer) in [
+        (
+            "limited",
+            ResponseTemplate::new(429).insert_header("Retry-After", "23"),
+        ),
+        (
+            "malformed",
+            ResponseTemplate::new(200).set_body_string("not JSON"),
+        ),
+    ] {
+        graph_batch_request(vec![graph_read(0, id)])
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"responses":[
+                    {"id":"0", "status":429, "headers":{"Retry-After":0}}
+                ]})),
+            )
+            .expect(1)
+            .up_to_n_times(1)
+            .with_priority(2)
+            .mount(server)
+            .await;
+        graph_batch_request(vec![graph_read(0, id)])
+            .respond_with(answer)
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+    graph_reads(server, &[(0, "omitted", None)]).await;
+    for (id, expected) in [
+        (
+            "graph.limited",
+            json!({"code":"rate_limited", "retryable":true, "retry_after_seconds":23}),
+        ),
+        (
+            "graph.malformed",
+            json!({"code":"provider_unavailable", "retryable":true}),
+        ),
+        (
+            "graph.omitted",
+            json!({"code":"provider_unavailable", "retryable":true}),
+        ),
+    ] {
+        let result = harness
+            .call(&token, "update_flags", json!({"id":id,"read":true}))
+            .await;
+        assert_eq!(common::error_meta(&result), expected);
+    }
+}
+
+#[tokio::test]
+async fn gmail_single_read_preserves_rate_limits_and_sign_in_refusals() {
+    let harness = harness().await;
+    let server = &harness.server;
+    mock_google_sign_in(server).await;
+    let token = harness.sign_in("google").await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/gmail/v1/users/me/messages/18c1"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "19"))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/gmail/gmail/v1/users/me/messages/18c2"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/google-oauth/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error":"invalid_grant"})))
+        .with_priority(2)
+        .expect(1)
+        .mount(server)
+        .await;
+    for (id, expected) in [
+        (
+            "gmail.18c1",
+            json!({"code":"rate_limited", "retryable":true, "retry_after_seconds":19}),
+        ),
+        (
+            "gmail.18c2",
+            json!({"code":"auth_required", "retryable":false}),
+        ),
+    ] {
+        let result = harness
+            .call(&token, "update_flags", json!({"id":id,"read":true}))
+            .await;
+        assert_eq!(common::error_meta(&result), expected);
+    }
+}
+
+#[tokio::test]
+async fn tool_preserves_symbolic_oauth_refresh_status_and_retry_after() {
+    for (status, provider_code, tool_code) in [
+        (503, "temporarily_unavailable", "provider_unavailable"),
+        (429, "slow_down", "rate_limited"),
+    ] {
+        let harness = harness().await;
+        let server = &harness.server;
+        mock_microsoft_sign_in(server).await;
+        let token = harness.sign_in("microsoft").await;
+        Mock::given(method("GET"))
+            .and(path("/graph/v1.0/me/mailFolders/inbox/messages"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(server)
+            .await;
+        let _refresh = Mock::given(method("POST"))
+            .and(path("/microsoft/common/oauth2/v2.0/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("Retry-After", "21")
+                    .set_body_json(json!({"error":provider_code})),
+            )
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let result = harness.call(&token, "search_messages", json!({})).await;
+        assert_eq!(
+            common::error_meta(&result),
+            json!({"code":tool_code,"retryable":true,"retry_after_seconds":21})
+        );
+    }
+}
+
+#[tokio::test]
+async fn folder_create_and_permanent_delete_distinguish_refusals_from_uncertain_writes() {
+    let unconfirmed = "The provider did not confirm the change. Check before trying again.";
+    for (provider, route, tool, args, refusal, code, text) in [
+        (
+            "microsoft",
+            "/graph/v1.0/me/messages/gone/permanentDelete",
+            "delete_message",
+            json!({"id":"graph.gone","permanent":true}),
+            404,
+            "not_found",
+            "no such message or folder (it may have been moved or deleted); search again",
+        ),
+        (
+            "microsoft",
+            "/graph/v1.0/me/mailFolders",
+            "create_folder",
+            json!({"name":"Receipts"}),
+            409,
+            "invalid_input",
+            "a folder named \"Receipts\" already exists",
+        ),
+        (
+            "google",
+            "/gmail/gmail/v1/users/me/labels",
+            "create_folder",
+            json!({"name":"Receipts"}),
+            409,
+            "invalid_input",
+            "a label named \"Receipts\" already exists",
+        ),
+    ] {
+        for (status, expected, message) in [
+            (
+                503,
+                json!({"code":"submission_uncertain","retryable":false,"outcome_uncertain":true}),
+                unconfirmed,
+            ),
+            (refusal, json!({"code":code,"retryable":false}), text),
+        ] {
+            let harness = harness().await;
+            let server = &harness.server;
+            if provider == "microsoft" {
+                mock_microsoft_sign_in(server).await;
+            } else {
+                mock_google_sign_in(server).await;
+            }
+            let token = harness.sign_in(provider).await;
+            let _write = Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Retry-After", "13")
+                        .set_body_json(json!({"error":{"message":"refused"}})),
+                )
+                .expect(1)
+                .mount_as_scoped(server)
+                .await;
+            let result = harness.call(&token, tool, args.clone()).await;
+            assert_eq!(
+                error_text(&result),
+                message,
+                "{tool} provider status {status}"
+            );
+            assert_eq!(common::error_meta(&result), expected);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failed_outlook_draft_cleanup_overrides_the_original_attachment_failure() {
+    let args = json!({"to":["recipient@example.org"],"subject":"Files","body":"A note",
+        "attachments":[{"filename":"small.txt","text":"small"}]});
+    for (failure, cleanup) in [(413, 500), (413, 204), (429, 500)] {
+        let harness = harness().await;
+        let server = &harness.server;
+        mock_microsoft_sign_in(server).await;
+        let token = harness.sign_in("microsoft").await;
+        outlook_new_draft(server).await;
+        let _attachment = Mock::given(method("POST"))
+            .and(path(format!("{OUTLOOK_DRAFT}/attachments")))
+            .respond_with(ResponseTemplate::new(failure).insert_header("Retry-After", "9"))
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let _cleanup = Mock::given(method("POST"))
+            .and(path(format!("{OUTLOOK_DRAFT}/permanentDelete")))
+            .respond_with(ResponseTemplate::new(cleanup))
+            .expect(1)
+            .mount_as_scoped(server)
+            .await;
+        let result = harness.call(&token, "create_draft", args.clone()).await;
+        let text = error_text(&result).lines().next().unwrap();
+        if cleanup == 204 {
+            assert_eq!(
+                text,
+                "Draft not saved: Microsoft refused the message as too large."
+            );
+            assert_eq!(
+                common::error_meta(&result),
+                json!({"code":"payload_too_large","retryable":false})
+            );
+        } else {
+            assert_eq!(
+                text,
+                "The provider did not confirm the draft. Check Drafts before trying again."
+            );
+            assert_eq!(
+                common::error_meta(&result),
+                json!({"code":"submission_uncertain","retryable":false,"outcome_uncertain":true})
+            );
+        }
+    }
 }

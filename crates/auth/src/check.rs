@@ -5,6 +5,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use postkeep_store::AccountId;
+use postkeep_upstream::http::MAX_RETRY_AFTER_SECS;
+use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::Authenticated;
@@ -82,11 +84,67 @@ impl std::fmt::Debug for ToolCall<'_> {
     }
 }
 
+/// Machine-readable classification of an MCP tool error.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorCode {
+    /// The arguments were invalid or the operation was definitively refused.
+    InvalidInput,
+    /// The requested item does not exist or is not visible to the caller.
+    NotFound,
+    /// The message ID is stale; search for a current one.
+    StaleId,
+    /// Sign in or reconnect the mailbox before trying again.
+    AuthRequired,
+    /// The operation requires an unavailable feature or capability.
+    Unsupported,
+    /// The caller or mailbox does not have permission for the operation.
+    PermissionDenied,
+    /// Server policy has paused the mailbox.
+    MailboxPaused,
+    /// A message or attachment exceeds an allowed size.
+    PayloadTooLarge,
+    /// The confirmed arguments differ from those of the held send.
+    HoldMismatch,
+    /// The hold is missing, expired, or already used.
+    HoldExpired,
+    /// A provider or server rate or quota limit was reached.
+    RateLimited,
+    /// A provider or supporting service did not complete the request.
+    ProviderUnavailable,
+    /// The operation ran out of time before a change could take effect.
+    Timeout,
+    /// A local concurrency or queue limit was reached.
+    Busy,
+    /// A change may have taken effect; inspect its outcome before retrying.
+    SubmissionUncertain,
+}
+
+impl ToolErrorCode {
+    /// Whether the operation may be retried, with fresh one-shot inputs if needed.
+    #[must_use]
+    pub const fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited | Self::ProviderUnavailable | Self::Timeout | Self::Busy
+        )
+    }
+
+    /// Whether the operation may have changed state without confirmation.
+    #[must_use]
+    pub const fn outcome_uncertain(self) -> bool {
+        matches!(self, Self::SubmissionUncertain)
+    }
+}
+
 /// Why a check refused a call. The caller gets the message as the call's
 /// error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     message: String,
+    code: Option<ToolErrorCode>,
+    retry_after_seconds: Option<u64>,
 }
 
 impl Refusal {
@@ -95,7 +153,43 @@ impl Refusal {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            code: None,
+            retry_after_seconds: None,
         }
+    }
+
+    /// Sets the machine-readable code, clearing any earlier delay if not retryable.
+    #[must_use]
+    pub const fn with_code(mut self, code: ToolErrorCode) -> Self {
+        self.code = Some(code);
+        if !code.retryable() {
+            self.retry_after_seconds = None;
+        }
+        self
+    }
+
+    /// Sets a retry delay in seconds, clamped to 24 hours.
+    /// A non-retryable code discards the delay; an uncoded refusal can keep
+    /// it until a retryable code is set.
+    #[must_use]
+    pub fn with_retry_after(mut self, secs: u64) -> Self {
+        if self.code.is_none_or(ToolErrorCode::retryable) {
+            self.retry_after_seconds = Some(secs.min(MAX_RETRY_AFTER_SECS));
+        }
+        self
+    }
+
+    /// The machine-readable code, if supplied by the check.
+    #[must_use]
+    pub const fn code(&self) -> Option<ToolErrorCode> {
+        self.code
+    }
+
+    /// The suggested delay in seconds, if supplied with a retryable code.
+    #[must_use]
+    pub fn retry_after_seconds(&self) -> Option<u64> {
+        self.retry_after_seconds
+            .filter(|_| self.code.is_some_and(ToolErrorCode::retryable))
     }
 
     /// What the caller is told.
@@ -112,3 +206,67 @@ impl std::fmt::Display for Refusal {
 }
 
 impl std::error::Error for Refusal {}
+
+#[cfg(test)]
+mod tests {
+    use super::{Refusal, ToolErrorCode};
+    use ToolErrorCode::*;
+
+    #[test]
+    fn tool_error_codes_serialize_with_fixed_retry_invariants() {
+        for (code, wire, retryable, uncertain) in [
+            (InvalidInput, "invalid_input", false, false),
+            (NotFound, "not_found", false, false),
+            (StaleId, "stale_id", false, false),
+            (AuthRequired, "auth_required", false, false),
+            (Unsupported, "unsupported", false, false),
+            (PermissionDenied, "permission_denied", false, false),
+            (MailboxPaused, "mailbox_paused", false, false),
+            (PayloadTooLarge, "payload_too_large", false, false),
+            (HoldMismatch, "hold_mismatch", false, false),
+            (HoldExpired, "hold_expired", false, false),
+            (RateLimited, "rate_limited", true, false),
+            (ProviderUnavailable, "provider_unavailable", true, false),
+            (Timeout, "timeout", true, false),
+            (Busy, "busy", true, false),
+            (SubmissionUncertain, "submission_uncertain", false, true),
+        ] {
+            assert_eq!(serde_json::to_value(code).ok(), Some(wire.into()));
+            assert_eq!(
+                (code.retryable(), code.outcome_uncertain()),
+                (retryable, uncertain)
+            );
+        }
+    }
+
+    #[test]
+    fn refusal_only_exposes_delays_for_retryable_codes() {
+        let refusal = Refusal::new("not now");
+        let delayed = refusal.clone().with_retry_after(u64::MAX);
+        assert_eq!(
+            (delayed.code(), delayed.retry_after_seconds()),
+            (None, None)
+        );
+        assert_ne!(refusal, delayed);
+        let limited = delayed.with_code(RateLimited);
+        assert_eq!(limited.retry_after_seconds(), Some(86_400));
+        assert_eq!(
+            limited,
+            refusal
+                .clone()
+                .with_code(RateLimited)
+                .with_retry_after(u64::MAX)
+        );
+        let denied = limited.with_code(PermissionDenied);
+        assert_eq!(
+            denied,
+            refusal
+                .clone()
+                .with_retry_after(60)
+                .with_code(PermissionDenied)
+        );
+        let denied_first = refusal.with_code(PermissionDenied).with_retry_after(60);
+        assert_eq!(denied, denied_first);
+        assert_eq!(denied_first.with_code(Busy).retry_after_seconds(), None);
+    }
+}

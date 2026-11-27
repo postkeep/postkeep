@@ -35,3 +35,16 @@ pub fn authenticated_2026(
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     request.body(Body::from(body.to_string())).unwrap()
 }
+
+/// Checks and decodes the machine-readable block of a core tool error.
+pub fn error_meta(result: &Value) -> Value {
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(result.get("structuredContent").is_none(), "{result}");
+    assert!(result.get("_meta").is_none(), "{result}");
+    let blocks = result["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "{result}");
+    assert!(blocks.iter().all(|block| block["type"] == "text"));
+    let text = blocks[1]["text"].as_str().unwrap();
+    assert!(!text.contains('\n'), "{text}");
+    serde_json::from_str(text).unwrap()
+}

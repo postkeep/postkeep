@@ -2,6 +2,7 @@
 
 #[allow(dead_code, reason = "the provider suite only uses the schema helpers")]
 pub mod mcp_request;
+pub use mcp_request::error_meta;
 
 use serde_json::Value;
 

@@ -260,7 +260,9 @@ impl MailClient {
     /// Returns [`Error::InvalidInput`](crate::Error::InvalidInput) for a
     /// message without recipients, or invalid addresses or headers,
     /// [`Error::FolderNotFound`](crate::Error::FolderNotFound) if no Drafts
-    /// folder can be identified, or an IMAP error.
+    /// folder can be identified, or an IMAP error. Returns
+    /// [`Error::WriteUnconfirmed`](crate::Error::WriteUnconfirmed) if the draft was transmitted but its save
+    /// was not confirmed; check Drafts before trying again.
     pub async fn save_draft(
         &self,
         session: &mut ImapSession,

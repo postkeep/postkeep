@@ -511,23 +511,31 @@ async fn a_sign_in_during_refresh_is_not_overwritten() {
 #[tokio::test]
 async fn transient_failures_do_not_mark_the_account() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path(MS_TOKEN))
-        .respond_with(ResponseTemplate::new(503).set_body_string("unavailable"))
-        .mount(&server)
-        .await;
     let (store, account, _dir) = store_with_account(0).await;
     let manager = TokenManager::new(store.clone(), client(&server));
-    let err = manager
-        .access_token(&account, UpstreamProvider::Microsoft)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, TokenError::OAuth(ref inner) if inner.is_transient()),
-        "{err}"
-    );
-    let stored = store.upstream_tokens(&account).await.unwrap().unwrap();
-    assert!(stored.invalid_reason.is_none());
+    for (status, code) in [(503, "temporarily_unavailable"), (429, "slow_down")] {
+        let _mock = Mock::given(method("POST"))
+            .and(path(MS_TOKEN))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("Retry-After", "7")
+                    .set_body_json(json!({"error":code})),
+            )
+            .expect(1)
+            .up_to_n_times(1)
+            .mount_as_scoped(&server)
+            .await;
+        let err = manager
+            .access_token(&account, UpstreamProvider::Microsoft)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, TokenError::OAuth(ref inner) if inner.is_transient() && inner.is_rate_limited() == (status == 429) && inner.retry_after() == Some(7)),
+            "{err}"
+        );
+        let stored = store.upstream_tokens(&account).await.unwrap().unwrap();
+        assert!(stored.invalid_reason.is_none());
+    }
 }
 
 /// The local key wrapper, except that `unwrap` fails like a key service that
