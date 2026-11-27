@@ -29,14 +29,16 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig, Extensions};
-use postkeep::tools::{ExtensionCall, SkillDocument, ToolExtension, ToolFuture};
+use postkeep::tools::{
+    ExtensionCall, GET_MAILBOX_CAPABILITIES, SkillDocument, ToolExtension, ToolFuture,
+};
 use postkeep_auth::{
     AuthConfig, AuthState, Authenticated, BearerRequest, CallEnd, CeilingsFuture, CheckFuture,
     CredentialVerifier, HoldFuture, Outbox, OutboxCeilings, PrincipalResolver, Refusal, Resolution,
     ResolveFuture, Sending, ToolCall, UsageHook, VerifyFuture,
 };
 use postkeep_mail::{ImapServer, ImapServers};
-use postkeep_store::{AccountId, MasterKey, OutboxLimitChange, Store, WebhookSettings};
+use postkeep_store::{AccountId, MasterKey, OutboxLimitChange, Provider, Store, WebhookSettings};
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, JsonObject, Tool, ToolAnnotations};
 use secrecy::SecretString;
@@ -141,6 +143,7 @@ impl PrincipalResolver for Keys {
 struct AccountTools {
     log: Mutex<Vec<String>>,
     callers: Mutex<Vec<(String, String)>>,
+    hide_capabilities: AtomicBool,
 }
 
 impl AccountTools {
@@ -186,7 +189,7 @@ impl ToolExtension for AccountTools {
         if !matches!(caller.principal.as_str(), "key:1" | "key:2") {
             return Vec::new();
         }
-        vec![
+        let mut tools = vec![
             tool("get_account", json!({ "type": "object" }), true),
             tool(
                 "disconnect_mailbox",
@@ -200,7 +203,21 @@ impl ToolExtension for AccountTools {
                 false,
             ),
             tool("list_folders", json!({ "type": "object" }), false),
-        ]
+        ];
+        if self.hide_capabilities.load(Ordering::Relaxed) {
+            tools.push(tool(
+                GET_MAILBOX_CAPABILITIES,
+                json!({ "type": "object" }),
+                true,
+            ));
+        }
+        tools
+    }
+
+    fn hides_tool(&self, caller: &Authenticated, name: &str) -> bool {
+        self.hide_capabilities.load(Ordering::Relaxed)
+            && caller.principal == "key:1"
+            && name == GET_MAILBOX_CAPABILITIES
     }
 
     fn skills(&self, caller: &Authenticated) -> Vec<SkillDocument> {
@@ -227,10 +244,12 @@ impl ToolExtension for AccountTools {
             call.arguments.as_ref(),
             call.caller,
         );
-        let result = CallToolResult::structured(json!({
-            "tool": call.name,
-            "mailbox": call.mailbox.map(|mailbox| mailbox.0.clone()),
-        }));
+        let result = if self.hide_capabilities.load(Ordering::Relaxed) {
+            json!(call.mailbox_capabilities(Provider::Imap, None))
+        } else {
+            json!({ "tool": call.name, "mailbox": call.mailbox.map(|mailbox| mailbox.0.clone()) })
+        };
+        let result = CallToolResult::structured(result);
         let argument = |name| call.arguments.as_ref()?.get(name).cloned();
         let (wait, panics, fails) = (argument("wait"), argument("panic"), argument("fail"));
         Box::pin(async move {
@@ -546,25 +565,25 @@ async fn instructions(app: &Router) -> String {
 async fn the_extension_lists_its_tools_to_the_callers_it_picks() {
     let h = harness().await;
     let plain = listed(&h.plain, "workspace-key").await;
-    assert_eq!(plain.len(), 18);
+    assert_eq!(plain.len(), 19);
     let extended = listed(&h.extended, "workspace-key").await;
-    assert_eq!(extended.len(), 20, "list_folders stays the server's");
-    assert_eq!(&extended[..18], &plain[..]);
-    assert_eq!(extended[18]["name"], "get_account");
+    assert_eq!(extended.len(), 21, "list_folders stays the server's");
+    assert_eq!(&extended[..19], &plain[..]);
+    assert_eq!(extended[19]["name"], "get_account");
     assert_eq!(
-        extended[18]["inputSchema"]["properties"]["mailbox"],
+        extended[19]["inputSchema"]["properties"]["mailbox"],
         json!({
             "description": "Mailbox to use: its id or email address. Omit it to use the default mailbox.",
             "type": "string"
         })
     );
-    assert_eq!(extended[18]["annotations"]["readOnlyHint"], true);
-    assert_eq!(extended[19]["name"], "disconnect_mailbox");
+    assert_eq!(extended[19]["annotations"]["readOnlyHint"], true);
+    assert_eq!(extended[20]["name"], "disconnect_mailbox");
     assert_eq!(
-        extended[19]["inputSchema"]["properties"]["mailbox"],
+        extended[20]["inputSchema"]["properties"]["mailbox"],
         json!({ "type": "string", "description": "The mailbox to disconnect." })
     );
-    assert_eq!(extended[19]["inputSchema"]["required"], json!(["mailbox"]));
+    assert_eq!(extended[20]["inputSchema"]["required"], json!(["mailbox"]));
     assert_eq!(listed(&h.extended, "other-key").await, plain);
 
     assert_eq!(cache_scope(&h.plain).await, "public");
@@ -576,6 +595,45 @@ async fn the_extension_lists_its_tools_to_the_callers_it_picks() {
         format!("{plain}\n\n{PARAGRAPH}")
     );
     assert_eq!(h.tools.take(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn hides_tool_omits_and_refuses_server_tools_and_exposes_capabilities() {
+    let h = harness().await;
+    h.tools.hide_capabilities.store(true, Ordering::Relaxed);
+    let has_tool = |tools: Vec<Value>| {
+        tools
+            .iter()
+            .any(|tool| tool["name"] == GET_MAILBOX_CAPABILITIES)
+    };
+    assert!(!has_tool(listed(&h.both, "workspace-key").await));
+    assert!(has_tool(listed(&h.both, "other-key").await));
+    for arguments in [json!({}), json!({ "mailbox": "absent@example.com" })] {
+        let reply = rpc(
+            &h.both,
+            "workspace-key",
+            "tools/call",
+            json!({
+                "name": GET_MAILBOX_CAPABILITIES, "arguments": arguments,
+            }),
+        )
+        .await;
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        assert_eq!(reply["error"]["message"], "tool not found");
+    }
+    assert_eq!(h.tools.take(), Vec::<String>::new());
+    assert_eq!(h.usage.ends(), Vec::<String>::new());
+
+    let caps = call(&h.both, "workspace-key", "get_account", json!({}))
+        .await
+        .unwrap();
+    let direct = call(&h.both, "other-key", GET_MAILBOX_CAPABILITIES, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(caps["provider"], "imap");
+    assert_eq!(caps["attachments"], direct["attachments"]);
+    assert_eq!(caps["attachments"]["upload_enabled"], true);
+    assert_eq!(caps["webhooks_available"], false);
 }
 
 #[tokio::test]

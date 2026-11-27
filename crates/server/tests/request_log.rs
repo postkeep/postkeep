@@ -21,7 +21,7 @@ use axum::body::Body;
 use axum::http::{HeaderName, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig, Extensions, RequestLimits};
-use postkeep::tools::{ExtensionCall, ToolExtension, ToolFuture};
+use postkeep::tools::{ExtensionCall, GET_MAILBOX_CAPABILITIES, ToolExtension, ToolFuture};
 use postkeep_auth::{
     AuthConfig, AuthState, Authenticated, BearerRequest, CheckFuture, CredentialVerifier,
     PrincipalResolver, Refusal, Resolution, ResolveFuture, ToolCall, VerifyFuture,
@@ -113,6 +113,10 @@ fn tool(name: &'static str) -> Tool {
 impl ToolExtension for AccountTools {
     fn tools(&self, _caller: &Authenticated) -> Vec<Tool> {
         vec![tool("get_account"), tool("broken_account")]
+    }
+
+    fn hides_tool(&self, caller: &Authenticated, name: &str) -> bool {
+        caller.principal == "key:1" && name == GET_MAILBOX_CAPABILITIES
     }
 
     fn call<'a>(&'a self, call: ExtensionCall<'a>) -> ToolFuture<'a> {
@@ -607,7 +611,11 @@ async fn a_tool_call_logs_its_caller_tool_outcome_and_time_and_no_secret() {
 async fn json_rpc_errors_log_rpc_error_and_name_only_real_tools() {
     let h = harness(RequestLimits::default()).await;
     let log = capture();
-    for name in ["no-such-tool\nforged", "broken_account"] {
+    for name in [
+        "no-such-tool\nforged",
+        GET_MAILBOX_CAPABILITIES,
+        "broken_account",
+    ] {
         let request = call("workspace-key", name, &json!({}));
         assert_eq!(send(&h.app, request).await, StatusCode::OK, "{name}");
     }
@@ -617,9 +625,9 @@ async fn json_rpc_errors_log_rpc_error_and_name_only_real_tools() {
         .into_iter()
         .filter(|line| line["message"] == "response error")
         .count();
-    assert_eq!(errors, 2, "{}", log.text());
+    assert_eq!(errors, 3, "{}", log.text());
     let requests = log.requests();
-    assert_eq!(requests.len(), 2, "{}", log.text());
+    assert_eq!(requests.len(), 3, "{}", log.text());
     let caller = json!({
         "method": "POST",
         "route": "/mcp",
@@ -629,11 +637,12 @@ async fn json_rpc_errors_log_rpc_error_and_name_only_real_tools() {
         "outcome": "rpc_error",
     });
     assert_line(&requests[0], &caller);
+    assert_line(&requests[1], &caller);
     let mut broken = caller;
     broken["tool"] = json!("broken_account");
-    assert_line(&requests[1], &broken);
+    assert_line(&requests[2], &broken);
 
-    log.assert_absent(&["no-such-tool"]);
+    log.assert_absent(&["no-such-tool", GET_MAILBOX_CAPABILITIES]);
 }
 
 #[tokio::test]

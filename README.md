@@ -120,6 +120,7 @@ doesn't ask.
 | `list_webhook_filters` | Lists this mailbox's webhook filter rules, oldest first, a page at a time. |
 | `add_webhook_filter` | Adds a rule that chooses which new mail sends an event. |
 | `remove_webhook_filter` | Removes one filter rule, or all of them. |
+| `get_mailbox_capabilities` | Shows this mailbox's provider, protocol, supported operations, search rules, attachment limits and webhook availability. |
 
 The [tool reference](docs/reference/tools.md) has each
 tool's options and how providers differ.

@@ -269,15 +269,13 @@ fn users_me(api: &ApiClient, segments: &[&str]) -> Url {
 impl Watchers {
     pub(super) fn gmail_api(&self, account: &AccountId) -> Option<ApiClient> {
         let push = self.inner.push.get()?;
-        (push.google.is_some() && push.tokens.oauth().is_configured(UpstreamProvider::Google)).then(
-            || {
-                ApiClient::new(
-                    push.tokens.clone(),
-                    account.clone(),
-                    UpstreamProvider::Google,
-                )
-            },
-        )
+        push.google_enabled().then(|| {
+            ApiClient::new(
+                push.tokens.clone(),
+                account.clone(),
+                UpstreamProvider::Google,
+            )
+        })
     }
 
     /// Keeps the account's watch alive until cancelled.

@@ -1,5 +1,5 @@
 //! The mailbox selector: with a principal resolver whose callers hold
-//! several mailboxes, each of the 18 tools takes a `mailbox` argument,
+//! several mailboxes, each of the 19 tools takes a `mailbox` argument,
 //! acts on the mailbox it names, and refuses any other mailbox with the
 //! same unknown-mailbox error. Mailboxes fail in different, recognisable
 //! ways before any connection is made, which shows which one a tool opened.
@@ -20,6 +20,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig, Extensions};
+use postkeep::tools::GET_MAILBOX_CAPABILITIES;
 use postkeep_auth::{
     AuthConfig, AuthState, Authenticated, BearerRequest, CredentialVerifier, PrincipalResolver,
     Resolution, ResolveFuture, VerifyFuture,
@@ -320,6 +321,7 @@ fn tools() -> Vec<(&'static str, Value)> {
         ),
         ("remove_webhook_filter", json!({ "all": true })),
         ("upload_attachment", json!({})),
+        (GET_MAILBOX_CAPABILITIES, json!({})),
     ]
 }
 
@@ -359,8 +361,8 @@ async fn every_schema_takes_mailbox_only_when_the_resolver_selects() {
     let h = harness(None).await;
     let selecting = listed_tools(&h.selecting).await;
     let plain = listed_tools(&h.plain).await;
-    assert_eq!(selecting.len(), 18);
-    assert_eq!(plain.len(), 18);
+    assert_eq!(selecting.len(), 19);
+    assert_eq!(plain.len(), 19);
     for (selecting, plain) in selecting.iter().zip(&plain) {
         let name = selecting["name"].as_str().unwrap();
         assert_eq!(name, plain["name"]);
@@ -480,8 +482,18 @@ async fn every_tool_acts_on_the_selected_mailbox() {
         }
     }
 
-    // The webhook tools: B has a webhook, the default mailbox A has none.
     let token = "two-mailboxes";
+    for (arguments, protocol) in [
+        (json!({}), "imap"),
+        (json!({ "mailbox": h.b.0 }), "microsoft_graph"),
+    ] {
+        let caps = call(&h.selecting, token, GET_MAILBOX_CAPABILITIES, arguments)
+            .await
+            .unwrap();
+        assert_eq!(caps["protocol"], protocol);
+    }
+
+    // The webhook tools: B has a webhook, the default mailbox A has none.
     let status = call(&h.selecting, token, "get_webhook_status", json!({}))
         .await
         .unwrap();
@@ -498,8 +510,8 @@ async fn every_tool_acts_on_the_selected_mailbox() {
     assert_eq!(status["enabled"], true);
 
     let missing = "No webhook is saved for this account. Set it up on the account page (/account).";
-    // The webhook tools after the status; the upload, last, opens no mailbox.
-    for (tool, arguments) in &all[MAIL_TOOLS + 1..all.len() - 1] {
+    // The webhook tools after the status, before uploads and discovery.
+    for (tool, arguments) in &all[MAIL_TOOLS + 1..all.len() - 2] {
         let error = call(&h.selecting, token, tool, arguments.clone())
             .await
             .unwrap_err();
@@ -605,6 +617,7 @@ async fn every_tool_can_select_a_mailbox_in_another_tenant() {
                     result.unwrap_or_else(|error| panic!("{tool} with {mailbox}: {error}"));
                 match tool {
                     "get_webhook_status" => assert_eq!(result["configured"], true),
+                    GET_MAILBOX_CAPABILITIES => assert_eq!(result["protocol"], "microsoft_graph"),
                     "upload_attachment" => {
                         let owner = UploadOwner {
                             account: &h.d,

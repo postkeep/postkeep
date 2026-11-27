@@ -61,7 +61,7 @@ use postkeep_mail::{IdleEvent, ImapServers, ImapSession, MessageBatch, NewMessag
 use postkeep_store::{
     AccountId, AppendOutcome, Provider, Store, StoreError, WatchAdvance, WatchCursor, Webhook,
 };
-use postkeep_upstream::{ApiError, HttpError, TokenError};
+use postkeep_upstream::{ApiError, HttpError, TokenError, UpstreamProvider};
 use postkeep_webhook::{Deliverer, NEW_MAIL, NewMailEvent, RETRY_DELAYS};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -207,6 +207,16 @@ pub struct GooglePush {
 }
 
 impl PushConfig {
+    pub(crate) const fn graph_enabled(&self) -> bool {
+        self.tokens
+            .oauth()
+            .is_configured(UpstreamProvider::Microsoft)
+    }
+
+    pub(crate) const fn google_enabled(&self) -> bool {
+        self.google.is_some() && self.tokens.oauth().is_configured(UpstreamProvider::Google)
+    }
+
     /// The public URL of `path`.
     #[must_use]
     pub fn url(&self, path: &str) -> String {

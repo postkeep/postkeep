@@ -252,16 +252,13 @@ fn immutable() -> Vec<(HeaderName, String)> {
 impl Watchers {
     pub(super) fn graph_api(&self, account: &AccountId) -> Option<ApiClient> {
         let push = self.inner.push.get()?;
-        push.tokens
-            .oauth()
-            .is_configured(UpstreamProvider::Microsoft)
-            .then(|| {
-                ApiClient::new(
-                    push.tokens.clone(),
-                    account.clone(),
-                    UpstreamProvider::Microsoft,
-                )
-            })
+        push.graph_enabled().then(|| {
+            ApiClient::new(
+                push.tokens.clone(),
+                account.clone(),
+                UpstreamProvider::Microsoft,
+            )
+        })
     }
 
     /// Keeps the account's subscription alive until cancelled.

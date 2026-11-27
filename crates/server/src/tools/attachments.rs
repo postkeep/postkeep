@@ -73,7 +73,11 @@ struct Stored {
 /// files.
 pub(super) struct Uploads(Vec<(usize, Uploaded)>);
 
-pub(super) const MAX_ATTACHMENTS: usize = 1_000;
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "re-exported with crate visibility for capability reporting"
+)]
+pub(crate) const MAX_ATTACHMENTS: usize = 1_000;
 
 /// Checks the count before parsing or decoding individual items.
 pub(super) fn read_attachments<'de, D: Deserializer<'de>>(
@@ -528,7 +532,11 @@ impl MailTools {
 /// stays under the 5 MB per-image limit model APIs commonly set, and it
 /// bounds each response and the memory a call holds.
 pub(super) const MAX_ATTACHMENT_MIB: usize = MAX_ATTACHMENT_BYTES / (1024 * 1024);
-const MAX_ATTACHMENT_BYTES: usize = 3 * 1024 * 1024;
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "re-exported with crate visibility for capability reporting"
+)]
+pub(crate) const MAX_ATTACHMENT_BYTES: usize = 3 * 1024 * 1024;
 
 /// Shown for an `attachment_id` that is not a positive whole number.
 const BAD_ATTACHMENT_ID: &str =

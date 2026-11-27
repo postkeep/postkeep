@@ -482,7 +482,7 @@
     },
     "home.tools.title": {
       "n": "H69",
-      "text": "Eighteen tools, for your mail"
+      "text": "Nineteen tools, for your mail"
     },
     "home.tools.lead": {
       "n": "H70",
@@ -665,6 +665,15 @@
     "home.tools[17].desc": {
       "n": "H208",
       "text": "Gives a one-time upload for one file’s bytes, sent with a command, to attach to one message. Off unless the server has a bucket."
+    },
+    "home.tools[18].name": {
+      "n": "H209",
+      "kind": "code",
+      "text": "get_mailbox_capabilities"
+    },
+    "home.tools[18].desc": {
+      "n": "H210",
+      "text": "Shows this mailbox’s provider, protocol, supported operations, search rules, attachment limits and webhook availability."
     },
     "home.tools.after": {
       "n": "H99",

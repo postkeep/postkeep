@@ -23,12 +23,14 @@ use postkeep_mail::{
     AttachmentData, EmailAddress, MessageFlags, OutgoingMessage, Paging, Reply, SendOptions,
     SentCopy, SentMessage, mime,
 };
+use postkeep_store::Provider;
 use postkeep_upstream::http::{MESSAGE_LIMIT, join_segments};
 use postkeep_upstream::{ApiClient, ApiError, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
+use super::capabilities::SelectionFilterRules;
 use super::graph::{api_error_message, provider_error, provider_message_id};
 use super::id::{self, GMAIL_PREFIX};
 use super::{
@@ -448,7 +450,10 @@ impl GmailMailbox {
         most: usize,
         deadline: Instant,
     ) -> MailboxResult<Selected> {
-        criteria.exact_for_selection(&["from", "subject", "text"], &["to"], "Gmail")?;
+        criteria.exact_for_selection(
+            &SelectionFilterRules::for_provider(Provider::Gmail),
+            "Gmail",
+        )?;
         let mailbox = Self::new(self.api.until(deadline), self.email.clone());
         let source = mailbox.resolve(folder).await?;
         let destination = mailbox.destination(change).await?;

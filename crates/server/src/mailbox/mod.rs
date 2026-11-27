@@ -5,6 +5,7 @@
 //! Gmail directly. Messages are addressed by opaque ids (see [`id`]);
 //! IMAP accounts also accept the older folder plus UID form.
 
+pub mod capabilities;
 pub mod gmail;
 pub mod graph;
 pub mod id;
@@ -18,11 +19,17 @@ use postkeep_mail::{
     SearchQuery, SendOptions, SentMessage, SpecialUse, UID_SET_MAX, Uid, already_in_trash,
     same_folder,
 };
-use postkeep_store::{AccountId, Store};
+use postkeep_store::{AccountId, Provider, Store};
 use postkeep_upstream::{ApiError, http::HttpError};
 use serde::{Deserialize, Serialize};
 
 use self::selection::SearchSelection;
+
+use capabilities::SelectionFilterRules;
+pub use capabilities::{
+    AttachmentCapabilities, AuthType, IdStabilityOnMove, MailboxCapabilities, MailboxProtocol,
+    MailboxProvider, OperationCapabilities, SearchCapabilities, ServerFeatures, TextMatching,
+};
 
 use crate::metrics::Metrics;
 use crate::pool::{Fingerprint, ImapPool};
@@ -141,14 +148,13 @@ impl Criteria {
     /// Refuses filters that the provider cannot match exactly in a selection.
     fn exact_for_selection(
         &self,
-        one_word: &[&str],
-        never: &[&str],
+        rules: &SelectionFilterRules,
         provider: &str,
     ) -> MailboxResult<()> {
         for (filter, value) in self.text_filters() {
-            let hint = if never.contains(&filter) {
+            let hint = if !rules.allows(filter) {
                 "narrow with other filters instead"
-            } else if one_word.contains(&filter) {
+            } else if rules.one_word.contains(&filter) {
                 let clean = words(filter, value, provider)?.join(" ");
                 if clean == value.trim().to_lowercase()
                     && (clean.chars().all(char::is_alphanumeric)
@@ -157,7 +163,7 @@ impl Criteria {
                 {
                     continue;
                 }
-                if one_word.contains(&"from") {
+                if rules.one_word.contains(&"from") {
                     "use one word of letters and digits (one address in from)"
                 } else {
                     "use one word of letters and digits"
@@ -1299,7 +1305,8 @@ impl ImapMailbox {
         most: usize,
         deadline: Instant,
     ) -> MailboxResult<Selected> {
-        criteria.exact_for_selection(&[], &["text"], "IMAP")?;
+        criteria
+            .exact_for_selection(&SelectionFilterRules::for_provider(Provider::Imap), "IMAP")?;
         let Some(Cutoff::Imap { uid_validity, .. }) = criteria.until else {
             return Err(MailboxError::Message(selection::REFUSAL.to_owned()));
         };
@@ -1845,23 +1852,23 @@ mod tests {
 
     #[test]
     fn selection_rule_requires_the_filter_as_given() {
-        for (never, filter, value, allowed) in [
-            (false, "subject", "otter", true),
-            (false, "subject", "Otter", true),
-            (false, "subject", "otter census", false),
-            (false, "subject", "-otter", false),
-            (false, "subject", "+otter", false),
-            (false, "subject", "otter-census", false),
-            (false, "subject", "[otter]", false),
-            (false, "subject", "otters@example.net", false),
-            (false, "text", "me", true),
-            (false, "from", "otters@example.net", true),
-            (false, "from", "-otters@example.net", false),
-            (false, "from", "+otters@example.net", false),
-            (false, "from", "otters@...", false),
-            (false, "from", "me", false),
-            (true, "to", "otters@example.net", false),
-            (true, "text", "otter", false),
+        let rules = SelectionFilterRules::for_provider(Provider::Gmail);
+        for (filter, value, allowed) in [
+            ("subject", "otter", true),
+            ("subject", "Otter", true),
+            ("subject", "otter census", false),
+            ("subject", "-otter", false),
+            ("subject", "+otter", false),
+            ("subject", "otter-census", false),
+            ("subject", "[otter]", false),
+            ("subject", "otters@example.net", false),
+            ("text", "me", true),
+            ("from", "otters@example.net", true),
+            ("from", "-otters@example.net", false),
+            ("from", "+otters@example.net", false),
+            ("from", "otters@...", false),
+            ("from", "me", false),
+            ("to", "otters@example.net", false),
         ] {
             let mut criteria = Criteria::default();
             *match filter {
@@ -1870,10 +1877,7 @@ mod tests {
                 "to" => &mut criteria.to,
                 _ => &mut criteria.text,
             } = Some(value.to_owned());
-            let filters = [filter];
-            let blocked: &[&str] = if never { &filters } else { &[] };
-            let result =
-                criteria.exact_for_selection(&["from", "subject", "text"], blocked, "Gmail");
+            let result = criteria.exact_for_selection(&rules, "Gmail");
             assert_eq!(result.is_ok(), allowed, "{filter}: {value}");
             if value == "otter census" {
                 assert_eq!(
@@ -1881,6 +1885,43 @@ mod tests {
                     "Gmail can't match the subject filter exactly as given, so a selection can't use it; use one word of letters and digits (one address in from)"
                 );
             }
+        }
+        for (provider, name) in [
+            (Provider::Imap, "IMAP"),
+            (Provider::Graph, "Outlook"),
+            (Provider::Gmail, "Gmail"),
+        ] {
+            let rules = SelectionFilterRules::for_provider(provider);
+            let caps = MailboxCapabilities::for_account(
+                provider,
+                None,
+                &postkeep_mail::ImapServers::default(),
+                ServerFeatures::default(),
+            )
+            .search;
+            let text = Criteria {
+                text: Some("otter".to_owned()),
+                ..Criteria::default()
+            };
+            let to = Criteria {
+                to: Some("otters@example.net".to_owned()),
+                ..Criteria::default()
+            };
+            assert_eq!(
+                text.exact_for_selection(&rules, name).is_ok(),
+                caps.selection_supports_text,
+                "{name}"
+            );
+            assert_eq!(
+                to.exact_for_selection(&rules, name).is_ok(),
+                caps.selection_supports_to,
+                "{name}"
+            );
+            let phrase = Criteria {
+                text: Some("otter census".to_owned()),
+                ..Criteria::default()
+            };
+            assert!(phrase.exact_for_selection(&rules, name).is_err(), "{name}");
         }
     }
 
