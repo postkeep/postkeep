@@ -5,6 +5,20 @@ use crate::Uid;
 /// Convenient result alias used throughout this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// Classification of a failure reported by an IMAP or SMTP operation.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolErrorKind {
+    /// The command was definitively rejected.
+    Rejected,
+    /// The server rejected a message for exceeding its size limit.
+    TooLarge,
+    /// The operation timed out.
+    Timeout,
+    /// A server or connection failure that may pass.
+    Transient,
+}
+
 /// Errors returned by this crate.
 ///
 /// Error values never contain credentials or message bodies, so they are safe
@@ -86,6 +100,10 @@ pub enum Error {
     #[error("SMTP submission was not confirmed")]
     SubmissionUnconfirmed,
 
+    /// An IMAP change started but the server did not confirm its outcome.
+    #[error("the mail server did not confirm the change")]
+    WriteUnconfirmed,
+
     /// A network-level failure.
     #[error("network error: {0}")]
     Io(#[from] std::io::Error),
@@ -114,6 +132,24 @@ pub enum Error {
 impl Error {
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidInput(message.into())
+    }
+
+    /// Classifies an IMAP or SMTP error, or returns `None` for other errors.
+    #[must_use]
+    pub fn protocol_error_kind(&self) -> Option<ProtocolErrorKind> {
+        use async_imap::error::Error as ImapError;
+        Some(match self {
+            Self::Imap(ImapError::No(_) | ImapError::Bad(_) | ImapError::Validate(_)) => {
+                ProtocolErrorKind::Rejected
+            }
+            Self::Smtp(err) if err.is_timeout() => ProtocolErrorKind::Timeout,
+            Self::Smtp(err) if err.status().is_some_and(|code| code.to_string() == "552") => {
+                ProtocolErrorKind::TooLarge
+            }
+            Self::Smtp(err) if err.is_permanent() || err.is_client() => ProtocolErrorKind::Rejected,
+            Self::Imap(_) | Self::Smtp(_) => ProtocolErrorKind::Transient,
+            _ => return None,
+        })
     }
 
     /// Whether the IMAP session that produced this error is still in a

@@ -63,7 +63,7 @@ pub use config::{
     ImapConfig, ImapSecurity, MailConfig, SmtpConfig, SmtpSecurity,
 };
 pub use credentials::{Credentials, normalize_app_password};
-pub use error::{Error, Result};
+pub use error::{Error, ProtocolErrorKind, Result};
 pub use imap::{
     Changed, Check, DeleteMode, Folder, FolderState, IdleEvent, ImapSession, InFlight,
     MessageBatch, NewMessage, Progress, SpecialUse, UID_SET_MAX, already_in_trash, same_folder,

@@ -19,6 +19,7 @@ use axum::http::{Method, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use futures::StreamExt as _;
+use postkeep_auth::ToolErrorCode;
 use postkeep_mail::{
     AttachmentData, EmailAddress, MessageFlags, OutgoingMessage, Paging, Reply, SendOptions,
     SentCopy, SentMessage, mime,
@@ -31,7 +32,10 @@ use serde_json::{Value, json};
 use url::Url;
 
 use super::capabilities::SelectionFilterRules;
-use super::graph::{api_error_message, provider_error, provider_message_id, submit_error};
+use super::graph::{
+    api_error_message, classify_api_error, provider_error, provider_message_id, submit_error,
+    write_error,
+};
 use super::id::{self, GMAIL_PREFIX};
 use super::{
     Change, Criteria, Cutoff, DRAFT_UNCONFIRMED, Fetched, FolderEntry, IdsFrom, MailboxError,
@@ -301,9 +305,12 @@ impl GmailMailbox {
             .or_else(|| labels.iter().find(|label| label.id == name))
             .map(|label| Folder::Label(label.id.clone()))
             .ok_or_else(|| {
-                MailboxError::Message(format!(
-                    "there is no folder or label named {name:?}; use a name from list_folders"
-                ))
+                MailboxError::coded(
+                    ToolErrorCode::NotFound,
+                    format!(
+                        "there is no folder or label named {name:?}; use a name from list_folders"
+                    ),
+                )
             })
     }
 
@@ -352,9 +359,12 @@ impl GmailMailbox {
         let folder = self.resolve(folder).await?;
         let window = paging.offset + paging.limit;
         if window > MAX_SEARCH_WINDOW {
-            return Err(MailboxError::Message(format!(
-                "Gmail searches reach the first {MAX_SEARCH_WINDOW} matches; narrow the search"
-            )));
+            return Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
+                format!(
+                    "Gmail searches reach the first {MAX_SEARCH_WINDOW} matches; narrow the search"
+                ),
+            ));
         }
         // Count up to MOST_IDS so first-page totals are exact within one selection's cap.
         let (ids, estimate, more) = self
@@ -376,7 +386,10 @@ impl GmailMailbox {
             .filter_map(|result| match result {
                 Ok(message) => Some(Ok(message.summary())),
                 // Deleted between listing and fetching.
-                Err(MailboxError::Message(text)) if text.starts_with("no such message") => None,
+                Err(MailboxError::Coded {
+                    code: ToolErrorCode::NotFound,
+                    ..
+                }) => None,
                 Err(err) => Some(Err(err)),
             })
             .collect::<MailboxResult<Vec<Summary>>>()?;
@@ -605,7 +618,10 @@ impl GmailMailbox {
             .as_deref()
             .and_then(decode_raw)
             .ok_or_else(|| {
-                MailboxError::Message("Gmail returned a message without its content".to_owned())
+                MailboxError::coded(
+                    ToolErrorCode::Unsupported,
+                    "Gmail returned a message without its content",
+                )
             })?;
         Ok((message, raw))
     }
@@ -615,7 +631,10 @@ impl GmailMailbox {
         let message = Self::message_id(selector)?;
         let (metadata, raw) = self.raw(message).await?;
         let parsed = mime::parse_message(&raw, metadata.flags()).ok_or_else(|| {
-            MailboxError::Message("Gmail returned a message that could not be parsed".to_owned())
+            MailboxError::coded(
+                ToolErrorCode::Unsupported,
+                "Gmail returned a message that could not be parsed",
+            )
         })?;
         let folder = self.folder_of(&metadata.label_ids).await;
         Ok(Fetched {
@@ -742,9 +761,9 @@ impl GmailMailbox {
                     .await
                 {
                     Ok(ids) => ids,
-                    Err(reason) => {
+                    Err((reason, code, retry_after)) => {
                         for (index, _) in chunk.iter().chain(remaining) {
-                            outcomes[*index].reason.clone_from(&reason);
+                            outcomes[*index].fail(Status::NotReached, &reason, code, retry_after);
                         }
                         break;
                     }
@@ -755,7 +774,7 @@ impl GmailMailbox {
             };
             if mode == Mode::DryRun {
                 for (index, _) in write {
-                    outcomes[*index].finish(Status::Ok, "");
+                    outcomes[*index].ok("");
                 }
             } else if !write.is_empty() {
                 let stopped = match mailbox.write(write, &labels, &mut outcomes).await {
@@ -763,18 +782,19 @@ impl GmailMailbox {
                         sent = true;
                         continue;
                     }
-                    Ok(Some(reason)) => reason,
+                    Ok(Some(cause)) => cause,
                     Err(err) if !sent && !err.is_deadline() => return Err(gmail_error(err)),
                     Err(err) => {
-                        let reason = api_error_message(&err, "Google");
+                        let (reason, code, retry_after) = gmail_cause(&err);
                         for (index, _) in write {
-                            outcomes[*index].reason.clone_from(&reason);
+                            outcomes[*index].fail(Status::NotReached, &reason, code, retry_after);
                         }
-                        reason
+                        (reason, code, retry_after)
                     }
                 };
+                let (reason, code, retry_after) = stopped;
                 for (index, _) in remaining {
-                    outcomes[*index].reason.clone_from(&stopped);
+                    outcomes[*index].fail(Status::NotReached, &reason, code, retry_after);
                 }
                 break;
             }
@@ -789,7 +809,7 @@ impl GmailMailbox {
         change: &Change,
         labels: &LabelChange,
         outcomes: &mut [Outcome],
-    ) -> Result<Vec<(usize, String)>, String> {
+    ) -> Result<Vec<(usize, String)>, GmailCause> {
         let mut reads = Vec::with_capacity(chunk.len());
         for group in chunk.chunks(METADATA_CONCURRENCY) {
             let answers = futures::future::join_all(group.iter().map(|(_, id)| async move {
@@ -803,9 +823,9 @@ impl GmailMailbox {
             if let Some(err) = answers
                 .iter()
                 .filter_map(|result| result.as_ref().err())
-                .find(|err| gmail_limited(err))
+                .find(|err| err.is_any_rate_limit())
             {
-                return Err(api_error_message(err, "Google"));
+                return Err(gmail_cause(err));
             }
             reads.extend(answers);
         }
@@ -814,7 +834,7 @@ impl GmailMailbox {
                 .iter()
                 .all(|answer| answer.as_ref().is_err_and(|err| err.status().is_none()))
         {
-            return Err(api_error_message(first, "Google"));
+            return Err(gmail_cause(first));
         }
         Ok(chunk
             .iter()
@@ -823,7 +843,7 @@ impl GmailMailbox {
                 let out = &mut outcomes[*index];
                 match answer {
                     Ok(message) if labels.already(&message.label_ids) => {
-                        out.finish(Status::Ok, change.already_reason(false));
+                        out.ok(change.already_reason(false));
                     }
                     Ok(_) => return Some((*index, id.clone())),
                     Err(err) => {
@@ -832,7 +852,8 @@ impl GmailMailbox {
                             Some(_) => Status::Failed,
                             None => Status::NotReached,
                         };
-                        out.finish(status, api_error_message(&err, "Google"));
+                        let (reason, code, retry_after) = gmail_cause(&err);
+                        out.fail(status, reason, code, retry_after);
                     }
                 }
                 None
@@ -847,7 +868,7 @@ impl GmailMailbox {
         ids: &[(usize, String)],
         labels: &LabelChange,
         outcomes: &mut [Outcome],
-    ) -> Result<Option<String>, ApiError> {
+    ) -> Result<Option<GmailCause>, ApiError> {
         let mut body = json!(labels);
         let url = if ids.len() == 1 {
             self.url(&["messages", &ids[0].1, "modify"])
@@ -858,7 +879,7 @@ impl GmailMailbox {
         let result = self.api.send_json(Method::POST, &url, &[], &body).await;
         let fallback = ids.len() > 1
             && result.as_ref().is_err_and(|err| {
-                !gmail_limited(err)
+                !err.is_any_rate_limit()
                     && matches!(
                         err.status(),
                         Some(StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
@@ -876,7 +897,7 @@ impl GmailMailbox {
                 .as_ref()
                 .err()
                 .filter(|err| stop_after_gmail_write(err))
-                .map(|err| api_error_message(err, "Google")));
+                .map(gmail_cause));
         }
         let body = json!(labels);
         // Join each bounded group in input order; stop scheduling if the write stops.
@@ -901,21 +922,23 @@ impl GmailMailbox {
             let errors = || results.iter().filter_map(|answer| answer.as_ref().err());
             let stop = refusal.or_else(|| errors().find(|err| stop_after_gmail_write(err)));
             if let Some(err) = stop.or_else(|| errors().find(|err| gmail_unsent(err))) {
-                let reason = api_error_message(err, "Google");
+                let (reason, code, retry_after) = gmail_cause(err);
                 for (index, _) in ids {
                     let out = &mut outcomes[*index];
                     if out.status == Status::NotReached {
-                        out.finish(
+                        out.fail(
                             if refusal.is_some() {
                                 Status::Failed
                             } else {
                                 Status::NotReached
                             },
-                            reason.clone(),
+                            &reason,
+                            code,
+                            retry_after,
                         );
                     }
                 }
-                return Ok(Some(reason));
+                return Ok(Some((reason, code, retry_after)));
             }
         }
         Ok(None)
@@ -924,7 +947,8 @@ impl GmailMailbox {
     /// Refuses permanent deletion, which needs full mailbox access.
     pub fn delete(&self, selector: &Selector) -> MailboxResult<String> {
         Self::message_id(selector)?;
-        Err(MailboxError::Message(
+        Err(MailboxError::coded(
+            ToolErrorCode::Unsupported,
             "Gmail accounts cannot delete messages permanently through this server (that \
              would need full access to the mailbox). Delete without `permanent` to move it \
              to Trash; Gmail empties Trash after 30 days."
@@ -936,7 +960,10 @@ impl GmailMailbox {
     pub async fn create_folder(&self, name: &str) -> MailboxResult<()> {
         let name = name.trim().trim_matches('/');
         if name.is_empty() {
-            return Err(MailboxError::Message("the folder name is empty".to_owned()));
+            return Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
+                "the folder name is empty",
+            ));
         }
         match self
             .api
@@ -953,10 +980,11 @@ impl GmailMailbox {
             .await
         {
             Ok(_) => Ok(()),
-            Err(err) if err.status() == Some(StatusCode::CONFLICT) => Err(MailboxError::Message(
+            Err(err) if err.status() == Some(StatusCode::CONFLICT) => Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
                 format!("a label named {name:?} already exists"),
             )),
-            Err(err) => Err(gmail_error(err)),
+            Err(err) => Err(write_error(err, "Google")),
         }
     }
 
@@ -995,7 +1023,7 @@ impl GmailMailbox {
             .await
             .map_err(|error| {
                 if provider_may_have_acted(&error) {
-                    DRAFT_UNCONFIRMED.to_owned().into()
+                    MailboxError::coded(ToolErrorCode::SubmissionUncertain, DRAFT_UNCONFIRMED)
                 } else {
                     submit_error(&error, "Google")
                 }
@@ -1008,8 +1036,10 @@ impl GmailMailbox {
             .map(|message| id::provider_id(GMAIL_PREFIX, &message.id))
             .filter(|candidate| id::parse_provider_id(GMAIL_PREFIX, candidate).is_some())
             .ok_or_else(|| {
-                "Google did not return a valid draft id. Check Drafts before trying again."
-                    .to_owned()
+                MailboxError::coded(
+                    ToolErrorCode::SubmissionUncertain,
+                    "Google did not return a valid draft id. Check Drafts before trying again.",
+                )
             })?;
         Ok(SavedDraft {
             id: Some(id),
@@ -1075,7 +1105,10 @@ impl GmailMailbox {
         let message = Self::message_id(selector)?;
         let (metadata, raw) = self.raw(message).await?;
         let original = mime::parse_headers(&raw).ok_or_else(|| {
-            MailboxError::Message("the original message could not be parsed".to_owned())
+            MailboxError::coded(
+                ToolErrorCode::Unsupported,
+                "the original message could not be parsed",
+            )
         })?;
         let composed =
             mime::compose_reply(&EmailAddress::new(self.email.clone()), &original, reply)?;
@@ -1117,13 +1150,15 @@ fn decode_raw(raw: &str) -> Option<Vec<u8>> {
         .or_else(|| URL_SAFE.decode(trimmed).ok())
 }
 
-fn gmail_limited(err: &ApiError) -> bool {
-    err.is_rate_limited()
-        || matches!(err, ApiError::Status { reason: Some(reason), .. } if reason == "dailyLimitExceeded")
+type GmailCause = (String, ToolErrorCode, Option<u64>);
+
+fn gmail_cause(err: &ApiError) -> GmailCause {
+    let (code, retry_after) = classify_api_error(err);
+    (api_error_message(err, "Google"), code, retry_after)
 }
 
 fn stop_after_gmail_write(err: &ApiError) -> bool {
-    gmail_limited(err) || unanswered(err)
+    err.is_any_rate_limit() || unanswered(err)
 }
 
 const fn gmail_unsent(err: &ApiError) -> bool {
@@ -1132,18 +1167,24 @@ const fn gmail_unsent(err: &ApiError) -> bool {
 
 fn finish_gmail(out: &mut Outcome, result: &Result<HttpResponse, ApiError>) {
     match result {
-        Ok(_) => out.finish(Status::Ok, ""),
-        Err(err) if unanswered(err) => out.finish(Status::Failed, SENT_NO_ANSWER),
-        Err(err) => out.finish(
-            if gmail_unsent(err) || gmail_limited(err) {
+        Ok(_) => out.ok(""),
+        Err(err) if unanswered(err) => out.fail(
+            Status::Failed,
+            SENT_NO_ANSWER,
+            ToolErrorCode::SubmissionUncertain,
+            None,
+        ),
+        Err(err) => {
+            let (reason, code, retry_after) = gmail_cause(err);
+            let status = if gmail_unsent(err) || err.is_any_rate_limit() {
                 Status::NotReached
             } else if err.status() == Some(StatusCode::NOT_FOUND) {
                 Status::NotFound
             } else {
                 Status::Failed
-            },
-            api_error_message(err, "Google"),
-        ),
+            };
+            out.fail(status, reason, code, retry_after);
+        }
     }
 }
 
@@ -1191,9 +1232,10 @@ fn gmail_query(criteria: &Criteria) -> MailboxResult<String> {
     let before = criteria.before.map(super::day_start);
     for (filter, seconds) in [("since", since), ("before", before)] {
         if seconds.is_some_and(|seconds| seconds <= 0) {
-            return Err(MailboxError::Message(format!(
-                "{filter} must be 1970-01-02 or later on Gmail"
-            )));
+            return Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
+                format!("{filter} must be 1970-01-02 or later on Gmail"),
+            ));
         }
     }
     if let Some(after) = since {

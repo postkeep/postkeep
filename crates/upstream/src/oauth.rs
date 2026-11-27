@@ -10,8 +10,8 @@ use std::fmt;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
-use http::Method;
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use http::{HeaderMap, Method, StatusCode};
 use postkeep_store::Provider;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -167,6 +167,10 @@ pub enum OAuthError {
     Rejected {
         /// Provider.
         provider: UpstreamProvider,
+        /// HTTP status of the response.
+        status: StatusCode,
+        /// Bounded numeric `Retry-After`, when applicable.
+        retry_after: Option<u64>,
         /// OAuth error code, or the HTTP status.
         code: String,
         /// Shortened description from the provider.
@@ -194,14 +198,38 @@ pub enum OAuthError {
 }
 
 impl OAuthError {
+    /// The bounded delay in seconds supplied with an eligible provider status.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<u64> {
+        match self {
+            Self::Rejected { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    /// Whether the provider's HTTP status indicated rate limiting.
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Self::Rejected {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                ..
+            }
+        )
+    }
+
+    /// Whether the provider reported a server failure or temporary outage.
+    #[must_use]
+    pub fn is_server_unavailable(&self) -> bool {
+        matches!(self, Self::Rejected { status, code, .. }
+            if status.is_server_error() || matches!(code.as_str(), "temporarily_unavailable" | "server_error"))
+    }
+
     /// Whether retrying later could help.
     #[must_use]
     pub fn is_transient(&self) -> bool {
-        match self {
-            Self::Http(_) => true,
-            Self::Rejected { code, .. } => code.starts_with('5') || code == "429",
-            _ => false,
-        }
+        matches!(self, Self::Http(_)) || self.is_rate_limited() || self.is_server_unavailable()
     }
 }
 
@@ -510,7 +538,12 @@ impl OAuthClient {
         )?;
         let response = self.http.send(request, JSON_LIMIT).await?;
         if !response.is_success() {
-            return Err(provider_error(provider, response.status, &response.body));
+            return Err(provider_error(
+                provider,
+                response.status,
+                &response.headers,
+                &response.body,
+            ));
         }
         let raw: RawToken = response.json().map_err(|_| OAuthError::Malformed {
             provider,
@@ -564,7 +597,7 @@ impl OAuthClient {
         if response.is_success() {
             return Ok(());
         }
-        match provider_error(provider, response.status, &response.body) {
+        match provider_error(provider, response.status, &response.headers, &response.body) {
             // Already revoked or expired.
             OAuthError::NeedsReauth { .. } => Ok(()),
             OAuthError::Rejected { code, .. } if code == "invalid_token" => Ok(()),
@@ -694,7 +727,12 @@ impl OAuthClient {
         )?;
         let response = self.http.send(request, JSON_LIMIT).await?;
         if !response.is_success() {
-            return Err(provider_error(provider, response.status, &response.body));
+            return Err(provider_error(
+                provider,
+                response.status,
+                &response.headers,
+                &response.body,
+            ));
         }
         response.json().map_err(|_| OAuthError::Malformed {
             provider,
@@ -714,9 +752,11 @@ fn form_body(pairs: &[(&str, &str)]) -> String {
 /// carry an OAuth `error` code; API errors (Graph, Gmail) carry an object.
 pub(crate) fn provider_error(
     provider: UpstreamProvider,
-    status: http::StatusCode,
+    status: StatusCode,
+    headers: &HeaderMap,
     body: &[u8],
 ) -> OAuthError {
+    let retry_after = crate::api::status_retry_after(status, None, headers);
     let parsed: Option<RawError> = serde_json::from_slice(body).ok();
     let (code, description) = match parsed {
         Some(RawError {
@@ -750,6 +790,8 @@ pub(crate) fn provider_error(
     }
     OAuthError::Rejected {
         provider,
+        status,
+        retry_after,
         code: if code.is_empty() {
             status.as_u16().to_string()
         } else {
@@ -985,14 +1027,17 @@ mod tests {
         let reauth = provider_error(
             UpstreamProvider::Microsoft,
             status,
+            &HeaderMap::new(),
             br#"{"error":"invalid_grant","error_description":"AADSTS70008: expired"}"#,
         );
         assert!(
             matches!(reauth, OAuthError::NeedsReauth { ref code, .. } if code == "invalid_grant")
         );
+        assert!(!reauth.is_transient());
         let graph = provider_error(
             UpstreamProvider::Microsoft,
             http::StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
             br#"{"error":{"code":"ErrorAccessDenied","message":"Access is denied.\nmore"}}"#,
         );
         assert!(matches!(
@@ -1003,15 +1048,49 @@ mod tests {
         let gmail = provider_error(
             UpstreamProvider::Google,
             http::StatusCode::NOT_FOUND,
+            &HeaderMap::new(),
             br#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#,
         );
         assert!(matches!(gmail, OAuthError::Rejected { ref code, .. } if code == "404"));
         let opaque = provider_error(
             UpstreamProvider::Google,
             http::StatusCode::BAD_GATEWAY,
+            &HeaderMap::new(),
             b"<html>",
         );
         assert!(opaque.is_transient());
+    }
+
+    #[test]
+    fn symbolic_oauth_errors_preserve_response_status_and_delay() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::RETRY_AFTER,
+            http::HeaderValue::from_static("12"),
+        );
+        for code in [
+            "temporarily_unavailable",
+            "server_error",
+            "slow_down",
+            "invalid_grant",
+        ] {
+            let (status, limited, unavailable) = match code {
+                "slow_down" => (StatusCode::TOO_MANY_REQUESTS, true, false),
+                "invalid_grant" => (StatusCode::BAD_REQUEST, false, false),
+                _ => (StatusCode::SERVICE_UNAVAILABLE, false, true),
+            };
+            let body = serde_json::json!({"error": code}).to_string();
+            let err = provider_error(
+                UpstreamProvider::Microsoft,
+                status,
+                &headers,
+                body.as_bytes(),
+            );
+            assert_eq!(err.is_rate_limited(), limited);
+            assert_eq!(err.is_server_unavailable(), unavailable);
+            assert_eq!(err.is_transient(), limited || unavailable);
+            assert_eq!(err.retry_after(), (limited || unavailable).then_some(12));
+        }
     }
 
     fn jwt(claims: &serde_json::Value) -> String {

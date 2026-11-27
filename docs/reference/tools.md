@@ -56,6 +56,48 @@ runs, as a missing or mistyped argument is: a tool error that names it
 with `importance` sends nothing, rather than ignoring the unknown argument.
 Every input schema says so with `"additionalProperties": false`.
 
+## Errors
+
+A core tool error has `isError: true` and two text blocks in `content`.
+`content[0].text` is the human-readable message. `content[1].text` is a
+single JSON object, for example:
+
+```json
+{"code":"rate_limited","retryable":true,"retry_after_seconds":10}
+```
+
+Error results omit `structuredContent` and `_meta`. The codes are:
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_input` | Check arguments or a definite rejection. |
+| `not_found` | The item was not found or is not visible to this caller. |
+| `stale_id` | Search again for a current IMAP message ID. |
+| `auth_required` | Sign in or reconnect the mailbox. |
+| `unsupported` | This operation or input format is not supported here. |
+| `permission_denied` | The caller or mailbox is not allowed to do this. |
+| `mailbox_paused` | Server policy has paused the mailbox. |
+| `payload_too_large` | Reduce the message or attachment size. |
+| `hold_mismatch` | The arguments differ from the held send. |
+| `hold_expired` | The hold is missing, expired, or already used. |
+| `rate_limited` | A request or usage limit was reached. |
+| `provider_unavailable` | A provider or supporting service did not complete the request. |
+| `timeout` | Time ran out before the operation took effect. |
+| `busy` | A local concurrency or queue limit was reached. |
+| `submission_uncertain` | A change may have happened without confirmation. |
+
+Only `rate_limited`, `provider_unavailable`, `timeout` and `busy` have
+`retryable: true`. Wait `retry_after_seconds` when present (an integer from
+0 to 86,400). Retrying the operation is not replaying its one-shot inputs:
+if the message says the `hold_id` was used or uploads were consumed, start
+without that hold or upload the files again.
+
+`submission_uncertain` always includes `outcome_uncertain: true`, is never
+retryable, and has no delay. Unconfirmed writes tell you to check the change
+or draft instead of suggesting an automatic retry. Check Sent, Drafts or the
+affected folder before deciding whether to try again, even if the message
+also says that a hold or upload was used.
+
 ## Many messages in one call
 
 `update_flags`, `move_message` and `delete_message` accept `ids` instead of

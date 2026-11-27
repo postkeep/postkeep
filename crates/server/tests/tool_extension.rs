@@ -31,14 +31,17 @@ use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig, Extensions};
 use postkeep::tools::{
     ExtensionCall, GET_MAILBOX_CAPABILITIES, SkillDocument, ToolExtension, ToolFuture,
+    WebhookProblem, WebhookProblemKind,
 };
 use postkeep_auth::{
     AuthConfig, AuthState, Authenticated, BearerRequest, CallEnd, CeilingsFuture, CheckFuture,
     CredentialVerifier, HoldFuture, Outbox, OutboxCeilings, PrincipalResolver, Refusal, Resolution,
-    ResolveFuture, Sending, ToolCall, UsageHook, VerifyFuture,
+    ResolveFuture, Sending, ToolCall, ToolErrorCode, UnreadableRules, UsageHook, VerifyFuture,
 };
 use postkeep_mail::{ImapServer, ImapServers};
-use postkeep_store::{AccountId, MasterKey, OutboxLimitChange, Provider, Store, WebhookSettings};
+use postkeep_store::{
+    AccountId, MasterKey, NewFilterRule, OutboxLimitChange, Provider, Store, WebhookSettings,
+};
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, JsonObject, Tool, ToolAnnotations};
 use secrecy::SecretString;
@@ -243,6 +246,14 @@ impl ToolExtension for AccountTools {
         tools
     }
 
+    fn webhook_problem(&self, problem: WebhookProblem<'_>) -> Option<String> {
+        matches!(
+            problem.kind,
+            WebhookProblemKind::Rules(UnreadableRules::UnknownName)
+        )
+        .then(|| "Remove the saved rule this server cannot read.".to_owned())
+    }
+
     fn hides_tool(&self, caller: &Authenticated, name: &str) -> bool {
         self.hide_capabilities.load(Ordering::Relaxed)
             && caller.principal == "key:1"
@@ -373,7 +384,9 @@ impl UsageHook for Usage {
         let (caller, mailbox) = (&sending.caller.principal, &sending.mailbox.0);
         self.log.push(format!("{kind} {caller} {mailbox}"));
         let verdict = if *sending.mailbox == self.a {
-            Err(Refusal::new(NO_SENDS_LEFT))
+            Err(Refusal::new(NO_SENDS_LEFT)
+                .with_retry_after(45)
+                .with_code(ToolErrorCode::RateLimited))
         } else {
             Ok(())
         };
@@ -551,6 +564,15 @@ async fn rpc(app: &Router, token: &str, method: &str, params: Value) -> Value {
 /// Calls `tool` and returns `Ok` with the structured output, or `Err` with
 /// the error text.
 async fn call(app: &Router, token: &str, tool: &str, arguments: Value) -> Result<Value, String> {
+    let result = tool_result(app, token, tool, arguments).await;
+    if result["isError"] == true {
+        Err(result["content"][0]["text"].as_str().unwrap().to_owned())
+    } else {
+        Ok(result["structuredContent"].clone())
+    }
+}
+
+async fn tool_result(app: &Router, token: &str, tool: &str, arguments: Value) -> Value {
     let reply = rpc(
         app,
         token,
@@ -560,11 +582,7 @@ async fn call(app: &Router, token: &str, tool: &str, arguments: Value) -> Result
     .await;
     let result = &reply["result"];
     assert!(result.is_object(), "{tool}: {reply}");
-    if result["isError"] == true {
-        Err(result["content"][0]["text"].as_str().unwrap().to_owned())
-    } else {
-        Ok(result["structuredContent"].clone())
-    }
+    result.clone()
 }
 
 async fn listed(app: &Router, token: &str) -> Vec<Value> {
@@ -811,11 +829,17 @@ async fn extension_tools_get_the_mailbox_the_call_names() {
     );
     assert_eq!(h.tools.take(), ["write disconnect_mailbox - []"]);
 
-    let arguments = json!({ "mailbox": "c@example.com" });
-    assert_eq!(
-        call(&h.extended, key, "get_account", arguments).await,
-        Err(UNKNOWN.to_owned())
-    );
+    for (mailbox, code) in [
+        (json!("c@example.com"), "not_found"),
+        (json!(7), "invalid_input"),
+    ] {
+        let result = tool_result(&h.extended, key, "get_account", json!({"mailbox":mailbox})).await;
+        assert_eq!(result["content"][0]["text"], UNKNOWN);
+        assert_eq!(
+            mcp_request::error_meta(&result),
+            json!({"code":code,"retryable":false})
+        );
+    }
     assert_eq!(h.tools.take(), Vec::<String>::new());
 
     let params = json!({ "name": "get_account", "arguments": {} });
@@ -1040,9 +1064,11 @@ async fn the_usage_hook_can_refuse_calls_and_messages() {
     assert_eq!(h.usage.ends(), ["send_message Failed"]);
 
     h.usage.over_limit.store(true, Ordering::SeqCst);
+    let result = tool_result(&h.limited, key, "send_message", message).await;
+    assert_eq!(result["content"][0]["text"], OVER_LIMIT);
     assert_eq!(
-        call(&h.limited, key, "send_message", message).await,
-        Err(OVER_LIMIT.to_owned())
+        mcp_request::error_meta(&result),
+        json!({"code":"permission_denied","retryable":false})
     );
     assert_eq!(h.tools.take(), ["usage send_message - [body,subject,to]"]);
     assert_eq!(h.usage.ends(), Vec::<String>::new(), "a refused call");
@@ -1215,20 +1241,25 @@ async fn a_held_send_checks_its_handle_before_asking_to_send() {
     h.usage.ends();
     let mut changed = confirm.clone();
     changed["body"] = json!("changed body");
+    let result = tool_result(&h.limited, key, "send_message", changed).await;
     assert!(
-        call(&h.limited, key, "send_message", changed)
-            .await
-            .unwrap_err()
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
             .starts_with("Not sent: these arguments differ")
     );
+    assert_eq!(mcp_request::error_meta(&result)["code"], "hold_mismatch");
     assert_eq!(
         h.tools.take(),
         ["usage send_message - [body,hold_id,subject,to]"]
     );
     assert_eq!(ended(&h.usage).await, ["send_message Failed"]);
-    let error = call(&h.limited, key, "send_message", confirm.clone())
-        .await
-        .unwrap_err();
+    let result = tool_result(&h.limited, key, "send_message", confirm.clone()).await;
+    assert_eq!(
+        mcp_request::error_meta(&result),
+        json!({"code":"rate_limited","retryable":true,"retry_after_seconds":45})
+    );
+    let error = result["content"][0]["text"].as_str().unwrap();
     assert!(
         error.starts_with(NO_SENDS_LEFT) && error.contains("This hold is used up"),
         "{error}"
@@ -1241,12 +1272,14 @@ async fn a_held_send_checks_its_handle_before_asking_to_send() {
         ]
     );
     assert_eq!(ended(&h.usage).await, ["send_message Refused"]);
+    let result = tool_result(&h.limited, key, "send_message", confirm).await;
     assert!(
-        call(&h.limited, key, "send_message", confirm)
-            .await
-            .unwrap_err()
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
             .starts_with("Not sent: no held message")
     );
+    assert_eq!(mcp_request::error_meta(&result)["code"], "hold_expired");
     assert_eq!(
         h.tools.take(),
         ["usage send_message - [body,hold_id,subject,to]"]
@@ -1348,10 +1381,17 @@ async fn a_held_send_checks_its_handle_before_asking_to_send() {
             "held"
         );
     }
-    let error = call(&h.limited, key, "send_message", message)
-        .await
-        .unwrap_err();
-    assert!(error.starts_with("Not sent: too many messages"), "{error}");
+    let result = tool_result(&h.limited, key, "send_message", message).await;
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Not sent: too many messages")
+    );
+    assert_eq!(
+        mcp_request::error_meta(&result),
+        json!({"code":"busy","retryable":true})
+    );
     h.tools.take();
     h.usage.ends();
     call(&h.limited, key, "get_webhook_status", json!({}))
@@ -1550,4 +1590,42 @@ async fn the_usage_hook_can_lower_a_mailbox_s_outbox_ceilings() {
     let update = update.unwrap();
     assert_eq!(outbox(&update), [7 * DAY, 1_000, 14 * DAY, 2_000]);
     assert_eq!(update["outbox_retention_source"], "default");
+}
+
+#[tokio::test]
+async fn an_unknown_saved_filter_uses_callback_wording_but_not_its_error_code() {
+    let h = harness().await;
+    let settings = WebhookSettings {
+        enabled: false,
+        url: "https://hooks.example.com/example".to_owned(),
+        auth_header: None,
+        signing: false,
+        signing_secret: SecretString::from(String::new()),
+        include_sender: false,
+    };
+    h.store.save_webhook(&h.a, &settings).await.unwrap();
+    h.store
+        .add_webhook_filter_rule(
+            &h.a,
+            &NewFilterRule {
+                action: "block".to_owned(),
+                field: "unknown_field".to_owned(),
+                kind: "equals".to_owned(),
+                pattern: SecretString::from("example".to_owned()),
+            },
+            10,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+    let rule = |pattern| json!({"action":"block","field":"from","kind":"regex","pattern":pattern});
+    let call = |args| tool_result(&h.extended, "workspace-key", "add_webhook_filter", args);
+    let unknown = call(rule("example")).await;
+    assert_eq!(
+        unknown["content"][0]["text"],
+        "Remove the saved rule this server cannot read."
+    );
+    assert_eq!(mcp_request::error_meta(&unknown)["code"], "unsupported");
+    let invalid = call(rule("[")).await;
+    assert_eq!(mcp_request::error_meta(&invalid)["code"], "invalid_input");
 }

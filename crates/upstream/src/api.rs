@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use bytes::Bytes;
-use http::{HeaderName, Method, StatusCode, header};
+use http::{HeaderMap, HeaderName, Method, StatusCode, header};
 use postkeep_store::AccountId;
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
@@ -37,6 +37,8 @@ pub enum ApiError {
         /// Google's reason, from the first entry of the body's `errors`
         /// list, for example `userRateLimitExceeded`.
         reason: Option<String>,
+        /// Bounded numeric `Retry-After`, when the status or reason allows it.
+        retry_after: Option<u64>,
         /// The provider's message, shortened.
         message: String,
     },
@@ -87,16 +89,53 @@ impl ApiError {
     /// Gmail sends with a 403.
     #[must_use]
     pub fn is_rate_limited(&self) -> bool {
+        matches!(self, Self::Status { status, reason, .. }
+            if is_per_account_rate_limit(*status, reason.as_deref()))
+    }
+
+    /// Whether Google reports that the daily request limit was reached.
+    #[must_use]
+    pub fn is_daily_limit_exceeded(&self) -> bool {
+        matches!(self, Self::Status { reason, .. } if is_daily_limit_reason(reason.as_deref()))
+    }
+
+    /// Whether either a per-account rate limit or a daily limit was reached.
+    #[must_use]
+    pub fn is_any_rate_limit(&self) -> bool {
+        self.is_rate_limited() || self.is_daily_limit_exceeded()
+    }
+
+    /// The bounded delay in seconds supplied with an eligible API status.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<u64> {
         match self {
-            Self::Status { status, reason, .. } => {
-                *status == StatusCode::TOO_MANY_REQUESTS
-                    || matches!(
-                        reason.as_deref(),
-                        Some("userRateLimitExceeded" | "rateLimitExceeded")
-                    )
-            }
-            _ => false,
+            Self::Status { retry_after, .. } => *retry_after,
+            _ => None,
         }
+    }
+}
+
+fn is_per_account_rate_limit(status: StatusCode, reason: Option<&str>) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS
+        || matches!(reason, Some("userRateLimitExceeded" | "rateLimitExceeded"))
+}
+
+fn is_daily_limit_reason(reason: Option<&str>) -> bool {
+    reason == Some("dailyLimitExceeded")
+}
+
+pub(crate) fn status_retry_after(
+    status: StatusCode,
+    reason: Option<&str>,
+    headers: &HeaderMap,
+) -> Option<u64> {
+    if status == StatusCode::SERVICE_UNAVAILABLE
+        || is_per_account_rate_limit(status, reason)
+        || is_daily_limit_reason(reason)
+    {
+        transport::parse_retry_after(headers)
+    } else {
+        None
     }
 }
 
@@ -254,6 +293,7 @@ impl ApiClient {
                 status: response.status,
                 code: None,
                 reason: None,
+                retry_after: status_retry_after(response.status, None, &response.headers),
                 message: "attachment range refused".to_owned(),
             })
         }
@@ -435,11 +475,13 @@ impl ApiClient {
 
     fn status_error(&self, response: &HttpResponse) -> ApiError {
         let (code, message) = error_details(&response.body);
+        let reason = error_reason(&response.body);
         ApiError::Status {
             provider: self.provider,
             status: response.status,
             code,
-            reason: error_reason(&response.body),
+            retry_after: status_retry_after(response.status, reason.as_deref(), &response.headers),
+            reason,
             message,
         }
     }
@@ -496,6 +538,96 @@ fn error_reason(body: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn api_status_and_upload_range_capture_retry_after() {
+        use postkeep_store::{MasterKey, Store};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let base = Url::parse(&server.uri()).unwrap();
+        let key = MasterKey::parse(&MasterKey::generate_encoded().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = format!("sqlite://{}", dir.path().join("test.db").display());
+        let store = Store::connect(&db, &key).await.unwrap();
+        let oauth = crate::OAuthClient::new(
+            crate::Http::for_tests(),
+            crate::Endpoints::all_at(&base),
+            base.clone(),
+            None,
+            None,
+        );
+        let client = ApiClient::new(
+            TokenManager::new(store, oauth),
+            AccountId("test".into()),
+            UpstreamProvider::Google,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::RETRY_AFTER,
+            http::HeaderValue::from_static("18446744073709551616"),
+        );
+        for (status, reason, expected) in [
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "",
+                Some(transport::MAX_RETRY_AFTER_SECS),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "",
+                Some(transport::MAX_RETRY_AFTER_SECS),
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "userRateLimitExceeded",
+                Some(transport::MAX_RETRY_AFTER_SECS),
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "dailyLimitExceeded",
+                Some(transport::MAX_RETRY_AFTER_SECS),
+            ),
+            (StatusCode::PAYLOAD_TOO_LARGE, "", None),
+        ] {
+            let body = serde_json::json!({"error":{"errors":[{"reason":reason}]}});
+            let err = client.status_error(&HttpResponse {
+                status,
+                headers: headers.clone(),
+                body: Bytes::from(body.to_string()),
+            });
+            assert_eq!(err.retry_after(), expected);
+            assert_eq!(
+                err.is_daily_limit_exceeded(),
+                reason == "dailyLimitExceeded"
+            );
+            if err.is_daily_limit_exceeded() {
+                assert!(err.is_any_rate_limit() && !err.is_rate_limited());
+            }
+        }
+        Mock::given(method("PUT"))
+            .and(path("/range"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "9")
+                    .set_body_string("discarded body"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = client
+            .put_range(
+                &base.join("range").unwrap(),
+                "bytes 0-0/1".into(),
+                Bytes::from_static(b"a"),
+                || true,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.retry_after(), Some(9));
+        assert!(!err.to_string().contains("discarded body"));
+    }
+
     #[test]
     fn reads_graph_and_google_error_bodies() {
         let graph = br#"{"error":{"code":"ErrorItemNotFound","message":"The specified object was not found in the store.\nmore"}}"#;
@@ -531,6 +663,7 @@ mod tests {
             status,
             code: None,
             reason: error_reason(body),
+            retry_after: None,
             message: String::new(),
         };
         assert!(answer(StatusCode::FORBIDDEN, user).is_rate_limited());

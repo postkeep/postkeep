@@ -18,13 +18,14 @@ use axum::extract::{Request, State};
 use axum::http::{Extensions, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use postkeep_auth::Authenticated;
+use postkeep_auth::{Authenticated, ToolErrorCode};
 use postkeep_store::{AccountId, Store, StoreError};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::Tool;
 use serde_json::{Map, Value, json};
 
 use crate::request_log::Note;
+use crate::tools::ToolError;
 
 /// Name of the tool argument.
 pub const ARGUMENT: &str = "mailbox";
@@ -52,17 +53,26 @@ pub enum Selection {
     /// None: the call acts on the caller's default mailbox.
     Default,
     /// The selection failed, with a tool error explaining why.
-    Refused(String),
+    Refused {
+        /// Machine-readable reason.
+        code: ToolErrorCode,
+        /// What the caller is told.
+        message: String,
+    },
 }
 
 /// The mailbox a tool call acts on.
-pub fn account(extensions: &Extensions) -> Result<AccountId, String> {
+///
+/// # Errors
+///
+/// Returns a tool error if the call is unauthenticated or selection failed.
+pub fn account(extensions: &Extensions) -> Result<AccountId, ToolError> {
     let auth = extensions
         .get::<Authenticated>()
-        .ok_or_else(|| "not authenticated".to_owned())?;
+        .ok_or_else(|| ToolError::new(ToolErrorCode::AuthRequired, "not authenticated"))?;
     match extensions.get::<Selection>() {
         Some(Selection::Mailbox(account)) => Ok(account.clone()),
-        Some(Selection::Refused(message)) => Err(message.clone()),
+        Some(Selection::Refused { code, message }) => Err(ToolError::new(*code, message.clone())),
         Some(Selection::Default) | None => Ok(auth.account_id.clone()),
     }
 }
@@ -73,7 +83,7 @@ pub fn limit_key(extensions: &Extensions) -> Option<AccountId> {
     let auth = extensions.get::<Authenticated>()?;
     Some(match extensions.get::<Selection>() {
         Some(Selection::Mailbox(account)) => account.clone(),
-        Some(Selection::Default | Selection::Refused(_)) | None => auth.account_id.clone(),
+        Some(Selection::Default | Selection::Refused { .. }) | None => auth.account_id.clone(),
     })
 }
 
@@ -125,7 +135,15 @@ impl MailboxSelector {
         tenant: Option<(&str, &Value)>,
         mailbox: Option<&Value>,
     ) -> Result<(Selection, Option<&'a Authenticated>), StoreError> {
-        let refused = |message: &str| (Selection::Refused(message.to_owned()), None);
+        let refused = |code, message: &str| {
+            (
+                Selection::Refused {
+                    code,
+                    message: message.to_owned(),
+                },
+                None,
+            )
+        };
         let tenancies = auth.tenancies();
         let candidates = match tenant.map(|(name, value)| (name, argument(Some(value)))) {
             None | Some((_, Ok(None))) => tenancies,
@@ -136,9 +154,16 @@ impl MailboxSelector {
                     .and_then(|id| tenancies.iter().find(|entry| entry.tenant == id))
                 else {
                     return Ok((
-                        Selection::Refused(format!(
-                            "unknown {name}: pass the id of one this connection can use"
-                        )),
+                        Selection::Refused {
+                            code: if requested.is_err() {
+                                ToolErrorCode::InvalidInput
+                            } else {
+                                ToolErrorCode::NotFound
+                            },
+                            message: format!(
+                                "unknown {name}: pass the id of one this connection can use"
+                            ),
+                        },
                         None,
                     ));
                 };
@@ -148,7 +173,7 @@ impl MailboxSelector {
         let name = match argument(mailbox) {
             Ok(Some(name)) => name,
             Ok(None) => return Ok((Selection::Default, candidates.first())),
-            Err(()) => return Ok(refused(UNKNOWN_MAILBOX)),
+            Err(()) => return Ok(refused(ToolErrorCode::InvalidInput, UNKNOWN_MAILBOX)),
         };
         let mut found = None;
         for tenancy in candidates {
@@ -160,12 +185,12 @@ impl MailboxSelector {
                 && tenancy.may_use(&account.id)
             {
                 if found.is_some() {
-                    return Ok(refused(AMBIGUOUS_MAILBOX));
+                    return Ok(refused(ToolErrorCode::InvalidInput, AMBIGUOUS_MAILBOX));
                 }
                 found = Some((Selection::Mailbox(account.id), Some(tenancy)));
             }
         }
-        Ok(found.unwrap_or_else(|| refused(UNKNOWN_MAILBOX)))
+        Ok(found.unwrap_or_else(|| refused(ToolErrorCode::NotFound, UNKNOWN_MAILBOX)))
     }
 }
 
@@ -234,7 +259,7 @@ pub async fn select_mailbox(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if matches!(selection, Selection::Refused(_)) {
+    if matches!(selection, Selection::Refused { .. }) {
         tracing::info!("refused a tool call for a tenant or mailbox the caller cannot use");
     }
     // A caller without a tenancy list is already its own selected tenancy.
@@ -287,7 +312,13 @@ mod tests {
     #[test]
     fn tools_act_on_the_selection_or_the_token_account() {
         let mut extensions = Extensions::new();
-        assert_eq!(account(&extensions), Err("not authenticated".to_owned()));
+        assert_eq!(
+            account(&extensions),
+            Err(ToolError::new(
+                ToolErrorCode::AuthRequired,
+                "not authenticated"
+            ))
+        );
         assert_eq!(limit_key(&extensions), None);
 
         extensions.insert(caller());
@@ -302,8 +333,17 @@ mod tests {
         assert_eq!(account(&extensions), Ok(AccountId("b".to_owned())));
         assert_eq!(limit_key(&extensions), Some(AccountId("b".to_owned())));
 
-        extensions.insert(Selection::Refused("refused selection".to_owned()));
-        assert_eq!(account(&extensions), Err("refused selection".to_owned()));
+        extensions.insert(Selection::Refused {
+            code: ToolErrorCode::InvalidInput,
+            message: "refused selection".to_owned(),
+        });
+        assert_eq!(
+            account(&extensions),
+            Err(ToolError::new(
+                ToolErrorCode::InvalidInput,
+                "refused selection"
+            ))
+        );
         assert_eq!(limit_key(&extensions), Some(AccountId("a".to_owned())));
     }
 }

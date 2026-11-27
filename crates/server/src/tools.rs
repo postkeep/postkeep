@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 
 use axum::http::request::Parts;
 use postkeep_auth::{
-    Authenticated, CallEnd, Outbox, Outcome, Refusal, Sending, ToolCall, UnreadableRules,
-    UsageHook, filter_rule_limit, unreadable_rules,
+    Authenticated, CallEnd, Outbox, Outcome, Refusal, Sending, ToolCall, ToolErrorCode,
+    UnreadableRules, UsageHook, filter_rule_limit, unreadable_rules,
 };
 use postkeep_mail::invisible::{email_address, senders, visible};
 use postkeep_mail::{
@@ -47,11 +47,10 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{Extension, ToolCallContext};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    GetSkillRequestParams, GetSkillResult, Icon, Implementation, ListResourcesResult,
-    ListSkillsResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
-    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceContents,
-    ResultType, ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, GetSkillRequestParams,
+    GetSkillResult, Icon, Implementation, ListResourcesResult, ListSkillsResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, ResourceContents, ResultType, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, Json, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -68,7 +67,7 @@ use crate::mailbox::selection::{MAILBOX_REFUSAL, REFUSAL, SearchSelection};
 use crate::mailbox::{
     ALREADY_UNSEEN, Change, Criteria, IdsFrom, Mailbox, MailboxCapabilities, MailboxError, Mode,
     NOTHING_LEFT, Outcome as ChangeOutcome, SEARCH_TIME_EXHAUSTED, Selected, Selector,
-    ServerFeatures, Status, Summary, TIME_EXHAUSTED,
+    ServerFeatures, Status, Summary, TIME_EXHAUSTED, account_store_code,
 };
 use crate::metrics::Metrics;
 use crate::pool::{Fingerprint, ImapPool};
@@ -149,6 +148,7 @@ macro_rules! search_selection_doc { () => { "Only when more match than this page
 pub const GET_MAILBOX_CAPABILITIES: &str = "get_mailbox_capabilities";
 
 mod attachments;
+mod error;
 mod extension;
 mod filters;
 mod schema;
@@ -160,6 +160,7 @@ use attachments::{
     MAX_ATTACHMENT_MIB, NewAttachmentWire, Uploads, caller, files_line, files_named, owner,
     read_attachments, split, uploads_end, with_files,
 };
+pub use error::ToolError;
 pub use extension::{
     ExtensionCall, RejectedPassword, ToolExtension, ToolFuture, WebhookProblem, WebhookProblemKind,
 };
@@ -535,11 +536,11 @@ impl MailTools {
     /// The account a tool call acts on: the token's, or the one the
     /// mailbox selector checked against the token's mailboxes. Tool
     /// arguments never name it directly.
-    fn require_account(parts: &Parts) -> Result<AccountId, String> {
+    fn require_account(parts: &Parts) -> Result<AccountId, ToolError> {
         selector::account(&parts.extensions)
     }
 
-    async fn load_account(&self, parts: &Parts) -> Result<Account, String> {
+    async fn load_account(&self, parts: &Parts) -> Result<Account, ToolError> {
         let account_id = Self::require_account(parts)?;
         self.context
             .store
@@ -547,15 +548,18 @@ impl MailTools {
             .await
             .map_err(|err| {
                 tracing::error!(error = %err, "could not load the account");
-                "could not load the account".to_owned()
+                ToolError::new(account_store_code(&err), "could not load the account")
             })?
             .ok_or_else(|| {
-                "this account is no longer connected; reconnect it from your MCP client".to_owned()
+                ToolError::new(
+                    ToolErrorCode::AuthRequired,
+                    "this account is no longer connected; reconnect it from your MCP client",
+                )
             })
     }
 
     /// Opens the mailbox of the account a tool call acts on.
-    async fn mailbox(&self, parts: &Parts) -> Result<Mailbox, String> {
+    async fn mailbox(&self, parts: &Parts) -> Result<Mailbox, ToolError> {
         let account = self.load_account(parts).await?;
         if let Some(provider) = UpstreamProvider::for_mail_provider(account.provider) {
             let tokens = self
@@ -564,9 +568,12 @@ impl MailTools {
                 .as_ref()
                 .filter(|tokens| tokens.oauth().is_configured(provider))
                 .ok_or_else(|| {
-                    format!(
-                        "this server no longer offers {} accounts; ask the person who runs it",
-                        provider.display_name()
+                    ToolError::new(
+                        ToolErrorCode::Unsupported,
+                        format!(
+                            "this server no longer offers {} accounts; ask the person who runs it",
+                            provider.display_name()
+                        ),
                     )
                 })?;
             let api = ApiClient::new(tokens.clone(), account.id, provider);
@@ -582,17 +589,23 @@ impl MailTools {
             .await
             .map_err(|err| {
                 tracing::error!(error = %err, "could not load credentials");
-                "could not load the account's credentials".to_owned()
+                ToolError::new(
+                    account_store_code(&err),
+                    "could not load the account's credentials",
+                )
             })?
             .ok_or_else(|| {
-                "this account is no longer connected; reconnect it from your MCP client".to_owned()
+                ToolError::new(
+                    ToolErrorCode::AuthRequired,
+                    "this account is no longer connected; reconnect it from your MCP client",
+                )
             })?;
         let server = self
             .context
             .servers
             .resolve(stored.imap_server.as_deref())
             .ok_or_else(|| {
-                "this account's mail provider is no longer offered by this server; ask the person who runs it".to_owned()
+                ToolError::new(ToolErrorCode::Unsupported, "this account's mail provider is no longer offered by this server; ask the person who runs it")
             })?;
         let fingerprint = Fingerprint::new(
             server.id.id(),
@@ -611,10 +624,10 @@ impl MailTools {
     }
 }
 
-/// Turns a mail error into a message for the model. Mail errors never
-/// contain credentials or message bodies.
-fn mail_error(err: postkeep_mail::Error) -> String {
-    match err {
+/// Turns a mail error into a tool error. Mail errors never contain credentials or bodies.
+fn mail_error(err: postkeep_mail::Error) -> ToolError {
+    let code = crate::mailbox::mail_code(&err);
+    let message = match err {
         postkeep_mail::Error::Authentication => {
             "the mail server rejected the stored password. It may have been \
              revoked or the account password changed. Reconnect the account with a new password."
@@ -622,34 +635,42 @@ fn mail_error(err: postkeep_mail::Error) -> String {
         }
         postkeep_mail::Error::TimeExhausted => SEARCH_TIME_EXHAUSTED.to_owned(),
         other => other.to_string(),
-    }
+    };
+    ToolError::new(code, message)
 }
 
-/// Turns a mailbox error into a message for the model.
-fn mailbox_error(err: MailboxError) -> String {
+pub(crate) fn mailbox_error(err: MailboxError) -> ToolError {
     match err {
         MailboxError::Mail(err) | MailboxError::Connect(err) => mail_error(err),
-        MailboxError::Message(message) => message,
-        MailboxError::Deadline => TIME_EXHAUSTED.to_owned(),
+        MailboxError::Coded {
+            code,
+            retry_after_seconds,
+            message,
+        } => ToolError::new(code, message).with_delay(retry_after_seconds),
+        MailboxError::Deadline => ToolError::new(ToolErrorCode::Timeout, TIME_EXHAUSTED),
     }
 }
 
-fn parse_date(field: &str, value: Option<&str>) -> Result<Option<chrono::NaiveDate>, String> {
+fn invalid_input(message: impl Into<String>) -> ToolError {
+    ToolError::new(ToolErrorCode::InvalidInput, message)
+}
+
+fn parse_date(field: &str, value: Option<&str>) -> Result<Option<chrono::NaiveDate>, ToolError> {
     value
         .map(|value| {
             chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
-                .map_err(|_| format!("{field} must be a date like 2026-01-31"))
+                .map_err(|_| invalid_input(format!("{field} must be a date like 2026-01-31")))
         })
         .transpose()
 }
 
-fn parse_addresses(field: &str, values: &[String]) -> Result<Vec<EmailAddress>, String> {
+fn parse_addresses(field: &str, values: &[String]) -> Result<Vec<EmailAddress>, ToolError> {
     values
         .iter()
         .map(|value| {
-            value
-                .parse::<EmailAddress>()
-                .map_err(|_| format!("{field}: {value:?} is not a valid email address"))
+            value.parse::<EmailAddress>().map_err(|_| {
+                invalid_input(format!("{field}: {value:?} is not a valid email address"))
+            })
         })
         .collect()
 }
@@ -663,7 +684,7 @@ fn plain_message(
     subject: String,
     body: String,
     files: Vec<NewAttachment>,
-) -> Result<(OutgoingMessage, Uploads), String> {
+) -> Result<(OutgoingMessage, Uploads), ToolError> {
     let (attachments, uploads) = split(files);
     let message = OutgoingMessage {
         to: parse_addresses("to", to)?,
@@ -675,7 +696,7 @@ fn plain_message(
         attachments,
     };
     if message.to.is_empty() && message.cc.is_empty() && message.bcc.is_empty() {
-        return Err("at least one recipient is required".to_owned());
+        return Err(invalid_input("at least one recipient is required"));
     }
     Ok((message, uploads))
 }
@@ -686,7 +707,7 @@ fn plain_reply(
     reply_all: bool,
     to: &[String],
     files: Vec<NewAttachment>,
-) -> Result<(Reply, Uploads), String> {
+) -> Result<(Reply, Uploads), ToolError> {
     let (attachments, uploads) = split(files);
     let reply = Reply {
         text_body: body,
@@ -1468,7 +1489,7 @@ struct ActionInputs {
 }
 
 impl ActionParams {
-    fn selectors(self, permanent: bool) -> Result<ActionInputs, String> {
+    fn selectors(self, permanent: bool) -> Result<ActionInputs, ToolError> {
         let single = self.selector.id.is_some()
             || self.selector.folder.is_some()
             || self.selector.uid.is_some();
@@ -1477,7 +1498,7 @@ impl ActionParams {
             + usize::from(self.selection.is_some())
             > 1
         {
-            return Err("give one of id, ids or selection".to_owned());
+            return Err(invalid_input("give one of id, ids or selection"));
         }
         // A blank single target still counts above so it never lets a bulk target run.
         let non_blank = |s: Option<&str>| s.is_some_and(|v| !v.trim().is_empty());
@@ -1485,31 +1506,30 @@ impl ActionParams {
             || non_blank(self.selector.folder.as_deref())
             || self.selector.uid.is_some();
         if !named && self.ids.is_none() && self.selection.is_none() {
-            return Err("give one of id, ids or selection".to_owned());
+            return Err(invalid_input("give one of id, ids or selection"));
         }
         if permanent && (self.ids.is_some() || self.selection.is_some()) {
-            return Err(
-                "a permanent delete takes one id a call, after the person has confirmed it"
-                    .to_owned(),
-            );
+            return Err(invalid_input(
+                "a permanent delete takes one id a call, after the person has confirmed it",
+            ));
         }
         if permanent && self.dry_run {
-            return Err("a permanent delete has no dry run".to_owned());
+            return Err(invalid_input("a permanent delete has no dry run"));
         }
         let bulk = self.ids.is_some() || self.selection.is_some();
         let selectors = match self.ids {
             Some(mut ids) => {
                 if ids.is_empty() {
-                    return Err("ids is empty".to_owned());
+                    return Err(invalid_input("ids is empty"));
                 }
                 let mut seen = HashSet::new();
                 ids.retain(|id| seen.insert(id.clone()));
                 if ids.len() > MOST_IDS {
-                    return Err(format!(
+                    return Err(invalid_input(format!(
                         "ids has {} ids; at most {} a call",
                         count(ids.len()),
                         count(MOST_IDS)
-                    ));
+                    )));
                 }
                 ids.into_iter()
                     .map(|id| Selector {
@@ -2068,13 +2088,23 @@ const fn move_destination(change: &Change) -> Option<&str> {
     }
 }
 
-fn single_summary(out: &ChangeOutcome, change: &Change) -> Result<String, String> {
+fn single_summary(out: &ChangeOutcome, change: &Change) -> Result<String, ToolError> {
     if out.status != Status::Ok {
-        return Err(if out.reason == TIME_EXHAUSTED {
-            "the message wasn't reached in time; call again".to_owned()
-        } else {
-            out.reason.clone()
-        });
+        if out.reason == TIME_EXHAUSTED {
+            return Err(ToolError::new(
+                ToolErrorCode::Timeout,
+                "the message wasn't reached in time; call again",
+            ));
+        }
+        let (code, retry_after) = out.error.unwrap_or((
+            if out.status == Status::NotFound {
+                ToolErrorCode::NotFound
+            } else {
+                ToolErrorCode::ProviderUnavailable
+            },
+            None,
+        ));
+        return Err(ToolError::new(code, &out.reason).with_delay(retry_after));
     }
     let result = if out.reason == "already there" {
         format!(
@@ -2224,7 +2254,7 @@ fn summary(
     list_all: bool,
     further: Option<bool>,
     left_out: bool,
-) -> Result<ChangeOutput, String> {
+) -> Result<ChangeOutput, ToolError> {
     let counts = Counts::of(&outcomes);
     let dry = mode == Mode::DryRun;
     let list_all = list_all && bulk;
@@ -2503,7 +2533,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         _: Parameters<NoArguments>,
-    ) -> Result<Json<MailboxCapabilities>, String> {
+    ) -> Result<Json<MailboxCapabilities>, ToolError> {
         let account = self.load_account(&parts).await?;
         Ok(Json(MailboxCapabilities::for_account(
             account.provider,
@@ -2527,7 +2557,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         _: Parameters<NoArguments>,
-    ) -> Result<Json<FolderList>, String> {
+    ) -> Result<Json<FolderList>, ToolError> {
         let folders = self
             .mailbox(&parts)
             .await?
@@ -2562,7 +2592,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<SearchParams>,
-    ) -> Result<Json<SearchOutput>, String> {
+    ) -> Result<Json<SearchOutput>, ToolError> {
         let blank: Vec<_> = [
             ("from", &params.from),
             ("to", &params.to),
@@ -2580,10 +2610,10 @@ impl MailTools {
         })
         .collect();
         if !blank.is_empty() {
-            return Err(format!(
+            return Err(invalid_input(format!(
                 "these filters are empty: {}; leave them out to search without them",
                 blank.join(", ")
-            ));
+            )));
         }
         let criteria = Criteria {
             since: parse_date("since", params.since.as_deref())?,
@@ -2617,7 +2647,10 @@ impl MailTools {
                         folder: folder.clone(),
                         criteria,
                     }
-                    .encode(&Self::require_account(&parts)?)?,
+                    .encode(&Self::require_account(&parts)?)
+                    .map_err(|message| {
+                        ToolError::new(ToolErrorCode::ProviderUnavailable, message)
+                    })?,
                 )
             } else {
                 None
@@ -2656,7 +2689,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<GetMessageParams>,
-    ) -> Result<Json<MessageOutput>, String> {
+    ) -> Result<Json<MessageOutput>, ToolError> {
         let fetched = self
             .mailbox(&parts)
             .await?
@@ -2738,7 +2771,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<DownloadAttachmentParams>,
-    ) -> Result<CallToolResult, String> {
+    ) -> Result<CallToolResult, ToolError> {
         self.download(&parts, params).await
     }
 
@@ -2765,7 +2798,7 @@ impl MailTools {
         Extension(parts): Extension<Parts>,
         Parameters(mut params): Parameters<SendParams>,
         cancel: CancellationToken,
-    ) -> Result<Json<SendOutput>, String> {
+    ) -> Result<Json<SendOutput>, ToolError> {
         let parts = &parts;
         self.resolve(parts, &mut params.attachments).await?;
         let files = files_line(&params.attachments);
@@ -2773,7 +2806,9 @@ impl MailTools {
         Box::pin(
             self.hold_step(parts, "send_message", params, ttl, async |params| {
                 if params.forward.is_some() && params.to.is_empty() {
-                    return Err("Not sent: a forward needs at least one to recipient.".to_owned());
+                    return Err(invalid_input(
+                        "Not sent: a forward needs at least one to recipient.",
+                    ));
                 }
                 let (mut message, uploads) = plain_message(
                     &params.to,
@@ -2807,7 +2842,9 @@ impl MailTools {
                             .await
                             .map_err(mailbox_error)?;
                         permit = Some(memory);
-                        forward::build(raw, &mut message)?
+                        forward::build(raw, &mut message).map_err(|message| {
+                            ToolError::new(ToolErrorCode::Unsupported, message)
+                        })?
                     };
                     (Some(mailbox), Some(forwarded))
                 } else {
@@ -2858,7 +2895,7 @@ impl MailTools {
             }),
         )
         .await
-        .map_err(|error| with_files(&error, &files))
+        .map_err(|error| with_files(error, &files))
     }
 
     /// Replies to a message.
@@ -2882,7 +2919,7 @@ impl MailTools {
         Extension(parts): Extension<Parts>,
         Parameters(mut params): Parameters<ReplyParams>,
         cancel: CancellationToken,
-    ) -> Result<Json<SendOutput>, String> {
+    ) -> Result<Json<SendOutput>, ToolError> {
         let parts = &parts;
         self.resolve(parts, &mut params.attachments).await?;
         let files = files_line(&params.attachments);
@@ -2932,7 +2969,7 @@ impl MailTools {
             }),
         )
         .await
-        .map_err(|error| with_files(&error, &files))
+        .map_err(|error| with_files(error, &files))
     }
 
     /// Saves a new draft.
@@ -2955,14 +2992,16 @@ impl MailTools {
         Extension(parts): Extension<Parts>,
         Parameters(mut params): Parameters<CreateDraftParams>,
         cancel: CancellationToken,
-    ) -> Result<Json<CreateDraftOutput>, String> {
+    ) -> Result<Json<CreateDraftOutput>, ToolError> {
         self.resolve(&parts, &mut params.attachments).await?;
         let files = files_line(&params.attachments);
         let bucket = self.context.bucket.as_deref();
         async {
             let saved = if let Some(id) = params.id.filter(|id| !id.trim().is_empty()) {
                 if !params.cc.is_empty() || !params.bcc.is_empty() || !params.subject.is_empty() {
-                    return Err("cc, bcc and subject can't be set when drafting a reply".to_owned());
+                    return Err(invalid_input(
+                        "cc, bcc and subject can't be set when drafting a reply",
+                    ));
                 }
                 let (mut reply, uploads) = plain_reply(
                     params.body,
@@ -3000,7 +3039,9 @@ impl MailTools {
                 self.using_uploads(&parts, &uploads, save).await?
             } else {
                 if params.reply_all {
-                    return Err("reply_all can only be set when drafting a reply".to_owned());
+                    return Err(invalid_input(
+                        "reply_all can only be set when drafting a reply",
+                    ));
                 }
                 let (mut message, uploads) = plain_message(
                     &params.to,
@@ -3034,7 +3075,7 @@ impl MailTools {
             Ok(Json(saved))
         }
         .await
-        .map_err(|error: String| with_files(&error, &files))
+        .map_err(|error| with_files(error, &files))
     }
 
     /// Marks messages read/unread or flagged/unflagged.
@@ -3052,12 +3093,14 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<FlagParams>,
-    ) -> Result<Json<ChangeOutput>, String> {
+    ) -> Result<Json<ChangeOutput>, ToolError> {
         if params.read.is_none() && params.flagged.is_none() {
-            return Err("set read and/or flagged".to_owned());
+            return Err(invalid_input("set read and/or flagged"));
         }
         if params.selection.is_some() && params.read.is_some() && params.flagged.is_some() {
-            return Err("with a selection, change read or flagged, one per call".to_owned());
+            return Err(invalid_input(
+                "with a selection, change read or flagged, one per call",
+            ));
         }
         let change = Change::Flags {
             read: params.read,
@@ -3083,7 +3126,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<MoveParams>,
-    ) -> Result<Json<ChangeOutput>, String> {
+    ) -> Result<Json<ChangeOutput>, ToolError> {
         let change = Change::Move(params.destination.clone());
         self.act(&parts, action_params!(params), change, false)
             .await
@@ -3105,7 +3148,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<DeleteParams>,
-    ) -> Result<Json<ChangeOutput>, String> {
+    ) -> Result<Json<ChangeOutput>, ToolError> {
         let permanent = params.permanent;
         self.act(&parts, action_params!(params), Change::Trash, permanent)
             .await
@@ -3127,10 +3170,10 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<CreateFolderParams>,
-    ) -> Result<Json<ActionOutput>, String> {
+    ) -> Result<Json<ActionOutput>, ToolError> {
         let name = params.name.trim();
         if name.is_empty() {
-            return Err("the folder name is empty".to_owned());
+            return Err(invalid_input("the folder name is empty"));
         }
         self.mailbox(&parts)
             .await?
@@ -3160,13 +3203,23 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(NoArguments {}): Parameters<NoArguments>,
-    ) -> Result<Json<UploadOutput>, String> {
+    ) -> Result<Json<UploadOutput>, ToolError> {
         if self.context.bucket.is_none() {
-            return Err(UPLOADS_OFF.to_owned());
+            return Err(ToolError::new(ToolErrorCode::Unsupported, UPLOADS_OFF));
         }
         let (account, caller) = caller(&parts)?;
-        let id = pkce::random_token().map_err(|_| "could not make an upload id")?;
-        let token = pkce::random_token().map_err(|_| "could not make an upload token")?;
+        let id = pkce::random_token().map_err(|_| {
+            ToolError::new(
+                ToolErrorCode::ProviderUnavailable,
+                "could not make an upload id",
+            )
+        })?;
+        let token = pkce::random_token().map_err(|_| {
+            ToolError::new(
+                ToolErrorCode::ProviderUnavailable,
+                "could not make an upload token",
+            )
+        })?;
         let expires_at = self
             .context
             .store
@@ -3180,13 +3233,24 @@ impl MailTools {
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "could not make an upload");
-                "could not make an upload just now; try again in a minute".to_owned()
+                ToolError::new(
+                    ToolErrorCode::ProviderUnavailable,
+                    "could not make an upload just now; try again in a minute",
+                )
             })?
-            .ok_or(
-                "Too many uploads are waiting for their files here. Send their files, or wait \
+            .ok_or_else(|| {
+                ToolError::new(
+                    ToolErrorCode::Busy,
+                    "Too many uploads are waiting for their files here. Send their files, or wait \
                  for them to end.",
-            )?;
-        let expires_at = rfc3339(expires_at).ok_or("could not read the upload's end")?;
+                )
+            })?;
+        let expires_at = rfc3339(expires_at).ok_or_else(|| {
+            ToolError::new(
+                ToolErrorCode::ProviderUnavailable,
+                "could not read the upload's end",
+            )
+        })?;
         let url = self.context.upload_url.clone();
         Ok(Json(UploadOutput {
             next: upload_next(&id, &url, &token, &expires_at),
@@ -3211,7 +3275,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         _: Parameters<NoArguments>,
-    ) -> Result<Json<WebhookStatus>, String> {
+    ) -> Result<Json<WebhookStatus>, ToolError> {
         let account = Self::require_account(&parts)?;
         let limits = self.mailbox_limits(&parts, &account).await;
         self.webhook_status(&parts, &account, limits)
@@ -3234,13 +3298,14 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<SetWebhookEnabledParams>,
-    ) -> Result<Json<WebhookStatus>, String> {
+    ) -> Result<Json<WebhookStatus>, ToolError> {
         let account = Self::require_account(&parts)?;
         let available = self.context.webhooks.is_some();
         if params.enabled && !available {
-            return Err(
-                "Webhooks are turned off on this server (POSTKEEP_WEBHOOKS=false).".to_owned(),
-            );
+            return Err(ToolError::new(
+                ToolErrorCode::Unsupported,
+                "Webhooks are turned off on this server (POSTKEEP_WEBHOOKS=false).",
+            ));
         }
         // The account page can store an empty URL while alerts are off.
         // Enabling that row would start the watcher and then fail every
@@ -3253,7 +3318,7 @@ impl MailTools {
                         account_id = %account,
                         "refusing to enable a webhook that has no usable endpoint"
                     );
-                    return Err(self.problem_words(
+                    return Err(self.problem_error(
                         &parts,
                         &account,
                         &WebhookProblemKind::NoEndpoint,
@@ -3271,7 +3336,7 @@ impl MailTools {
             .map_err(webhook_store_error)?;
         match updated {
             LoadedWebhook::Missing => {
-                return Err(self.problem_words(&parts, &account, &WebhookProblemKind::NoWebhook));
+                return Err(self.problem_error(&parts, &account, &WebhookProblemKind::NoWebhook));
             }
             LoadedWebhook::Unreadable { .. } if params.enabled => {
                 // The store did not change the row. Do not wake the watcher:
@@ -3281,7 +3346,7 @@ impl MailTools {
                     "refusing to enable webhook settings that can't be read"
                 );
                 let kind = WebhookProblemKind::Unreadable { turning_on: true };
-                return Err(self.problem_words(&parts, &account, &kind));
+                return Err(self.problem_error(&parts, &account, &kind));
             }
             LoadedWebhook::Ready(_) | LoadedWebhook::Unreadable { .. } => {}
         }
@@ -3316,7 +3381,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<SetWebhookOutboxLimitsParams>,
-    ) -> Result<Json<WebhookOutboxUpdate>, String> {
+    ) -> Result<Json<WebhookOutboxUpdate>, ToolError> {
         let account = Self::require_account(&parts)?;
         // `reset` wins, so a caller can return to the defaults without a
         // parseable retention. Do not wake the outbox pump: deleting old
@@ -3332,10 +3397,16 @@ impl MailTools {
         // The store checks the server's ceilings; these can be lower.
         let limits = self.mailbox_limits(&parts, &account).await;
         if let OutboxLimitChange::Set(secs) = retention {
-            limits.outbox.check_retention_secs(secs)?;
+            limits
+                .outbox
+                .check_retention_secs(secs)
+                .map_err(invalid_input)?;
         }
         if let OutboxLimitChange::Set(events) = max_events {
-            limits.outbox.check_max_events(events)?;
+            limits
+                .outbox
+                .check_max_events(events)
+                .map_err(invalid_input)?;
         }
         let Some(applied) = self
             .context
@@ -3344,7 +3415,7 @@ impl MailTools {
             .await
             .map_err(webhook_store_error)?
         else {
-            return Err(self.problem_words(&parts, &account, &WebhookProblemKind::NoWebhook));
+            return Err(self.problem_error(&parts, &account, &WebhookProblemKind::NoWebhook));
         };
         Ok(Json(WebhookOutboxUpdate {
             status: self.webhook_status(&parts, &account, limits).await?,
@@ -3366,7 +3437,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<ListWebhookFiltersParams>,
-    ) -> Result<Json<WebhookFilterList>, String> {
+    ) -> Result<Json<WebhookFilterList>, ToolError> {
         self.list_filters(&parts, params).await.map(Json)
     }
 
@@ -3385,7 +3456,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<AddWebhookFilterParams>,
-    ) -> Result<Json<WebhookFilterAdded>, String> {
+    ) -> Result<Json<WebhookFilterAdded>, ToolError> {
         self.add_filter(&parts, params).await.map(Json)
     }
 
@@ -3404,7 +3475,7 @@ impl MailTools {
         &self,
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<RemoveWebhookFilterParams>,
-    ) -> Result<Json<WebhookFilterRemoval>, String> {
+    ) -> Result<Json<WebhookFilterRemoval>, ToolError> {
         self.remove_filter(&parts, params).await.map(Json)
     }
 
@@ -3439,7 +3510,7 @@ impl MailTools {
         &self,
         account: &AccountId,
         limit: usize,
-    ) -> Result<(FilterRuleCounts, Option<WebhookProblemKind>), String> {
+    ) -> Result<(FilterRuleCounts, Option<WebhookProblemKind>), ToolError> {
         let store = &self.context.store;
         match store.webhook_filter_rules(account, limit).await {
             Ok(rules) => {
@@ -3468,7 +3539,7 @@ impl MailTools {
         parts: &Parts,
         account: &AccountId,
         allowed: MailboxLimits,
-    ) -> Result<WebhookStatus, String> {
+    ) -> Result<WebhookStatus, ToolError> {
         let ceilings = allowed.outbox;
         let available = self.context.webhooks.is_some();
         let interval = self.context.webhooks.as_ref().map_or_else(
@@ -3540,7 +3611,7 @@ impl MailTools {
         &self,
         parts: &Parts,
         account: &AccountId,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, ToolError> {
         let store = &self.context.store;
         if store
             .password_rejected_at(account)
@@ -3580,8 +3651,22 @@ impl MailTools {
             .unwrap_or_else(|| server_words(kind))
     }
 
+    fn problem_error(
+        &self,
+        parts: &Parts,
+        account: &AccountId,
+        kind: &WebhookProblemKind,
+    ) -> ToolError {
+        let code = match kind {
+            WebhookProblemKind::NoWebhook => ToolErrorCode::NotFound,
+            WebhookProblemKind::NoEndpoint => ToolErrorCode::InvalidInput,
+            _ => ToolErrorCode::Unsupported,
+        };
+        ToolError::new(code, self.problem_words(parts, account, kind))
+    }
+
     /// Events waiting for this account. The count does not include payloads.
-    async fn pending_webhook_events(&self, account: &AccountId) -> Result<i64, String> {
+    async fn pending_webhook_events(&self, account: &AccountId) -> Result<i64, ToolError> {
         self.context
             .store
             .pending_mail_event_count(account)
@@ -3592,21 +3677,24 @@ impl MailTools {
 
 /// A store failure for a tool result. Decryption is explained without
 /// echoing stored values; `StoreError` itself never contains them.
-fn webhook_store_error(err: StoreError) -> String {
+fn webhook_store_error(err: StoreError) -> ToolError {
     match err {
         StoreError::Decrypt => {
             tracing::warn!("webhook settings can't be read with the configured keys");
-            UNREADABLE_WEBHOOK.to_owned()
+            ToolError::new(ToolErrorCode::Unsupported, UNREADABLE_WEBHOOK)
         }
-        StoreError::OutboxLimit(message) => message,
+        StoreError::OutboxLimit(message) => invalid_input(message),
         err => {
             tracing::error!(error = %err, "could not read the webhook");
-            "could not read the webhook".to_owned()
+            ToolError::new(
+                ToolErrorCode::ProviderUnavailable,
+                "could not read the webhook",
+            )
         }
     }
 }
 
-fn retention_change(input: OutboxLimitInput) -> Result<OutboxLimitChange<i64>, String> {
+fn retention_change(input: OutboxLimitInput) -> Result<OutboxLimitChange<i64>, ToolError> {
     match input {
         OutboxLimitInput::Keep => Ok(OutboxLimitChange::Keep),
         OutboxLimitInput::Default | OutboxLimitInput::Value(serde_json::Value::Null) => {
@@ -3622,13 +3710,13 @@ fn retention_change(input: OutboxLimitInput) -> Result<OutboxLimitChange<i64>, S
             Ok(OutboxLimitChange::Set(secs))
         }
         OutboxLimitInput::Value(serde_json::Value::String(text)) => Ok(OutboxLimitChange::Set(
-            crate::retention::parse_retention(&text)?,
+            crate::retention::parse_retention(&text).map_err(invalid_input)?,
         )),
         OutboxLimitInput::Value(_) => Err(retention_syntax()),
     }
 }
 
-fn events_change(input: OutboxLimitInput) -> Result<OutboxLimitChange<i64>, String> {
+fn events_change(input: OutboxLimitInput) -> Result<OutboxLimitChange<i64>, ToolError> {
     match input {
         OutboxLimitInput::Keep => Ok(OutboxLimitChange::Keep),
         OutboxLimitInput::Default | OutboxLimitInput::Value(serde_json::Value::Null) => {
@@ -3653,21 +3741,21 @@ fn json_whole_i64(number: &serde_json::Number) -> Option<i64> {
         .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok()))
 }
 
-fn retention_syntax() -> String {
-    "retention must be a whole number of seconds or a duration like 36h, 30d or 90m".to_owned()
+fn retention_syntax() -> ToolError {
+    invalid_input("retention must be a whole number of seconds or a duration like 36h, 30d or 90m")
 }
 
-fn events_syntax() -> String {
-    "outbox max events must be a whole number, or \"default\"".to_owned()
+fn events_syntax() -> ToolError {
+    invalid_input("outbox max events must be a whole number, or \"default\"")
 }
 
-fn decode_selection(value: &str, parts: &Parts) -> Result<SearchSelection, String> {
+fn decode_selection(value: &str, parts: &Parts) -> Result<SearchSelection, ToolError> {
     SearchSelection::decode(value, &selector::account(&parts.extensions)?).map_err(|_| {
-        if parts.extensions.get::<Selection>().is_some() {
-            MAILBOX_REFUSAL.to_owned()
+        invalid_input(if parts.extensions.get::<Selection>().is_some() {
+            MAILBOX_REFUSAL
         } else {
-            REFUSAL.to_owned()
-        }
+            REFUSAL
+        })
     })
 }
 
@@ -3678,7 +3766,7 @@ impl MailTools {
         params: ActionParams,
         change: Change,
         permanent: bool,
-    ) -> Result<ChangeOutput, String> {
+    ) -> Result<ChangeOutput, ToolError> {
         let ActionInputs {
             mut ids,
             selection,
@@ -3800,7 +3888,16 @@ impl MailTools {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let call = ToolCallContext::new(self, request, context);
-        self.context.router.call(call).await
+        let response = self.context.router.call(call).await?;
+        if let CallToolResponse::Complete(result) = &response
+            && result.is_error == Some(true)
+            && let [content] = result.content.as_slice()
+            && let Some(text) = content.as_text()
+            && text.text.starts_with("failed to deserialize parameters:")
+        {
+            return Ok(invalid_input(&text.text).into_result().into());
+        }
+        Ok(response)
     }
 
     /// A call with a tool extension or a usage hook installed: the tool is
@@ -3835,7 +3932,9 @@ impl MailTools {
             note.tool(&tool.name);
         }
         let mailbox = match parts.and_then(|parts| parts.extensions.get::<Selection>()) {
-            Some(Selection::Refused(message)) => return Ok(tool_error(message)),
+            Some(Selection::Refused { code, message }) => {
+                return Ok(ToolError::new(*code, message).into_result().into());
+            }
             Some(Selection::Mailbox(account)) => Some(account),
             Some(Selection::Default) | None => None,
         };
@@ -3849,7 +3948,7 @@ impl MailTools {
             .with_arguments(request.arguments.as_ref())
             .with_mailbox(mailbox);
         if let Some(refusal) = self.refusal(extension, check).await {
-            return Ok(tool_error(refusal.message()));
+            return Ok(ToolError::from_refusal(&refusal).into_result().into());
         }
         let ended = self.context.usage.clone().map(|usage| CallEnded {
             usage,
@@ -3906,20 +4005,24 @@ impl MailTools {
     /// `prepare` checks the message and pins any original before asking to hold or taking a hold.
     /// Sending waits for the returned future, after the hold and the usage check. A hold lasts
     /// `ttl`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the hold lifecycle keeps one-shot consumption and its errors together"
+    )]
     async fn hold_step<P, F>(
         &self,
         parts: &Parts,
         tool: &str,
         params: P,
         ttl: Duration,
-        prepare: impl AsyncFnOnce(P) -> Result<(Option<forward::Forwarded>, F), String>,
-    ) -> Result<Json<SendOutput>, String>
+        prepare: impl AsyncFnOnce(P) -> Result<(Option<forward::Forwarded>, F), ToolError>,
+    ) -> Result<Json<SendOutput>, ToolError>
     where
         P: Serialize,
-        F: Future<Output = Result<SentMessage, String>>,
+        F: Future<Output = Result<SentMessage, ToolError>>,
     {
-        let mut arguments =
-            serde_json::to_value(&params).map_err(|_| "could not read the message arguments")?;
+        let mut arguments = serde_json::to_value(&params)
+            .map_err(|_| invalid_input("could not read the message arguments"))?;
         let hold_id = arguments
             .as_object_mut()
             .and_then(|arguments| arguments.remove("hold_id"))
@@ -3938,7 +4041,7 @@ impl MailTools {
         };
         let store_error = |error: StoreError| {
             tracing::error!(error = %error, "could not read or store a held message");
-            HOLD_FAILED.to_owned()
+            ToolError::new(ToolErrorCode::ProviderUnavailable, HOLD_FAILED)
         };
         if hold_id.is_some() {
             match self
@@ -3949,8 +4052,15 @@ impl MailTools {
                 .map_err(store_error)?
             {
                 HeldSendMatch::Matched => {}
-                HeldSendMatch::Differs => return Err(different_hold()),
-                HeldSendMatch::Missing => return Err(NO_HOLD.to_owned()),
+                HeldSendMatch::Differs => {
+                    return Err(ToolError::new(
+                        ToolErrorCode::HoldMismatch,
+                        different_hold(),
+                    ));
+                }
+                HeldSendMatch::Missing => {
+                    return Err(ToolError::new(ToolErrorCode::HoldExpired, NO_HOLD));
+                }
             }
         }
         let result = async {
@@ -3969,17 +4079,27 @@ impl MailTools {
                     .get("attachments")
                     .map(Deserialize::deserialize)
                     .transpose()
-                    .map_err(|_| "could not read the held attachments")?
+                    .map_err(|_| invalid_input("could not read the held attachments"))?
                     .unwrap_or_default();
-                let id = pkce::random_token().map_err(|_| "could not make a hold id")?;
+                let id = pkce::random_token().map_err(|_| {
+                    ToolError::new(
+                        ToolErrorCode::ProviderUnavailable,
+                        "could not make a hold id",
+                    )
+                })?;
                 let expires_at = self
                     .context
                     .store
                     .hold_send(HeldSend { id: &id, ..held }, ttl, MOST_HELD)
                     .await
                     .map_err(store_error)?
-                    .ok_or(MOST_WAITING)?;
-                let expires_at = rfc3339(expires_at).ok_or("could not read the hold expiry")?;
+                    .ok_or_else(|| ToolError::new(ToolErrorCode::Busy, MOST_WAITING))?;
+                let expires_at = rfc3339(expires_at).ok_or_else(|| {
+                    ToolError::new(
+                        ToolErrorCode::ProviderUnavailable,
+                        "could not read the hold expiry",
+                    )
+                })?;
                 if let Some(note) = Note::of(Some(parts)) {
                     note.held();
                 }
@@ -4004,7 +4124,7 @@ impl MailTools {
         .await;
         result.map_err(|error| {
             if hold_id.is_some() {
-                with_files(&error, &format!(" {AFTER_TAKE}"))
+                with_files(error, &format!(" {AFTER_TAKE}"))
             } else {
                 error
             }
@@ -4013,7 +4133,7 @@ impl MailTools {
 
     /// Asks the usage hook whether the caller may send a message, or a
     /// reply, from the mailbox the call acts on.
-    async fn check_send(&self, parts: &Parts, tool: &str) -> Result<(), String> {
+    async fn check_send(&self, parts: &Parts, tool: &str) -> Result<(), ToolError> {
         let caller = parts.extensions.get::<Authenticated>();
         // Without a caller, opening the mailbox fails next.
         let (Some(usage), Some(caller)) = (self.context.usage.as_deref(), caller) else {
@@ -4026,7 +4146,7 @@ impl MailTools {
             if let Some(note) = Note::of(Some(parts)) {
                 note.send_refused();
             }
-            refusal.message().to_owned()
+            ToolError::from_refusal(&refusal)
         })
     }
 }
@@ -4079,11 +4199,6 @@ impl Drop for CallEnded {
     }
 }
 
-/// A tool error, as the server's tools return one.
-fn tool_error(message: &str) -> CallToolResponse {
-    CallToolResult::error(vec![ContentBlock::text(message.to_owned())]).into()
-}
-
 #[tool_handler(router = self.context.router)]
 #[allow(
     clippy::unused_async_trait_impl,
@@ -4122,7 +4237,7 @@ impl ServerHandler for MailTools {
         let note = Note::of(parts);
         let refused = matches!(
             parts.and_then(|parts| parts.extensions.get::<Selection>()),
-            Some(Selection::Refused(_))
+            Some(Selection::Refused { .. })
         );
         // Before the call, so an answer the timeout cuts off still names it.
         if let Some(note) = &note
@@ -4295,7 +4410,83 @@ mod tests {
         format_address, forward, inline_images, message_summary, next_page_offset, next_step,
         pin_forward, redact_delivery_summary, upload_next,
     };
+    use postkeep_auth::ToolErrorCode;
     use postkeep_mail::MessageFlags;
+
+    #[test]
+    fn errors_keep_the_mail_and_webhook_prose_with_a_typed_cause() {
+        use super::{MailboxError, mail_error, mailbox_error, webhook_store_error};
+        use postkeep_mail::Error;
+        use postkeep_store::StoreError;
+        for (err, code) in [
+            (Error::Authentication, ToolErrorCode::AuthRequired),
+            (
+                Error::FolderNotFound("INBOX".into()),
+                ToolErrorCode::NotFound,
+            ),
+            (Error::MessageTooLarge, ToolErrorCode::PayloadTooLarge),
+            (Error::TimeExhausted, ToolErrorCode::Timeout),
+            (Error::Timeout, ToolErrorCode::Timeout),
+            (Error::WriteUnconfirmed, ToolErrorCode::SubmissionUncertain),
+            (
+                Error::SubmissionUnconfirmed,
+                ToolErrorCode::SubmissionUncertain,
+            ),
+        ] {
+            assert_eq!(mail_error(err).code(), code);
+        }
+        let err = mailbox_error(MailboxError::Coded {
+            code: ToolErrorCode::RateLimited,
+            message: "wait".into(),
+            retry_after_seconds: Some(3),
+        });
+        assert_eq!(
+            (err.code(), err.message(), err.retry_after_seconds()),
+            (ToolErrorCode::RateLimited, "wait", Some(3))
+        );
+        assert_eq!(
+            webhook_store_error(StoreError::Decrypt).code(),
+            ToolErrorCode::Unsupported
+        );
+        let err = webhook_store_error(StoreError::OutboxLimit("too many".into()));
+        assert_eq!(
+            (err.code(), err.message()),
+            (ToolErrorCode::InvalidInput, "too many")
+        );
+    }
+
+    #[test]
+    fn not_reached_does_not_by_itself_mean_timeout() {
+        use super::{Change, ChangeOutcome, Status, TIME_EXHAUSTED, single_summary};
+        let change = Change::Trash;
+        let mut out = ChangeOutcome {
+            id: "id".into(),
+            status: Status::NotReached,
+            new_id: None,
+            reason: "waiting".into(),
+            error: None,
+        };
+        assert_eq!(
+            single_summary(&out, &change).unwrap_err().code(),
+            ToolErrorCode::ProviderUnavailable
+        );
+        out.error = Some((ToolErrorCode::RateLimited, Some(5)));
+        let err = single_summary(&out, &change).unwrap_err();
+        assert_eq!(
+            (err.code(), err.retry_after_seconds()),
+            (ToolErrorCode::RateLimited, Some(5))
+        );
+        out.error = Some((ToolErrorCode::Timeout, None));
+        assert_eq!(
+            single_summary(&out, &change).unwrap_err().code(),
+            ToolErrorCode::Timeout
+        );
+        out.reason = TIME_EXHAUSTED.into();
+        assert_eq!(
+            single_summary(&out, &change).unwrap_err().message(),
+            "the message wasn't reached in time; call again"
+        );
+    }
 
     #[test]
     fn capabilities_operations_match_registered_tool_router() {
@@ -4355,7 +4546,7 @@ mod tests {
             json!({ "id": " " }),
         ] {
             assert_eq!(
-                parse(value).unwrap_err(),
+                parse(value).unwrap_err().message(),
                 "give one of id, ids or selection"
             );
         }
@@ -4374,7 +4565,7 @@ mod tests {
                 "a permanent delete has no dry run",
             ),
         ] {
-            assert_eq!(parse(value).unwrap_err(), reason);
+            assert_eq!(parse(value).unwrap_err().message(), reason);
         }
         let selected = parse(json!({ "selection": "placeholder" })).unwrap();
         assert!(selected.bulk && selected.ids.is_empty());
@@ -4396,13 +4587,16 @@ mod tests {
                 super::REFUSAL
             };
             assert_eq!(
-                super::decode_selection("garbled", &parts).err().unwrap(),
+                super::decode_selection("garbled", &parts)
+                    .err()
+                    .unwrap()
+                    .message(),
                 expected
             );
         }
         let too_many: Vec<_> = (0..MOST_IDS + 200).map(|i| i.to_string()).collect();
         assert_eq!(
-            parse(json!({ "ids": too_many })).unwrap_err(),
+            parse(json!({ "ids": too_many })).unwrap_err().message(),
             format!(
                 "ids has {} ids; at most {} a call",
                 super::count(MOST_IDS + 200),
@@ -4434,12 +4628,13 @@ mod tests {
         change: &super::Change,
         mode: super::Mode,
         list: bool,
-    ) -> Result<super::ChangeOutput, String> {
+    ) -> Result<super::ChangeOutput, super::ToolError> {
         let outcome = super::ChangeOutcome {
             id,
             status,
             new_id: new_id.map(str::to_owned),
             reason: reason.to_owned(),
+            error: None,
         };
         super::summary(vec![outcome], change, mode, false, list, None, false)
     }
@@ -4451,7 +4646,7 @@ mod tests {
         use super::{Change, Counts, Mode, SEARCH_TIME_EXHAUSTED, Status, mail_error};
         let run = single_change_result;
         assert_eq!(
-            mail_error(postkeep_mail::Error::TimeExhausted),
+            mail_error(postkeep_mail::Error::TimeExhausted).message(),
             SEARCH_TIME_EXHAUSTED
         );
         let one_changed = Counts {
@@ -4524,7 +4719,7 @@ mod tests {
                 };
                 let id = crate::mailbox::id::imap_id("INBOX", 88, Some(7));
                 let err = run(id, status, None, reason, &change, Mode::Act, false).unwrap_err();
-                assert_eq!(err, reason);
+                assert_eq!(err.message(), reason);
             }
         }
         assert_single_already_and_no_new_id();
@@ -4589,6 +4784,7 @@ mod tests {
             status: Status::Ok,
             reason: reason.to_owned(),
             new_id: new_id.map(str::to_owned),
+            error: None,
         };
         let moved = Change::Move("Archive".to_owned());
         for (mode, change, ids, expected) in [
@@ -4658,6 +4854,7 @@ mod tests {
                             new_id: (i < mapped).then(|| format!("new-{i:02}")),
                             status: Status::Ok,
                             reason: String::new(),
+                            error: None,
                         })
                         .collect();
                     let out = summary(outcomes, change, Mode::Act, true, list_all, further, false)
@@ -4732,6 +4929,7 @@ mod tests {
             status: Status::Ok,
             reason: caveat.to_owned(),
             new_id: Some("new".to_owned()),
+            error: None,
         };
         for (mode, expected) in [
             (Mode::Act, format!("2 messages: 2 moved to INBOX; {caveat}")),
@@ -4772,6 +4970,7 @@ mod tests {
             status,
             new_id: (kind == OutcomeKind::Changed).then(|| format!("new-{i}")),
             reason: reason.to_owned(),
+            error: None,
         }
     }
 
@@ -4910,6 +5109,7 @@ mod tests {
                 new_id: None,
                 reason: "no such message in INBOX; it may have been moved: search Archive"
                     .to_owned(),
+                error: None,
             })
             .collect();
         let out = summary(
@@ -4996,6 +5196,7 @@ mod tests {
                         status: Status::Failed,
                         reason: "request refused".to_owned(),
                         new_id: None,
+                        error: None,
                     }],
                     &change,
                     Mode::Act,

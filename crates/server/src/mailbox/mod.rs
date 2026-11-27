@@ -13,12 +13,14 @@ pub mod selection;
 
 use std::time::Instant;
 
+use postkeep_auth::ToolErrorCode;
 use postkeep_mail::{
-    AttachmentData, Check, DeleteMode, EmailAddress, Flag, Folder, ImapSession, InFlight,
-    MailClient, Message, MessageFlags, OutgoingMessage, Paging, Progress, Reply, SearchQuery,
-    SendOptions, SentMessage, SpecialUse, UID_SET_MAX, Uid, already_in_trash, same_folder,
+    AttachmentData, Check, DeleteMode, EmailAddress, Error as MailError, Flag, Folder, ImapSession,
+    InFlight, MailClient, Message, MessageFlags, OutgoingMessage, Paging, Progress,
+    ProtocolErrorKind, Reply, SearchQuery, SendOptions, SentMessage, SpecialUse, UID_SET_MAX, Uid,
+    already_in_trash, same_folder,
 };
-use postkeep_store::{AccountId, Provider, Store};
+use postkeep_store::{AccountId, Provider, Store, StoreError};
 use postkeep_upstream::{ApiError, http::HttpError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -167,9 +169,12 @@ impl Criteria {
             } else {
                 continue;
             };
-            return Err(MailboxError::Message(format!(
-                "{provider} can't match the {filter} filter exactly as given, so a selection can't use it; {hint}"
-            )));
+            return Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
+                format!(
+                    "{provider} can't match the {filter} filter exactly as given, so a selection can't use it; {hint}"
+                ),
+            ));
         }
         Ok(())
     }
@@ -210,9 +215,10 @@ fn words(filter: &str, value: &str, provider: &str) -> MailboxResult<Vec<String>
         .map(str::to_lowercase)
         .collect();
     if words.is_empty() {
-        return Err(MailboxError::Message(format!(
-            "the {filter} filter has no word {provider} can search for; use other words"
-        )));
+        return Err(MailboxError::coded(
+            ToolErrorCode::InvalidInput,
+            format!("the {filter} filter has no word {provider} can search for; use other words"),
+        ));
     }
     Ok(words)
 }
@@ -288,9 +294,12 @@ impl Selected {
     }
 
     fn kept_folder(folder: &str, most: usize) -> MailboxError {
-        MailboxError::Message(format!(
-            "this move keeps the messages in {folder} too, so a selection moves at most {most} of them; narrow the search"
-        ))
+        MailboxError::coded(
+            ToolErrorCode::InvalidInput,
+            format!(
+                "this move keeps the messages in {folder} too, so a selection moves at most {most} of them; narrow the search"
+            ),
+        )
     }
 
     fn matches(ids: impl IntoIterator<Item = String>, more: bool) -> Self {
@@ -435,32 +444,35 @@ fn maybe_sent(error: SendError) -> MailboxError {
         SendError::Mail(error) if !matches!(error, postkeep_mail::Error::SubmissionUnconfirmed) => {
             error.into()
         }
-        _ => MAY_HAVE_BEEN_SENT.to_owned().into(),
+        _ => MailboxError::coded(ToolErrorCode::SubmissionUncertain, MAY_HAVE_BEEN_SENT),
     }
 }
 
 fn too_large_to_forward() -> MailboxError {
-    MailboxError::Message(TOO_LARGE_TO_FORWARD.to_owned())
+    MailboxError::coded(ToolErrorCode::PayloadTooLarge, TOO_LARGE_TO_FORWARD)
 }
 
 /// A forward whose original and uploads together are over the memory budget.
 fn beyond_budget(original: usize, uploads: usize) -> MailboxError {
     use crate::limits::megabytes;
-    format!(
-        "Not sent: the forwarded message ({}) and the uploaded files ({}), with the room an \
+    MailboxError::coded(
+        ToolErrorCode::PayloadTooLarge,
+        format!(
+            "Not sent: the forwarded message ({}) and the uploaded files ({}), with the room an \
          original needs, are {}. Forward it with fewer files, and send the rest in another message.",
-        megabytes(original),
-        megabytes(uploads),
-        crate::limits::beyond_budget()
+            megabytes(original),
+            megabytes(uploads),
+            crate::limits::beyond_budget()
+        ),
     )
-    .into()
 }
 
 fn forward_size_error(reserved: usize) -> MailboxError {
     if reserved < postkeep_upstream::http::MESSAGE_LIMIT {
-        "The message to forward was larger than the provider reported; nothing was sent."
-            .to_owned()
-            .into()
+        MailboxError::coded(
+            ToolErrorCode::PayloadTooLarge,
+            "The message to forward was larger than the provider reported; nothing was sent.",
+        )
     } else {
         too_large_to_forward()
     }
@@ -548,6 +560,7 @@ pub struct Outcome {
     pub new_id: Option<String>,
     /// Advice or the error, already worded for the caller.
     pub reason: String,
+    pub(crate) error: Option<(ToolErrorCode, Option<u64>)>,
 }
 
 impl Outcome {
@@ -563,12 +576,39 @@ impl Outcome {
             status: Status::NotReached,
             new_id: None,
             reason: TIME_EXHAUSTED.to_owned(),
+            error: Some((ToolErrorCode::Timeout, None)),
         }
     }
 
-    fn finish(&mut self, status: Status, reason: impl Into<String>) {
+    fn ok(&mut self, reason: impl Into<String>) {
+        self.status = Status::Ok;
+        self.reason = reason.into();
+        self.error = None;
+    }
+
+    fn fail(
+        &mut self,
+        status: Status,
+        reason: impl Into<String>,
+        code: ToolErrorCode,
+        retry_after: Option<u64>,
+    ) {
+        assert!(
+            status != Status::Ok,
+            "successful outcomes must clear their error"
+        );
         self.status = status;
         self.reason = reason.into();
+        self.error = Some((code, retry_after));
+    }
+
+    fn reset_pending(&mut self) {
+        self.fail(
+            Status::NotReached,
+            TIME_EXHAUSTED,
+            ToolErrorCode::Timeout,
+            None,
+        );
     }
 }
 
@@ -584,7 +624,12 @@ fn provider_outcomes(ids: &[Selector], prefix: &str) -> (Vec<Outcome>, Vec<(usiz
                 Ok(raw) => {
                     valid.push((index, raw.to_owned()));
                 }
-                Err(err) => out.finish(Status::Failed, err.to_string()),
+                Err(err) => out.fail(
+                    Status::Failed,
+                    err.to_string(),
+                    ToolErrorCode::InvalidInput,
+                    None,
+                ),
             }
             out
         })
@@ -641,14 +686,111 @@ pub enum MailboxError {
     /// An IMAP or SMTP error.
     #[error(transparent)]
     Mail(#[from] postkeep_mail::Error),
-    /// A message for the model.
-    #[error("{0}")]
-    Message(String),
+    /// A classified failure, already phrased for the model.
+    #[error("{message}")]
+    Coded {
+        /// Machine-readable error code.
+        code: ToolErrorCode,
+        /// Suggested retry delay in seconds, if any.
+        retry_after_seconds: Option<u64>,
+        /// What the caller is told.
+        message: String,
+    },
 }
 
-impl From<String> for MailboxError {
-    fn from(message: String) -> Self {
-        Self::Message(message)
+impl MailboxError {
+    /// Creates a mailbox error with a code and no retry delay.
+    #[must_use]
+    pub fn coded(code: ToolErrorCode, message: impl Into<String>) -> Self {
+        Self::Coded {
+            code,
+            retry_after_seconds: None,
+            message: message.into(),
+        }
+    }
+
+    /// The machine-readable error code.
+    #[must_use]
+    pub fn code(&self) -> ToolErrorCode {
+        match self {
+            Self::Coded { code, .. } => *code,
+            Self::Deadline => ToolErrorCode::Timeout,
+            Self::Connect(err) | Self::Mail(err) => mail_code(err),
+        }
+    }
+
+    /// The suggested retry delay in seconds, if any.
+    #[must_use]
+    pub const fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Coded {
+                retry_after_seconds,
+                ..
+            } => *retry_after_seconds,
+            _ => None,
+        }
+    }
+
+    /// Classifies the error and returns its optional retry delay.
+    #[must_use]
+    pub fn classify(&self) -> (ToolErrorCode, Option<u64>) {
+        (self.code(), self.retry_after_seconds())
+    }
+
+    /// Changes only the caller-facing message, preserving the classification.
+    #[must_use]
+    pub fn map_message(self, map: impl FnOnce(String) -> String) -> Self {
+        let (code, retry_after_seconds) = self.classify();
+        let message = match self {
+            Self::Coded { message, .. } => message,
+            other => other.to_string(),
+        };
+        Self::Coded {
+            code,
+            retry_after_seconds,
+            message: map(message),
+        }
+    }
+}
+
+pub(crate) const fn account_store_code(error: &StoreError) -> ToolErrorCode {
+    match error {
+        StoreError::Decrypt | StoreError::KeysDestroyed | StoreError::AccountDeleted => {
+            ToolErrorCode::AuthRequired
+        }
+        _ => ToolErrorCode::ProviderUnavailable,
+    }
+}
+
+pub(crate) fn mail_code(err: &MailError) -> ToolErrorCode {
+    match err {
+        MailError::Authentication => ToolErrorCode::AuthRequired,
+        MailError::InvalidInput(_) | MailError::Build(_) => ToolErrorCode::InvalidInput,
+        MailError::FolderNotFound(_) | MailError::MessageNotFound { .. } => ToolErrorCode::NotFound,
+        MailError::MessageTooLarge => ToolErrorCode::PayloadTooLarge,
+        MailError::StaleId { .. } => ToolErrorCode::StaleId,
+        MailError::Unsupported(_) | MailError::Parse(_) => ToolErrorCode::Unsupported,
+        MailError::Timeout | MailError::TimeExhausted => ToolErrorCode::Timeout,
+        MailError::SubmissionUnconfirmed | MailError::WriteUnconfirmed => {
+            ToolErrorCode::SubmissionUncertain
+        }
+        MailError::Imap(_) | MailError::Smtp(_) => match err.protocol_error_kind() {
+            Some(ProtocolErrorKind::Rejected) => ToolErrorCode::InvalidInput,
+            Some(ProtocolErrorKind::TooLarge) => ToolErrorCode::PayloadTooLarge,
+            Some(ProtocolErrorKind::Timeout) => ToolErrorCode::Timeout,
+            _ => ToolErrorCode::ProviderUnavailable,
+        },
+        _ => ToolErrorCode::ProviderUnavailable,
+    }
+}
+
+impl From<crate::limits::LargeMessageError> for MailboxError {
+    fn from(err: crate::limits::LargeMessageError) -> Self {
+        let code = match err {
+            crate::limits::LargeMessageError::TooLarge(_) => ToolErrorCode::PayloadTooLarge,
+            crate::limits::LargeMessageError::Busy => ToolErrorCode::Busy,
+        };
+        Self::coded(code, err.to_string())
     }
 }
 
@@ -829,7 +971,12 @@ impl Mailbox {
                 imap.selected(&selection.folder, &criteria, change, most, deadline)
                     .await
             }
-            _ => return Err(MailboxError::Message(selection::REFUSAL.to_owned())),
+            _ => {
+                return Err(MailboxError::coded(
+                    ToolErrorCode::InvalidInput,
+                    selection::REFUSAL,
+                ));
+            }
         };
         match result {
             Err(MailboxError::Deadline) => Ok(Selected::Done(SEARCH_TIME_EXHAUSTED.to_owned())),
@@ -852,7 +999,9 @@ impl Mailbox {
             Self::Graph(graph) => graph.get(selector).await,
             Self::Gmail(gmail) => gmail.get(selector).await,
             Self::Imap(imap) => {
-                let target = selector.imap()?;
+                let target = selector
+                    .imap()
+                    .map_err(|message| MailboxError::coded(ToolErrorCode::InvalidInput, message))?;
                 let (message, seen) = imap
                     .session(async |session| {
                         session
@@ -881,7 +1030,9 @@ impl Mailbox {
         let size = match self {
             Self::Gmail(gmail) => gmail.original_size(selector).await?,
             Self::Imap(imap) => {
-                let target = selector.imap()?;
+                let target = selector
+                    .imap()
+                    .map_err(|message| MailboxError::coded(ToolErrorCode::InvalidInput, message))?;
                 let size = imap.session(async |session| {
                     session
                         .message_size(&target.folder, target.uid, target.uid_validity)
@@ -890,8 +1041,9 @@ impl Mailbox {
                 Some(size.await? as usize)
             }
             Self::Graph(_) => {
-                return Err(MailboxError::Message(
-                    "Outlook forwards its own messages".to_owned(),
+                return Err(MailboxError::coded(
+                    ToolErrorCode::Unsupported,
+                    "Outlook forwards its own messages",
                 ));
             }
         };
@@ -915,7 +1067,9 @@ impl Mailbox {
         let raw = match self {
             Self::Gmail(gmail) => gmail.original(selector, reserved).await?,
             Self::Imap(imap) => {
-                let target = selector.imap()?;
+                let target = selector
+                    .imap()
+                    .map_err(|message| MailboxError::coded(ToolErrorCode::InvalidInput, message))?;
                 imap.session(async |session| {
                     session
                         .fetch_raw(&target.folder, target.uid, target.uid_validity, reserved)
@@ -930,8 +1084,9 @@ impl Mailbox {
                 })?
             }
             Self::Graph(_) => {
-                return Err(MailboxError::Message(
-                    "Outlook forwards its own messages".to_owned(),
+                return Err(MailboxError::coded(
+                    ToolErrorCode::Unsupported,
+                    "Outlook forwards its own messages",
                 ));
             }
         };
@@ -954,7 +1109,9 @@ impl Mailbox {
             Self::Graph(graph) => graph.attachment(selector, id, max_bytes).await,
             Self::Gmail(gmail) => gmail.attachment(selector, id, max_bytes).await,
             Self::Imap(imap) => {
-                let target = selector.imap()?;
+                let target = selector
+                    .imap()
+                    .map_err(|message| MailboxError::coded(ToolErrorCode::InvalidInput, message))?;
                 imap.session(async |session| {
                     session
                         .fetch_attachment(
@@ -995,9 +1152,12 @@ impl Mailbox {
             Self::Graph(graph) => graph.delete(selector).await,
             Self::Gmail(gmail) => gmail.delete(selector),
             Self::Imap(imap) => {
-                let target = selector.imap()?;
+                let target = selector
+                    .imap()
+                    .map_err(|message| MailboxError::coded(ToolErrorCode::InvalidInput, message))?;
                 if target.uid_validity.is_none() && imap.client.config().permanent_delete {
-                    return Err(MailboxError::Message(
+                    return Err(MailboxError::coded(
+                        ToolErrorCode::StaleId,
                         "this message can't be checked against its folder's UIDVALIDITY, so it \
                          isn't deleted for good; call search_messages again and use the id it \
                          gives"
@@ -1057,7 +1217,9 @@ impl Mailbox {
             Self::Graph(graph) => graph.reply(selector, reply, options).await,
             Self::Gmail(gmail) => gmail.reply(selector, reply, options).await,
             Self::Imap(imap) => {
-                let target = selector.imap()?;
+                let target = selector
+                    .imap()
+                    .map_err(|message| MailboxError::coded(ToolErrorCode::InvalidInput, message))?;
                 let sent = imap
                     .client
                     .reply(
@@ -1079,7 +1241,8 @@ impl Mailbox {
             Self::Imap(imap) => imap
                 .session(async |session| imap.client.save_draft(session, message).await)
                 .await
-                .map(imap_saved_draft),
+                .map(imap_saved_draft)
+                .map_err(imap_draft_error),
             Self::Graph(graph) => graph.create_draft(message).await,
             Self::Gmail(gmail) => gmail.create_draft(message).await,
         }
@@ -1093,7 +1256,9 @@ impl Mailbox {
     ) -> MailboxResult<SavedDraft> {
         match self {
             Self::Imap(imap) => {
-                let target = selector.imap()?;
+                let target = selector
+                    .imap()
+                    .map_err(|message| MailboxError::coded(ToolErrorCode::InvalidInput, message))?;
                 imap.session(async |session| {
                     imap.client
                         .save_draft_reply(
@@ -1107,6 +1272,7 @@ impl Mailbox {
                 })
                 .await
                 .map(imap_saved_draft)
+                .map_err(imap_draft_error)
             }
             Self::Graph(graph) => graph.create_reply_draft(selector, reply).await,
             Self::Gmail(gmail) => gmail.create_reply_draft(selector, reply).await,
@@ -1124,6 +1290,15 @@ pub struct SavedDraft {
     pub message_id: String,
     /// The Drafts folder the draft was saved to.
     pub folder: String,
+}
+
+fn imap_draft_error(err: MailboxError) -> MailboxError {
+    match err {
+        MailboxError::Mail(MailError::WriteUnconfirmed) => {
+            MailboxError::coded(ToolErrorCode::SubmissionUncertain, DRAFT_UNCONFIRMED)
+        }
+        other => other,
+    }
 }
 
 fn imap_saved_draft(saved: postkeep_mail::SavedDraft) -> SavedDraft {
@@ -1168,7 +1343,7 @@ fn imap_targets(ids: &[Selector]) -> (Vec<Option<ImapTarget>>, Vec<Outcome>) {
                 Ok(target) => {
                     out.id = id::imap_id(&target.folder, target.uid, target.uid_validity);
                 }
-                Err(err) => out.finish(Status::Failed, err.clone()),
+                Err(err) => out.fail(Status::Failed, err, ToolErrorCode::InvalidInput, None),
             }
             outcomes.push(out);
             target.ok()
@@ -1189,6 +1364,7 @@ fn finish_imap(
     let (changed, failure) = match (result, progress) {
         (Ok(changed), _) => (changed, None),
         (Err(err), Some(progress)) => {
+            let (code, retry_after) = err.classify();
             let reason = err.to_string();
             let in_flight = match progress.in_flight {
                 InFlight::Unanswered => SENT_NO_ANSWER.to_owned(),
@@ -1197,15 +1373,28 @@ fn finish_imap(
                     "{reason}; part of the change may have been made: check before repeating"
                 ),
             };
+            let in_flight_error = if matches!(progress.in_flight, InFlight::Refused) {
+                (code, retry_after)
+            } else {
+                (ToolErrorCode::SubmissionUncertain, None)
+            };
             (
                 progress.changed,
-                Some((progress.confirmed, progress.carried, reason, in_flight)),
+                Some((
+                    progress.confirmed,
+                    progress.carried,
+                    reason,
+                    (code, retry_after),
+                    in_flight,
+                    in_flight_error,
+                )),
             )
         }
         (Err(err), None) => {
             let reason = err.to_string();
+            let (code, retry_after) = err.classify();
             for out in outcomes {
-                out.finish(Status::Failed, &reason);
+                out.fail(Status::Failed, &reason, code, retry_after);
             }
             return;
         }
@@ -1213,30 +1402,33 @@ fn finish_imap(
     for (out, uid) in outcomes.iter_mut().zip(uids) {
         out.id = id::imap_id(&target.folder, *uid, changed.uid_validity);
         if changed.missing.contains(uid) {
-            out.finish(
+            out.fail(
                 Status::NotFound,
                 format!(
                     "no such message in {}; it may have been moved{}",
                     target.folder,
                     destination.map_or_else(String::new, |d| format!(": search {d}")),
                 ),
+                ToolErrorCode::NotFound,
+                None,
             );
         } else if changed.already.contains(uid) {
-            out.finish(Status::Ok, already_reason);
-        } else if let Some((confirmed, carried, reason, in_flight)) = &failure
+            out.ok(already_reason);
+        } else if let Some((confirmed, carried, reason, error, in_flight, in_flight_error)) =
+            &failure
             && let Some(index) = changed.done.iter().position(|done| done == uid)
             && index >= *confirmed
         {
-            let (status, reason) = if *carried == 0 && *confirmed == 0 {
-                (Status::Failed, reason)
+            let (status, reason, (code, retry_after)) = if *carried == 0 && *confirmed == 0 {
+                (Status::Failed, reason, *error)
             } else if index < confirmed + carried {
-                (Status::Failed, in_flight)
+                (Status::Failed, in_flight, *in_flight_error)
             } else {
-                (Status::NotReached, reason)
+                (Status::NotReached, reason, *error)
             };
-            out.finish(status, reason);
+            out.fail(status, reason, code, retry_after);
         } else {
-            out.finish(Status::Ok, changed_reason);
+            out.ok(changed_reason);
             if let Some(destination) = destination
                 && let Some(new) = changed.new_uids.get(uid)
             {
@@ -1260,14 +1452,15 @@ fn stop_imap_on_connect<T>(
         return false;
     };
     let reason = err.to_string();
+    let code = mail_code(err);
     for out in &mut outcomes[failed] {
-        out.finish(Status::Failed, reason.clone());
+        out.fail(Status::Failed, &reason, code, None);
     }
     for out in outcomes
         .iter_mut()
         .filter(|out| out.status == Status::NotReached)
     {
-        out.reason.clone_from(&reason);
+        out.fail(Status::NotReached, &reason, code, None);
     }
     true
 }
@@ -1335,7 +1528,10 @@ impl ImapMailbox {
         criteria
             .exact_for_selection(&SelectionFilterRules::for_provider(Provider::Imap), "IMAP")?;
         let Some(Cutoff::Imap { uid_validity, .. }) = criteria.until else {
-            return Err(MailboxError::Message(selection::REFUSAL.to_owned()));
+            return Err(MailboxError::coded(
+                ToolErrorCode::InvalidInput,
+                selection::REFUSAL,
+            ));
         };
         let result = self
             .session_until(Some(deadline), async |session| {
@@ -1390,8 +1586,9 @@ impl ImapMailbox {
         match result {
             Ok(result) => result,
             Err(MailboxError::Mail(postkeep_mail::Error::StaleId { .. })) => {
-                Err(MailboxError::Message(
-                    "this folder was renumbered since the search; search again".to_owned(),
+                Err(MailboxError::coded(
+                    ToolErrorCode::StaleId,
+                    "this folder was renumbered since the search; search again",
                 ))
             }
             Err(err) => Err(err),
@@ -1399,15 +1596,20 @@ impl ImapMailbox {
     }
 
     async fn check_old_id(&self, target: &ImapTarget, deadline: Instant) -> MailboxResult<()> {
-        self.session_until(Some(deadline), async |session| {
-                    let seen = session.find_messages(&target.folder, &[], None, Check::Exists).await?;
-                    if seen.uid_validity.is_some() {
-                        return Err(postkeep_mail::Error::InvalidInput(
-                            "this message can't be checked against its folder's UIDVALIDITY; call search_messages again and use the id it gives".to_owned(),
-                        ));
-                    }
-                    Ok(())
-                }).await
+        let seen = self
+            .session_until(Some(deadline), async |session| {
+                session
+                    .find_messages(&target.folder, &[], None, Check::Exists)
+                    .await
+            })
+            .await?;
+        if seen.uid_validity.is_some() {
+            return Err(MailboxError::coded(
+                ToolErrorCode::StaleId,
+                "invalid input: this message can't be checked against its folder's UIDVALIDITY; call search_messages again and use the id it gives",
+            ));
+        }
+        Ok(())
     }
 
     #[expect(
@@ -1487,8 +1689,9 @@ impl ImapMailbox {
                     return Ok(outcomes);
                 }
                 if let Err(err) = checked {
+                    let (code, retry_after) = err.classify();
                     for out in &mut outcomes[start..end] {
-                        out.finish(Status::Failed, err.to_string());
+                        out.fail(Status::Failed, err.to_string(), code, retry_after);
                     }
                     start = end;
                     continue;
@@ -1559,7 +1762,7 @@ impl ImapMailbox {
                     .as_ref()
                     .err()
                     .filter(|_| sent)
-                    .map(ToString::to_string);
+                    .map(|err| (err.to_string(), err.classify()));
                 finish_imap(
                     &mut outcomes[offset..stop],
                     target,
@@ -1569,10 +1772,10 @@ impl ImapMailbox {
                     progress,
                     result,
                 );
-                if let Some(reason) = stopped {
+                if let Some((reason, (code, retry_after))) = stopped {
                     for out in &mut outcomes[stop..] {
                         if out.status == Status::NotReached {
-                            out.reason.clone_from(&reason);
+                            out.fail(Status::NotReached, &reason, code, retry_after);
                         }
                     }
                     return Ok(outcomes);
@@ -1677,6 +1880,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn imap_unconfirmed_draft_has_safe_prose_and_metadata() {
+        let err = imap_draft_error(MailError::WriteUnconfirmed.into());
+        let result = crate::tools::mailbox_error(err).into_result();
+        assert_eq!(result.is_error, Some(true));
+        let [prose, meta] = result.content.as_slice() else {
+            panic!("expected two blocks");
+        };
+        assert_eq!(prose.as_text().unwrap().text, DRAFT_UNCONFIRMED);
+        let meta: serde_json::Value = serde_json::from_str(&meta.as_text().unwrap().text).unwrap();
+        assert_eq!(
+            meta,
+            serde_json::json!({
+                "code": "submission_uncertain", "outcome_uncertain": true, "retryable": false
+            })
+        );
+    }
+
+    #[test]
     fn imap_saved_draft_omits_unusable_or_absent_id() {
         assert_eq!(
             imap_draft_id("Drafts", Some((42, 7))).as_deref(),
@@ -1731,6 +1952,7 @@ mod tests {
             (InFlight::Partial, Error::Unsupported("move"), "move", 1, 0),
         ] {
             let error = MailboxError::from(error);
+            let code = error.code();
             let mut progress = Progress::default();
             progress.changed.done = vec![1, 4, 5, 6];
             progress.changed.already = vec![2];
@@ -1756,7 +1978,9 @@ mod tests {
                 (already.status, already.reason.as_str()),
                 (Status::Ok, "already there")
             );
+            assert_eq!(already.error, None);
             assert_eq!(missing.status, Status::NotFound);
+            assert_eq!(missing.error, Some((ToolErrorCode::NotFound, None)));
             if confirmed != 0 {
                 assert!(one.changed());
                 assert_eq!(one.new_id, Some(id::imap_id("Archive", 8, Some(11))));
@@ -1774,8 +1998,24 @@ mod tests {
                     (Status::Failed, reason.as_str())
                 };
                 assert_eq!((out.status, out.reason.as_str()), expected);
+                let cause = if carried > 0 && !matches!(flight, InFlight::Refused) {
+                    ToolErrorCode::SubmissionUncertain
+                } else {
+                    code
+                };
+                assert_eq!(out.error, Some((cause, None)));
             }
         }
+    }
+
+    #[test]
+    fn timeout_before_imap_progress_classifies_the_entire_set() {
+        let uids = [1, 2];
+        let target = ImapTarget {
+            folder: "INBOX".into(),
+            uid: 1,
+            uid_validity: Some(7),
+        };
         let mut outcomes = uids.map(|uid| Outcome::pending(uid.to_string()));
         finish_imap(
             &mut outcomes,
@@ -1784,13 +2024,40 @@ mod tests {
             Some("Archive"),
             ("already there", ""),
             None,
-            Err(Error::Timeout.into()),
+            Err(MailError::Timeout.into()),
         );
-        assert!(
-            outcomes
-                .iter()
-                .all(|out| out.status == Status::Failed && out.reason == "operation timed out")
-        );
+        assert!(outcomes.iter().all(|out| out.status == Status::Failed
+            && out.reason == "operation timed out"
+            && out.error == Some((ToolErrorCode::Timeout, None))));
+    }
+
+    #[test]
+    fn connection_failure_and_new_outcome_states_carry_the_correct_cause() {
+        let mut outcomes = [
+            Outcome::pending("first".into()),
+            Outcome::pending("second".into()),
+        ];
+        let result: MailboxResult<()> = Err(MailboxError::Connect(MailError::Authentication));
+        assert!(stop_imap_on_connect(&mut outcomes, 0..1, &result));
+        assert_eq!(outcomes[0].status, Status::Failed);
+        assert_eq!(outcomes[1].status, Status::NotReached);
+        for out in &mut outcomes {
+            assert_eq!(out.error, Some((ToolErrorCode::AuthRequired, None)));
+            out.ok("done");
+            assert_eq!(
+                (out.status, out.reason.as_str(), out.error),
+                (Status::Ok, "done", None)
+            );
+            out.reset_pending();
+            assert_eq!(
+                (out.status, out.reason.as_str(), out.error),
+                (
+                    Status::NotReached,
+                    TIME_EXHAUSTED,
+                    Some((ToolErrorCode::Timeout, None))
+                )
+            );
+        }
     }
 
     #[test]
@@ -1805,6 +2072,7 @@ mod tests {
             status,
             code: None,
             reason: None,
+            retry_after: None,
             message: String::new(),
         };
         for error in [
@@ -2081,7 +2349,10 @@ mod tests {
             None,
             ("", ""),
             None,
-            Err(MailboxError::Message("set failed".to_owned())),
+            Err(MailboxError::coded(
+                ToolErrorCode::ProviderUnavailable,
+                "set failed",
+            )),
         );
         assert_eq!(outcomes[0].status, Status::Failed);
         assert_eq!(outcomes[2].status, Status::Ok);

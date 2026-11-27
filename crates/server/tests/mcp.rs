@@ -413,6 +413,10 @@ async fn mcp_endpoint_records_a_rejected_password_until_a_login_works() {
     login.store(REJECT, SeqCst);
     let result = list().await;
     assert!(result.to_string().contains("rejected the stored password"));
+    assert_eq!(
+        common::error_meta(&result),
+        json!({"code":"auth_required","retryable":false})
+    );
     assert!(rejected_at().await.is_some());
     let status = || harness.call_ok(&token, "get_webhook_status", json!({}));
     let rejected = status().await;
@@ -893,7 +897,11 @@ async fn tools_refuse_arguments_they_do_not_take() {
         let mut arguments = arguments.clone();
         arguments["importance"] = json!("high");
         let result = harness.call(&token, tool, arguments).await;
-        assert_eq!(result["isError"], true, "{tool}: {result}");
+        assert_eq!(
+            common::error_meta(&result),
+            json!({"code":"invalid_input","retryable":false}),
+            "{tool}"
+        );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(
             text.contains("unknown field `importance`"),
@@ -1480,6 +1488,50 @@ async fn imap_bulk_stops_after_one_failed_reconnect_but_continues_after_set_erro
             );
         }
     }
+}
+
+#[tokio::test]
+async fn imap_action_errors_classify_invalid_missing_and_stale_ids() {
+    let mut mail = scripted_mail(Arc::new(AtomicU8::new(imap::GMAIL)), Arc::default(), None).await;
+    mail.trash_folder = Some("Archive".to_owned());
+    let harness = harness(mail, AcceptAll).await;
+    let token = harness
+        .sign_in("mailbox@example.org", "fixture-password")
+        .await;
+    for (id, code) in [
+        ("bad-id".to_owned(), "invalid_input"),
+        (imap_id("INBOX", 999_999, Some(1)), "not_found"),
+        (imap_id("INBOX", 1, Some(2)), "stale_id"),
+    ] {
+        let result = harness
+            .call(&token, "update_flags", json!({"id":id,"read":true}))
+            .await;
+        assert_eq!(
+            common::error_meta(&result),
+            json!({"code":code,"retryable":false})
+        );
+    }
+    let legacy = imap_id("INBOX", 1, None);
+    for (tool, args) in [
+        ("update_flags", json!({"id":legacy,"read":true})),
+        ("move_message", json!({"id":legacy,"destination":"Archive"})),
+        ("delete_message", json!({"id":legacy})),
+    ] {
+        let result = harness.call(&token, tool, args).await;
+        assert_eq!(
+            result["content"][0]["text"],
+            "invalid input: this message can't be checked against its folder's UIDVALIDITY; call search_messages again and use the id it gives"
+        );
+        assert_eq!(
+            common::error_meta(&result),
+            json!({"code":"stale_id","retryable":false})
+        );
+    }
+    let result = harness.call(&token, "upload_attachment", json!({})).await;
+    assert_eq!(
+        common::error_meta(&result),
+        json!({"code":"unsupported","retryable":false})
+    );
 }
 
 #[tokio::test]

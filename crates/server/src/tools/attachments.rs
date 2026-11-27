@@ -14,10 +14,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use postkeep_auth::Authenticated;
+use postkeep_auth::{Authenticated, ToolErrorCode};
 use postkeep_store::{AccountId, DataKey, PIECE_TAG, UploadLookup, UploadOwner, open_piece};
 
-use super::{AttachmentInfo, DEFAULT_MAX_CHARS, MAX_MAX_CHARS, MailTools, mailbox_error};
+use super::{
+    AttachmentInfo, DEFAULT_MAX_CHARS, MAX_MAX_CHARS, MailTools, ToolError, invalid_input,
+    mailbox_error,
+};
 use crate::bucket::Bucket;
 use crate::mailbox::Selector;
 use crate::text;
@@ -312,11 +315,13 @@ pub(super) fn files_line(files: &[NewAttachment]) -> String {
 /// `error` with `files` (the message's files line, or a hold's sentence),
 /// kept ahead of the line that says its uploads went with the try, so that
 /// line stays last.
-pub(super) fn with_files(error: &str, files: &str) -> String {
-    error.strip_suffix(WENT).map_or_else(
-        || format!("{error}{files}"),
-        |words| format!("{}{files}\n{WENT}", words.trim_end()),
-    )
+pub(super) fn with_files(error: ToolError, files: &str) -> ToolError {
+    error.map_message(|error| {
+        error.strip_suffix(WENT).map_or_else(
+            || format!("{error}{files}"),
+            |words| format!("{}{files}\n{WENT}", words.trim_end()),
+        )
+    })
 }
 
 /// MR 1's check of a file's bytes: a `message/*` file's lines.
@@ -337,10 +342,13 @@ const NOT_USED: &str =
 const WENT: &str = "Its uploaded files went with this try: upload them again to send them.";
 
 /// The mailbox and the caller of a call, whose uploads it makes and attaches.
-pub(super) fn caller(parts: &Parts) -> Result<(AccountId, &Authenticated), String> {
+pub(super) fn caller(parts: &Parts) -> Result<(AccountId, &Authenticated), ToolError> {
     let account = MailTools::require_account(parts)?;
     let caller = parts.extensions.get::<Authenticated>();
-    Ok((account, caller.ok_or("not authenticated")?))
+    Ok((
+        account,
+        caller.ok_or_else(|| ToolError::new(ToolErrorCode::AuthRequired, "not authenticated"))?,
+    ))
 }
 
 /// Only this mailbox, principal and app attach an upload.
@@ -362,11 +370,14 @@ impl Uploads {
     /// The send's one memory reservation for them, when there are any.
     pub(super) async fn reserve(
         &self,
-    ) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, String> {
+    ) -> Result<Option<tokio::sync::SemaphorePermit<'static>>, ToolError> {
         if self.0.is_empty() {
             return Ok(None);
         }
-        crate::limits::large_message(self.total()).await.map(Some)
+        crate::limits::large_message(self.total())
+            .await
+            .map(Some)
+            .map_err(|err| mailbox_error(err.into()))
     }
 
     /// Reads each upload from `bucket` into its place among `files`, in list
@@ -375,13 +386,16 @@ impl Uploads {
         &self,
         bucket: Option<&dyn Bucket>,
         files: &mut Vec<OutgoingAttachment>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ToolError> {
         for (place, upload) in &self.0 {
             let unreadable = || {
-                format!(
-                    "attachment {:?}: the uploaded file could not be read; nothing was sent. \
+                ToolError::new(
+                    ToolErrorCode::ProviderUnavailable,
+                    format!(
+                        "attachment {:?}: the uploaded file could not be read; nothing was sent. \
                      Try again in a minute, or upload it again.",
-                    upload.filename
+                        upload.filename
+                    ),
                 )
             };
             let (Some(bucket), Some(stored)) = (bucket, &upload.stored) else {
@@ -394,7 +408,7 @@ impl Uploads {
                 content_id: None,
                 inline: false,
             };
-            checked(&file)?;
+            checked(&file).map_err(invalid_input)?;
             files.insert((*place).min(files.len()), file);
         }
         Ok(())
@@ -429,7 +443,7 @@ impl MailTools {
         &self,
         parts: &Parts,
         files: &mut [NewAttachment],
-    ) -> Result<(), String> {
+    ) -> Result<(), ToolError> {
         let mut total = 0_usize;
         for (number, file) in files.iter_mut().enumerate() {
             let File::Uploaded(upload) = &mut file.0 else {
@@ -437,7 +451,10 @@ impl MailTools {
             };
             let place = format!("attachment {} ({:?})", number + 1, upload.filename);
             if self.context.bucket.is_none() {
-                return Err(format!("{place}: {UPLOADS_OFF}"));
+                return Err(ToolError::new(
+                    ToolErrorCode::Unsupported,
+                    format!("{place}: {UPLOADS_OFF}"),
+                ));
             }
             let (account, caller) = caller(parts)?;
             let found =
@@ -452,11 +469,21 @@ impl MailTools {
                     size,
                     expires_at,
                 }) => (object, key, digest, size, expires_at),
-                Ok(UploadLookup::Arriving) => return Err(format!("{place}: {NOT_ARRIVED}")),
-                Ok(UploadLookup::Missing) => return Err(format!("{place}: {NO_UPLOAD}")),
+                Ok(UploadLookup::Arriving) => {
+                    return Err(ToolError::new(
+                        ToolErrorCode::Busy,
+                        format!("{place}: {NOT_ARRIVED}"),
+                    ));
+                }
+                Ok(UploadLookup::Missing) => {
+                    return Err(ToolError::new(
+                        ToolErrorCode::NotFound,
+                        format!("{place}: {NO_UPLOAD}"),
+                    ));
+                }
                 Err(err) => {
                     tracing::error!(error = %err, "could not look up an upload");
-                    return Err(NOT_USED.to_owned());
+                    return Err(ToolError::new(ToolErrorCode::ProviderUnavailable, NOT_USED));
                 }
             };
             let size = usize::try_from(size).unwrap_or(usize::MAX);
@@ -474,10 +501,13 @@ impl MailTools {
                 .iter()
                 .filter(|file| matches!(file.0, File::Uploaded(_)));
             let names = files_named(uploaded.map(NewAttachment::named));
-            return Err(format!(
-                "The uploaded files of one message may total {MAX_UPLOAD_MIB} MiB; these total {} \
+            return Err(ToolError::new(
+                ToolErrorCode::PayloadTooLarge,
+                format!(
+                    "The uploaded files of one message may total {MAX_UPLOAD_MIB} MiB; these total {} \
                  bytes: {names}.",
-                grouped(total)
+                    grouped(total)
+                ),
             ));
         }
         Ok(())
@@ -491,8 +521,8 @@ impl MailTools {
         &self,
         parts: &Parts,
         uploads: &Uploads,
-        call: impl Future<Output = Result<T, String>>,
-    ) -> Result<T, String> {
+        call: impl Future<Output = Result<T, ToolError>>,
+    ) -> Result<T, ToolError> {
         if uploads.0.is_empty() {
             return call.await;
         }
@@ -513,18 +543,25 @@ impl MailTools {
         {
             Ok(Ok(used)) => used,
             Ok(Err(gone)) => {
-                let (place, upload) = named.get(gone).copied().ok_or(NOT_USED)?;
+                let (place, upload) = named
+                    .get(gone)
+                    .copied()
+                    .ok_or_else(|| ToolError::new(ToolErrorCode::ProviderUnavailable, NOT_USED))?;
                 let name = &upload.filename;
-                return Err(format!("attachment {} ({name:?}): {NO_UPLOAD}", place + 1));
+                return Err(ToolError::new(
+                    ToolErrorCode::NotFound,
+                    format!("attachment {} ({name:?}): {NO_UPLOAD}", place + 1),
+                ));
             }
             Err(err) => {
                 tracing::error!(error = %err, "could not use the uploaded files");
-                return Err(NOT_USED.to_owned());
+                return Err(ToolError::new(ToolErrorCode::ProviderUnavailable, NOT_USED));
             }
         };
         let (store, bucket) = (self.context.store.clone(), self.context.bucket.clone());
         tokio::spawn(async move { delete_pieces(&store, bucket.as_deref(), &used).await });
-        call.await.map_err(|error| format!("{error} {WENT}"))
+        call.await
+            .map_err(|error| error.map_message(|message| format!("{message} {WENT}")))
     }
 }
 
@@ -665,10 +702,10 @@ impl MailTools {
         &self,
         parts: &Parts,
         params: DownloadAttachmentParams,
-    ) -> Result<CallToolResult, String> {
+    ) -> Result<CallToolResult, ToolError> {
         let mailbox = self.mailbox(parts).await?;
-        let number =
-            attachment_number(&params.attachment_id).ok_or_else(|| BAD_ATTACHMENT_ID.to_owned())?;
+        let number = attachment_number(&params.attachment_id)
+            .ok_or_else(|| invalid_input(BAD_ATTACHMENT_ID))?;
         let selector = Selector {
             id: Some(params.id.clone()),
             ..Selector::default()
@@ -678,19 +715,25 @@ impl MailTools {
             .await
             .map_err(mailbox_error)?
             .ok_or_else(|| {
-                format!(
+                ToolError::new(ToolErrorCode::NotFound, format!(
                     "This message has no attachment {number}. get_message lists its attachments and their ids."
-                )
+                ))
             })?;
         let Some(bytes) = data.content else {
             return Err(if data.decoded {
-                format!(
-                    "Attachment {number} is {} bytes; download_attachment returns attachments of at most {MAX_ATTACHMENT_BYTES} bytes ({MAX_ATTACHMENT_MIB} MiB). Use send_message with forward to send this file on.",
-                    data.attachment.size
+                ToolError::new(
+                    ToolErrorCode::PayloadTooLarge,
+                    format!(
+                        "Attachment {number} is {} bytes; download_attachment returns attachments of at most {MAX_ATTACHMENT_BYTES} bytes ({MAX_ATTACHMENT_MIB} MiB). Use send_message with forward to send this file on.",
+                        data.attachment.size
+                    ),
                 )
             } else {
-                format!(
-                    "Attachment {number} did not decode cleanly (its base64 or quoted-printable is broken or cut off, its transfer encoding is unknown, its transfer encoding or charset is written in a way mail apps may read differently, its text is in a charset mail apps may convert otherwise, it is a file whose bytes changed when read as text, or a mail app may read the message's parts differently before its end), so download_attachment doesn't return it: its bytes may differ from what the person's mail app opens."
+                ToolError::new(
+                    ToolErrorCode::Unsupported,
+                    format!(
+                        "Attachment {number} did not decode cleanly (its base64 or quoted-printable is broken or cut off, its transfer encoding is unknown, its transfer encoding or charset is written in a way mail apps may read differently, its text is in a charset mail apps may convert otherwise, it is a file whose bytes changed when read as text, or a mail app may read the message's parts differently before its end), so download_attachment doesn't return it: its bytes may differ from what the person's mail app opens."
+                    ),
                 )
             });
         };
@@ -700,7 +743,7 @@ impl MailTools {
             encoding,
             truncated,
         })
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| ToolError::new(ToolErrorCode::ProviderUnavailable, err.to_string()))?;
         Ok(CallToolResult::success(vec![
             ContentBlock::text(details),
             content,
@@ -720,12 +763,17 @@ mod tests {
 
     #[test]
     fn the_line_that_uploads_went_stays_last() {
-        let held = with_files(&format!("Not sent.\n{WENT}"), " Hold used.");
-        let error = with_files(&held, "\nAttachments in this message: a.pdf.");
+        let error = ToolError::new(
+            ToolErrorCode::SubmissionUncertain,
+            format!("Not sent.\n{WENT}"),
+        );
+        let held = with_files(error, " Hold used.");
+        let error = with_files(held, "\nAttachments in this message: a.pdf.");
         let lines = "Not sent. Hold used.\nAttachments in this message: a.pdf.\n";
-        assert_eq!(error, format!("{lines}{WENT}"));
+        assert_eq!(error.message(), format!("{lines}{WENT}"));
+        assert_eq!(error.code(), ToolErrorCode::SubmissionUncertain);
         assert_eq!(
-            with_files("Not sent.", " Hold used."),
+            with_files(invalid_input("Not sent."), " Hold used.").message(),
             "Not sent. Hold used."
         );
     }

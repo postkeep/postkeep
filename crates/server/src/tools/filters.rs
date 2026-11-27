@@ -2,7 +2,7 @@
 //! which new mail calls the webhook.
 
 use axum::http::request::Parts;
-use postkeep_auth::{UnreadableRules, parse_filter_rules};
+use postkeep_auth::{ToolErrorCode, UnreadableRules, parse_filter_rules};
 use postkeep_store::{AddedFilterRule, FilterRule, NewFilterRule, StoreError};
 use postkeep_webhook::filter::{Action, CompiledRules, Field, Kind, MAX_PATTERN_LEN, Rule};
 use schemars::JsonSchema;
@@ -10,8 +10,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DEFAULT_LIMIT, FilterRuleCounts, MAX_LIMIT, MailTools, WebhookProblemKind, next_page_offset,
-    rfc3339, webhook_store_error,
+    DEFAULT_LIMIT, FilterRuleCounts, MAX_LIMIT, MailTools, ToolError, WebhookProblemKind,
+    invalid_input, next_page_offset, rfc3339, webhook_store_error,
 };
 
 /// Parameters for `list_webhook_filters`.
@@ -137,7 +137,7 @@ impl MailTools {
         &self,
         parts: &Parts,
         params: ListWebhookFiltersParams,
-    ) -> Result<WebhookFilterList, String> {
+    ) -> Result<WebhookFilterList, ToolError> {
         let account = Self::require_account(parts)?;
         let limit = self.mailbox_limits(parts, &account).await.filter_rules;
         let store = &self.context.store;
@@ -147,13 +147,13 @@ impl MailTools {
             .map_err(webhook_store_error)?
             .is_none()
         {
-            return Err(self.problem_words(parts, &account, &WebhookProblemKind::NoWebhook));
+            return Err(self.problem_error(parts, &account, &WebhookProblemKind::NoWebhook));
         }
         let rules = match store.webhook_filter_rules(&account, limit).await {
             Ok(rules) => rules,
             Err(StoreError::Decrypt) => {
                 let kind = WebhookProblemKind::RulesUndecryptable;
-                return Err(self.problem_words(parts, &account, &kind));
+                return Err(self.problem_error(parts, &account, &kind));
             }
             Err(err) => return Err(webhook_store_error(err)),
         };
@@ -187,7 +187,7 @@ impl MailTools {
         &self,
         parts: &Parts,
         params: AddWebhookFilterParams,
-    ) -> Result<WebhookFilterAdded, String> {
+    ) -> Result<WebhookFilterAdded, ToolError> {
         let account = Self::require_account(parts)?;
         let limit = self.mailbox_limits(parts, &account).await.filter_rules;
         let rule = Rule {
@@ -196,7 +196,7 @@ impl MailTools {
             kind: params.kind,
             pattern: params.pattern,
         };
-        off_runtime(|| rule.validate()).map_err(|error| error.to_string())?;
+        off_runtime(|| rule.validate()).map_err(|error| invalid_input(error.to_string()))?;
         let new = NewFilterRule {
             action: stored_name(rule.action),
             field: stored_name(rule.field),
@@ -204,10 +204,13 @@ impl MailTools {
             pattern: SecretString::from(rule.pattern.clone()),
         };
         let (mut seen, mut active) = (0, 0);
+        let mut unknown_name = false;
         let check = |stored: &[FilterRule]| {
+            unknown_name = false;
             seen = stored.len();
             active = stored.iter().filter(|rule| rule.active).count();
             let mut rules = parse_filter_rules(stored).ok_or_else(|| {
+                unknown_name = true;
                 let kind = WebhookProblemKind::Rules(UnreadableRules::UnknownName);
                 self.problem_words(parts, &account, &kind)
             })?;
@@ -222,17 +225,24 @@ impl MailTools {
         let id = match added.await {
             Ok(AddedFilterRule::Added(id)) => id,
             Ok(AddedFilterRule::AtLimit) => {
-                return Err(format!(
+                return Err(invalid_input(format!(
                     "This mailbox may have at most {limit} filter rules."
-                ));
+                )));
             }
-            Ok(AddedFilterRule::Refused(reason)) => return Err(reason),
+            Ok(AddedFilterRule::Refused(reason)) => {
+                let code = if unknown_name {
+                    ToolErrorCode::Unsupported
+                } else {
+                    ToolErrorCode::InvalidInput
+                };
+                return Err(ToolError::new(code, reason));
+            }
             Ok(AddedFilterRule::NoWebhook) => {
-                return Err(self.problem_words(parts, &account, &WebhookProblemKind::NoWebhook));
+                return Err(self.problem_error(parts, &account, &WebhookProblemKind::NoWebhook));
             }
             Err(StoreError::Decrypt) => {
                 let kind = WebhookProblemKind::RulesUndecryptable;
-                return Err(self.problem_words(parts, &account, &kind));
+                return Err(self.problem_error(parts, &account, &kind));
             }
             Err(err) => return Err(webhook_store_error(err)),
         };
@@ -256,12 +266,12 @@ impl MailTools {
         &self,
         parts: &Parts,
         params: RemoveWebhookFilterParams,
-    ) -> Result<WebhookFilterRemoval, String> {
+    ) -> Result<WebhookFilterRemoval, ToolError> {
         let account = Self::require_account(parts)?;
         let id = match (params.id, params.all) {
             (Some(id), false) => Some(id),
             (None, true) => None,
-            _ => return Err("Give either id or all: true.".to_owned()),
+            _ => return Err(invalid_input("Give either id or all: true.")),
         };
         let store = &self.context.store;
         if store
@@ -270,7 +280,7 @@ impl MailTools {
             .map_err(webhook_store_error)?
             .is_none()
         {
-            return Err(self.problem_words(parts, &account, &WebhookProblemKind::NoWebhook));
+            return Err(self.problem_error(parts, &account, &WebhookProblemKind::NoWebhook));
         }
         let removed = match id {
             Some(id) => store

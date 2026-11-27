@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
+use http::StatusCode;
 use postkeep_store::{AccountId, Store, StoreError, UpstreamTokens};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -295,6 +296,8 @@ impl TokenManager {
         // the expiry margin. Retrying may help; signing in again does not.
         Err(TokenError::OAuth(OAuthError::Rejected {
             provider,
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            retry_after: None,
             code: "503".to_owned(),
             description: Some("the sign-in changed while refreshing; try again".to_owned()),
         }))
