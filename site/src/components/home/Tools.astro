@@ -7,6 +7,8 @@ import Hints from "./Hints.astro";
 import Icon from "../Icon.astro";
 import SiteLink from "../SiteLink.astro";
 import { t } from "../../lib/copy";
+import { toolCodeRuns } from "../../lib/tools";
+import readme from "../../../../README.md?raw";
 
 const GROUPS: [string, number[]][] = [
   ["read", [0, 1, 2, 12]],
@@ -14,8 +16,7 @@ const GROUPS: [string, number[]][] = [
   ["organize", [5, 6, 7, 8]],
   ["alerts", [9, 10, 11, 13, 14, 15]],
 ];
-// The code runs in the descriptions (README.md's backticks).
-const RUNS = ['body_format: "html"', "base64: true", "rules_unreadable"];
+const codeRuns = toolCodeRuns(readme);
 ---
 <section class="sec" id="tools" aria-labelledby="tools-h">
   <div class="wrap">
@@ -28,7 +29,7 @@ const RUNS = ['body_format: "html"', "base64: true", "rules_unreadable"];
             {ids.map((n) => (
               <li class="tool">
                 <p class="tool__h"><code class="tag tag--plain ref__name">{t(`home.tools[${n}].name`)}</code><Hints name={t(`home.tools[${n}].name`)} /></p>
-                <p class="tool__t"><Code id={`home.tools[${n}].desc`} runs={RUNS} /></p>
+                <p class="tool__t"><Code id={`home.tools[${n}].desc`} runs={codeRuns(t(`home.tools[${n}].name`))} /></p>
               </li>
             ))}
           </ul>

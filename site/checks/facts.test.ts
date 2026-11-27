@@ -2,7 +2,7 @@
 // first, then bun test checks/facts.test.ts):
 //   1. the tools the home lists are exactly the server's, and the tools title counts them
 //   2. every home slot that quotes README.md is README.md's words: the headline (the banner's alt text), the tool
-//      descriptions, the mailboxes and agent apps, the install and self-host lines, and /compare/'s address line;
+//      descriptions and their inline code, the mailboxes and agent apps, the install and self-host lines, and /compare/'s address line;
 //      the tool reference's summary table is README.md's; docs/clients.md has a section per agent app, opening with
 //      the home's line for it and linked from the docs index, and the one-mailbox note
 //   3. the install snippets are docs/deployment.md's commands, and README.md's is its Docker Compose one; the
@@ -18,6 +18,7 @@ import { basename, join, resolve } from "node:path";
 import { items, slot, snippet, t } from "../src/lib/copy";
 import { SITE } from "../src/lib/data";
 import { LOGOS } from "../src/lib/logos.js";
+import { mcpToolTable, rowsOf, tableOf } from "../src/lib/tools";
 
 const ROOT = resolve(import.meta.dir, "../..");
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
@@ -30,11 +31,6 @@ const plain = (md: string) =>
 /** The fenced sh blocks of a Markdown text, in order. */
 const blocks = (md: string) => [...md.matchAll(/^```sh\n([\s\S]*?)\n```$/gm)].map((m) => m[1]!);
 const section = (md: string, heading: string) => md.split(`\n## ${heading}\n`)[1]!.split("\n## ")[0]!;
-/** The paragraph of a Markdown text that is the table whose first header cell is `head`. */
-const tableOf = (md: string, head: string) => md.split("\n\n").find((p) => p.trim().startsWith(`| ${head} |`));
-/** A table's rows whose first cell is a code name, as that name → the rest of the row, through `cell`. */
-const rowsOf = (table = "", cell = (text: string) => text) =>
-  new Map([...table.matchAll(/^\| `(\w+)` \| (.*) \|$/gm)].map((m) => [m[1]!, cell(m[2]!)]));
 
 type Schema = { description: string; $ref?: string; oneOf?: { const: string; description: string }[] };
 type Tool = { name: string; annotations?: { destructiveHint?: boolean }; inputSchema: { properties: Record<string, Schema>; $defs?: Record<string, Schema> } };
@@ -52,14 +48,21 @@ test("1. the tools the home lists are exactly the server's, and the tools title 
 });
 
 test("2. every home slot that quotes README.md is README.md's words", () => {
-  // The tools table only: the providers table under it also has tool rows.
-  const table = tableOf(section(readme, "MCP tools"), "Tool")!;
-  const rows = rowsOf(table, plain);
+  const table = mcpToolTable(readme);
+  const rows = rowsOf(table);
   // The tool reference's summary table is this one, word for word.
-  expect(tableOf(read("docs/reference/tools.md"), "Tool")).toBe(table.trim());
+  expect(tableOf(read("docs/reference/tools.md"), "Tool")).toBe(table);
   for (let n = 0; n < pinned.length; n++) {
     const name = t(`home.tools[${n}].name`);
-    expect({ name, desc: t(`home.tools[${n}].desc`) }).toEqual({ name, desc: rows.get(name)! });
+    expect(t(`home.tools[${n}].desc`), name).toBe(plain(rows.get(name)!));
+  }
+  // The tool descriptions and their names appear in the same card order.
+  const descriptions = [...html.matchAll(/<p class="tool__t">(.*?)<\/p>/gs)];
+  expect(descriptions).toHaveLength(listed.length);
+  for (const [i, name] of listed.entries()) {
+    const expected = rows.get(name)!.split("`").filter((_, i) => i % 2 === 1).map((span) => Bun.escapeHTML(plain(span)));
+    const rendered = [...descriptions[i]![1]!.matchAll(/<code class="icode">([^<]*)<\/code>/g)].map((m) => m[1]!);
+    expect(rendered, name).toEqual(expected);
   }
   // The Mailboxes table, row by row, and the paragraph under it.
   const boxes = [...section(readme, "Mailboxes").matchAll(/^\| (?!Mailbox |---)(.*?) \| (.*) \|$/gm)].map((m) => [m[1]!, plain(m[2]!)]);
