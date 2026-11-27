@@ -26,7 +26,8 @@ use postkeep::app::{self, AppConfig, Extensions};
 use postkeep::cli::{Cli, Command, ServeArgs};
 use postkeep::readiness::{ReadinessCheck, ReadinessFuture};
 use postkeep::tools::{
-    ExtensionCall, RejectedPassword, ToolExtension, ToolFuture, WebhookProblem, WebhookProblemKind,
+    ExtensionCall, RejectedPassword, SkillDocument, ToolExtension, ToolFuture, WebhookProblem,
+    WebhookProblemKind,
 };
 use postkeep::watch::{SharedJob, WatchConfig, WatchOwnership, WatchSignal, Watchers};
 use postkeep_auth::{
@@ -243,6 +244,16 @@ impl ToolExtension for Embedding {
             "The workspace's plan.",
             Arc::new(schema),
         )]
+    }
+
+    fn skills(&self, caller: &Authenticated) -> Vec<SkillDocument> {
+        self.push(format!("skills {}", caller.tenant));
+        vec![
+            SkillDocument::from_markdown(
+                "---\nname: \"daily-review\"\ndescription: \"Review recent activity.\"\n---\n",
+            )
+            .unwrap(),
+        ]
     }
 
     fn call<'a>(&'a self, call: ExtensionCall<'a>) -> ToolFuture<'a> {
@@ -814,6 +825,12 @@ async fn every_builder_addition_reaches_the_server_it_runs() {
         );
         let listed = mcp_at(addr, "tools/list", json!({})).await;
         assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 19);
+        let listed = mcp_at(addr, "skills/list", json!({})).await;
+        let skills = listed["result"]["skills"].as_array().unwrap();
+        assert_eq!(
+            skills.last().unwrap()["frontmatter"]["name"],
+            "daily-review"
+        );
         let get_plan = json!({ "name": "get_plan", "arguments": {} });
         let called = mcp_at(addr, "tools/call", get_plan).await;
         assert_eq!(
@@ -827,6 +844,7 @@ async fn every_builder_addition_reaches_the_server_it_runs() {
                 "invalid GET /authorize The authorization request has no client_id.".to_owned(),
                 "callback GET /oauth/microsoft/callback 400 This sign-in has expired".to_owned(),
                 "tools tenant-a".to_owned(),
+                "skills tenant-a".to_owned(),
                 "tools tenant-a".to_owned(),
                 "check get_plan".to_owned(),
                 "usage get_plan".to_owned(),
@@ -834,7 +852,7 @@ async fn every_builder_addition_reaches_the_server_it_runs() {
                 "after get_plan Done".to_owned(),
             ]
         );
-        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
     };
     tokio::select! {
         result = server => panic!("the server stopped: {result:?}"),
@@ -1082,6 +1100,14 @@ async fn the_tool_extension_lists_checks_and_runs_its_tools() {
     let tools = listed["result"]["tools"].as_array().unwrap();
     assert_eq!((tools.len(), &tools[18]["name"]), (19, &json!("get_plan")));
     assert_eq!(h.embedding.take(), ["tools tenant-a"]);
+
+    let (status, body) = mcp(&h.app, "embedding-key", "skills/list").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed: Value = serde_json::from_str(&body).unwrap();
+    let skills = listed["result"]["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 4);
+    assert_eq!(skills[3]["uri"], "skill://daily-review/SKILL.md");
+    assert_eq!(h.embedding.take(), ["skills tenant-a"]);
 
     let initialize = json!({
         "protocolVersion": "2025-06-18",

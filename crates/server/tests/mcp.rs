@@ -40,11 +40,13 @@ use postkeep_store::{
     WebhookSettings,
 };
 use postkeep_webhook::testing::{Receiver, receiver};
+use rmcp::model::{SKILLS_EXTENSION_ID, SkillResource};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
+use common::mcp_request;
 use imap::{ACCEPT, BUSY, REJECT, scripted_mail, unreachable_mail};
 
 const HOST: &str = "mail.example.com";
@@ -329,11 +331,7 @@ impl Harness {
         origin: Option<&str>,
         body: &Value,
     ) -> Reply {
-        let mut request = Request::post("/mcp")
-            .header(header::HOST, host)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ACCEPT, "application/json, text/event-stream")
-            .header("mcp-protocol-version", PROTOCOL);
+        let mut request = mcp_request::post(host, PROTOCOL);
         if let Some(origin) = origin {
             request = request.header(header::ORIGIN, origin);
         }
@@ -341,6 +339,11 @@ impl Harness {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         self.send(request.body(Body::from(body.to_string())).unwrap())
+            .await
+    }
+
+    async fn rpc_2026(&self, token: &str, method: &str, params: Value) -> Reply {
+        self.send(mcp_request::authenticated_2026(HOST, token, method, params))
             .await
     }
 
@@ -503,6 +506,113 @@ async fn mcp_endpoint_requires_a_token() {
         .send(Request::get("/").body(Body::empty()).unwrap())
         .await;
     assert!(landing.body.contains("https://mail.example.com/mcp"));
+}
+
+#[tokio::test]
+async fn mcp_endpoint_serves_skills_over_2025_and_2026_protocols() {
+    const URI: &str = "skill://cross-inbox-search/SKILL.md";
+    const UNKNOWN: &str = "skill://not-a-skill/SKILL.md";
+    let harness = harness(unreachable_mail(), AcceptAll).await;
+    for (method, params) in [
+        ("skills/list", json!({})),
+        ("resources/read", json!({ "uri": URI })),
+    ] {
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        let reply = harness.rpc_raw(None, HOST, &body).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{method}");
+    }
+
+    let token = harness.sign_in("agent@example.com", "test-password").await;
+    for modern in [false, true] {
+        let rpc = async |method, params| {
+            let reply =
+                if modern {
+                    harness.rpc_2026(&token, method, params).await
+                } else {
+                    harness.rpc_raw(
+                    Some(&token), HOST,
+                    &json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }),
+                ).await
+                };
+            assert_eq!(reply.status, StatusCode::OK, "{method}: {}", reply.body);
+            reply.json()
+        };
+        let info = if modern {
+            rpc("server/discover", json!({})).await
+        } else {
+            rpc("initialize", initialize()).await
+        };
+        let capabilities = &info["result"]["capabilities"];
+        assert_eq!(capabilities["resources"], json!({}));
+        assert_eq!(capabilities["extensions"][SKILLS_EXTENSION_ID], json!({}));
+        let listed = rpc("skills/list", json!({ "cursor": "ignored" })).await;
+        let skill = rpc("skills/get", json!({ "uri": URI })).await;
+        let resources = rpc("resources/list", json!({ "cursor": "ignored" })).await;
+        let read = rpc("resources/read", json!({ "uri": URI })).await;
+        for reply in [&listed, &skill, &resources, &read] {
+            let result = &reply["result"];
+            assert!(result.is_object(), "{reply}");
+            assert!(result.get("nextCursor").is_none(), "{reply}");
+            if modern {
+                assert_eq!(result["resultType"], "complete");
+                assert_eq!(result["ttlMs"], 0);
+                assert_eq!(result["cacheScope"], "public");
+            } else {
+                for key in ["resultType", "ttlMs", "cacheScope"] {
+                    assert!(result.get(key).is_none(), "{key} should be absent: {reply}");
+                }
+            }
+        }
+        let listed = listed["result"]["skills"].as_array().unwrap();
+        let resources = resources["result"]["resources"].as_array().unwrap();
+        assert_eq!(listed.len(), 3);
+        assert_eq!(resources.len(), listed.len());
+        for (skill, resource) in listed.iter().zip(resources) {
+            assert_eq!(resource["uri"], skill["uri"]);
+            assert_eq!(resource["name"], skill["frontmatter"]["name"]);
+            assert_eq!(resource["description"], skill["frontmatter"]["description"]);
+            assert_eq!(resource["mimeType"], "text/markdown");
+            assert_eq!(resource["size"], skill["resources"][0]["size"]);
+        }
+        assert_eq!(listed[0]["uri"], URI);
+        assert_eq!(skill["result"]["skill"], listed[0]);
+        let manifest: SkillResource =
+            serde_json::from_value(listed[0]["resources"][0].clone()).unwrap();
+        let contents = read["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["uri"], URI);
+        assert_eq!(contents[0]["mimeType"], "text/markdown");
+        manifest
+            .verify(contents[0]["text"].as_str().unwrap().as_bytes())
+            .unwrap();
+
+        let unknown_skill = rpc("skills/get", json!({ "uri": UNKNOWN })).await;
+        assert_eq!(unknown_skill["error"]["code"], -32602);
+        assert_eq!(unknown_skill["error"]["message"], "skill not found");
+        let unknown_resource = rpc("resources/read", json!({ "uri": UNKNOWN })).await;
+        assert_eq!(
+            unknown_resource["error"]["code"],
+            if modern { -32602 } else { -32002 }
+        );
+        assert_eq!(unknown_resource["error"]["message"], "resource not found");
+        if modern {
+            let malformed = rpc(
+                "skills/get",
+                json!({ "uri": "skill://cross-inbox-search/other.md" }),
+            )
+            .await;
+            assert_eq!(malformed["error"]["code"], -32602);
+            let directory = harness
+                .rpc_2026(
+                    &token,
+                    "resources/directory/read",
+                    json!({ "uri": "skill://cross-inbox-search/" }),
+                )
+                .await;
+            assert_eq!(directory.status, StatusCode::NOT_FOUND);
+            assert_eq!(directory.json()["error"]["code"], -32601);
+        }
+    }
 }
 
 #[tokio::test]

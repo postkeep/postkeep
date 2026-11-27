@@ -17,6 +17,8 @@
 
 mod bucket;
 mod imap;
+#[path = "common/mcp_request.rs"]
+mod mcp_request;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,7 +29,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use postkeep::app::{self, AppConfig, Extensions};
-use postkeep::tools::{ExtensionCall, ToolExtension, ToolFuture};
+use postkeep::tools::{ExtensionCall, SkillDocument, ToolExtension, ToolFuture};
 use postkeep_auth::{
     AuthConfig, AuthState, Authenticated, BearerRequest, CallEnd, CeilingsFuture, CheckFuture,
     CredentialVerifier, HoldFuture, Outbox, OutboxCeilings, PrincipalResolver, Refusal, Resolution,
@@ -47,6 +49,8 @@ use tower::ServiceExt;
 use imap::{ACCEPT, scripted_mail};
 
 const HOST: &str = "mail.example.com";
+const EXTRA_SKILL: &str =
+    "---\nname: \"follow-up\"\ndescription: \"Draft a follow-up.\"\n---\n\n# Follow up\n";
 const UNKNOWN: &str = "unknown mailbox: pass the id or address of a mailbox this connection can \
 use, or leave mailbox out to use the default one";
 /// What a server tool that opened a mailbox fails with.
@@ -197,6 +201,20 @@ impl ToolExtension for AccountTools {
             ),
             tool("list_folders", json!({ "type": "object" }), false),
         ]
+    }
+
+    fn skills(&self, caller: &Authenticated) -> Vec<SkillDocument> {
+        if !matches!(caller.principal.as_str(), "key:1" | "key:2") {
+            return Vec::new();
+        }
+        [
+            "---\nname: \"cross-inbox-search\"\ndescription: \"Colliding skill.\"\n---\n",
+            EXTRA_SKILL,
+            "---\nname: \"follow-up\"\ndescription: \"Duplicate skill.\"\n---\n",
+        ]
+        .into_iter()
+        .map(|markdown| SkillDocument::from_markdown(markdown).unwrap())
+        .collect()
     }
 
     /// Answers after `wait` milliseconds, panics with `panic` and fails
@@ -461,21 +479,15 @@ async fn upload(app: &Router, token: &str, file: &[u8]) -> String {
     made["upload_id"].as_str().unwrap().to_owned()
 }
 
-fn rpc_request(token: &str, method: &str, params: &Value, protocol: &str) -> Request<Body> {
+fn rpc_request(token: &str, method: &str, params: &Value) -> Request<Body> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    Request::post(app::MCP_PATH)
-        .header(header::HOST, HOST)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json, text/event-stream")
-        .header("mcp-protocol-version", protocol)
-        .header("mcp-method", method)
+    mcp_request::post(HOST, "2025-06-18")
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::from(body.to_string()))
         .unwrap()
 }
 
-async fn rpc_at(app: &Router, token: &str, method: &str, params: Value, protocol: &str) -> Value {
-    let request = rpc_request(token, method, &params, protocol);
+async fn send_rpc(app: &Router, method: &str, request: Request<Body>) -> Value {
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -485,7 +497,7 @@ async fn rpc_at(app: &Router, token: &str, method: &str, params: Value, protocol
 }
 
 async fn rpc(app: &Router, token: &str, method: &str, params: Value) -> Value {
-    rpc_at(app, token, method, params, "2025-06-18").await
+    send_rpc(app, method, rpc_request(token, method, &params)).await
 }
 
 /// Calls `tool` and returns `Ok` with the structured output, or `Err` with
@@ -514,12 +526,9 @@ async fn listed(app: &Router, token: &str) -> Vec<Value> {
 
 /// The `cacheScope` of a `tools/list` answer under the 2026-07-28 protocol.
 async fn cache_scope(app: &Router) -> Value {
-    let meta = json!({
-        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-        "io.modelcontextprotocol/clientCapabilities": {}
-    });
-    let params = json!({ "_meta": meta });
-    let reply = rpc_at(app, "workspace-key", "tools/list", params, "2026-07-28").await;
+    let method = "tools/list";
+    let request = mcp_request::authenticated_2026(HOST, "workspace-key", method, json!({}));
+    let reply = send_rpc(app, method, request).await;
     reply["result"]["cacheScope"].clone()
 }
 
@@ -567,6 +576,81 @@ async fn the_extension_lists_its_tools_to_the_callers_it_picks() {
         format!("{plain}\n\n{PARAGRAPH}")
     );
     assert_eq!(h.tools.take(), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn the_extension_lists_and_serves_its_skills_to_the_callers_it_picks() {
+    let h = harness().await;
+    let selected = "workspace-key";
+    let other = "other-key";
+    let extra = SkillDocument::from_markdown(EXTRA_SKILL).unwrap();
+    let builtin_uri = "skill://cross-inbox-search/SKILL.md";
+    for modern in [false, true] {
+        let request = async |app: &Router, token, method, uri: Option<&str>| {
+            let params = uri.map_or_else(|| json!({}), |uri| json!({ "uri": uri }));
+            if modern {
+                let request = mcp_request::authenticated_2026(HOST, token, method, params);
+                send_rpc(app, method, request).await
+            } else {
+                rpc(app, token, method, params).await
+            }
+        };
+        for (method, field) in [("skills/list", "skills"), ("resources/list", "resources")] {
+            let plain = request(&h.plain, selected, method, None).await;
+            let selected = request(&h.extended, selected, method, None).await;
+            let other = request(&h.extended, other, method, None).await;
+            let entries = selected["result"][field].as_array().unwrap();
+            let builtins = plain["result"][field].as_array().unwrap();
+            assert_eq!(entries.len(), builtins.len() + 1);
+            assert_eq!(&entries[..builtins.len()], builtins);
+            assert_eq!(&other["result"][field], &plain["result"][field]);
+            assert_eq!(entries.last().unwrap()["uri"], extra.uri());
+            for reply in [&selected, &other] {
+                assert_skill_cache_scope(&reply["result"], modern);
+            }
+        }
+        for (method, field, missing) in [
+            ("skills/get", "skill", -32602),
+            (
+                "resources/read",
+                "contents",
+                if modern { -32602 } else { -32002 },
+            ),
+        ] {
+            let reply = request(&h.extended, selected, method, Some(extra.uri())).await;
+            let result = &reply["result"];
+            assert_skill_cache_scope(result, modern);
+            if method == "skills/get" {
+                assert_eq!(result[field]["uri"], extra.uri());
+                assert_eq!(
+                    result[field]["frontmatter"]["description"],
+                    extra.description()
+                );
+            } else {
+                assert_eq!(result[field][0]["uri"], extra.uri());
+                assert_eq!(result[field][0]["text"], EXTRA_SKILL);
+            }
+            let hidden = request(&h.extended, other, method, Some(extra.uri())).await;
+            assert_eq!(hidden["error"]["code"], missing);
+            let plain = request(&h.plain, selected, method, Some(builtin_uri)).await;
+            for token in [selected, other] {
+                let builtin = request(&h.extended, token, method, Some(builtin_uri)).await;
+                assert_eq!(builtin["result"][field], plain["result"][field]);
+                assert_skill_cache_scope(&builtin["result"], modern);
+            }
+        }
+    }
+}
+
+fn assert_skill_cache_scope(result: &Value, modern: bool) {
+    assert!(result.is_object(), "expected a complete result: {result}");
+    if modern {
+        assert_eq!(result["cacheScope"], "private");
+        assert_eq!(result["ttlMs"], 0);
+    } else {
+        assert!(result.get("cacheScope").is_none(), "{result}");
+        assert!(result.get("ttlMs").is_none(), "{result}");
+    }
 }
 
 #[tokio::test]
@@ -1250,7 +1334,7 @@ async fn the_usage_hook_hears_once_how_each_call_it_allowed_ended() {
 
     // A client that leaves: the call runs on, and the hook hears its end.
     let slow = json!({ "name": "get_account", "arguments": { "wait": 500 } });
-    let request = rpc_request(key, "tools/call", &slow, "2025-06-18");
+    let request = rpc_request(key, "tools/call", &slow);
     let started = async {
         let entry = "call get_account - [wait]".to_owned();
         let wait = async {
@@ -1270,7 +1354,7 @@ async fn the_usage_hook_hears_once_how_each_call_it_allowed_ended() {
 
     // A call dropped before it answered.
     let panics = json!({ "name": "get_account", "arguments": { "panic": true } });
-    let request = rpc_request(key, "tools/call", &panics, "2025-06-18");
+    let request = rpc_request(key, "tools/call", &panics);
     let call = tokio::time::timeout(Duration::from_secs(1), h.both.clone().oneshot(request));
     let _ = call.await;
     assert_eq!(ended(&h.usage).await, ["get_account Failed"]);

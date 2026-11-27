@@ -14,7 +14,7 @@
 //! accounts also accept the older `folder` plus `uid` pair, so clients
 //! written for earlier versions keep working.
 //!
-//! An embedding's [`ToolExtension`] can list more tools to some callers,
+//! An embedding's [`ToolExtension`] can list more tools and skills to some callers,
 //! add to the instructions and check every call before it runs. The
 //! embedding's [`UsageHook`] can turn down any call, and any message
 //! before it is sent, or ask to hold a send for the user's yes. A held call
@@ -47,9 +47,11 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::{Extension, ToolCallContext};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Icon,
-    Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType,
-    ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    GetSkillRequestParams, GetSkillResult, Icon, Implementation, ListResourcesResult,
+    ListSkillsResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ResourceContents,
+    ResultType, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, Json, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -126,6 +128,7 @@ macro_rules! search_selection_doc { () => { "Only when more match than this page
 mod attachments;
 mod extension;
 mod filters;
+mod skills;
 
 pub(crate) use attachments::FileDigest;
 pub use attachments::{DownloadAttachmentParams, NewAttachment};
@@ -140,6 +143,8 @@ pub use filters::{
     AddWebhookFilterParams, ListWebhookFiltersParams, RemoveWebhookFilterParams, WebhookFilter,
     WebhookFilterAdded, WebhookFilterList, WebhookFilterRemoval,
 };
+use skills::{MARKDOWN_MIME_TYPE, builtin_skills};
+pub use skills::{SkillDocument, SkillError};
 
 /// How long a held call waits for the user's yes.
 const HOLD_TTL: Duration = Duration::from_mins(30);
@@ -409,7 +414,7 @@ impl MailTools {
         }
     }
 
-    /// The same tools with an embedding's tools, instructions and checks.
+    /// Adds an embedding's tools, skills, instructions and checks.
     #[must_use]
     pub fn with_extension(self, extension: Arc<dyn ToolExtension>) -> Self {
         let mut context = Arc::unwrap_or_clone(self.context);
@@ -3423,10 +3428,7 @@ impl MailTools {
             return Ok(None);
         }
         let worded = self
-            .context
-            .extension
-            .as_ref()
-            .zip(parts.extensions.get::<Authenticated>())
+            .extension_caller(Some(parts))
             .and_then(|(extension, caller)| {
                 extension.password_rejected(RejectedPassword {
                     caller,
@@ -3444,10 +3446,7 @@ impl MailTools {
         account: &AccountId,
         kind: &WebhookProblemKind,
     ) -> String {
-        self.context
-            .extension
-            .as_ref()
-            .zip(parts.extensions.get::<Authenticated>())
+        self.extension_caller(Some(parts))
             .and_then(|(extension, caller)| {
                 extension.webhook_problem(WebhookProblem {
                     caller,
@@ -3614,6 +3613,46 @@ impl MailTools {
             .await
             .map_err(mailbox_error)?;
         summary(outcomes, &change, mode, bulk, list_all, more, left_out)
+    }
+
+    fn extension_caller<'a>(
+        &'a self,
+        parts: Option<&'a Parts>,
+    ) -> Option<(&'a dyn ToolExtension, &'a Authenticated)> {
+        Some((
+            self.context.extension.as_deref()?,
+            parts?.extensions.get::<Authenticated>()?,
+        ))
+    }
+
+    fn cache_hints(&self, context: &RequestContext<RoleServer>) -> Option<(u64, CacheScope)> {
+        if !context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
+        {
+            return None;
+        }
+        // An extension can serve different tools or skills to each caller.
+        let scope = if self.context.extension.is_some() {
+            CacheScope::Private
+        } else {
+            CacheScope::Public
+        };
+        Some((0, scope))
+    }
+
+    fn skills_for(&self, context: &RequestContext<RoleServer>) -> Cow<'static, [SkillDocument]> {
+        let mut skills = Cow::Borrowed(builtin_skills());
+        if let Some((extension, caller)) = self.extension_caller(context.extensions.get::<Parts>())
+        {
+            for skill in extension.skills(caller) {
+                // Each URI is derived from the name, so name equality covers URI collisions.
+                if !skills.iter().any(|listed| listed.name() == skill.name()) {
+                    skills.to_mut().push(skill);
+                }
+            }
+        }
+        skills
     }
 
     /// The extension's tools for `caller`, without names the server's own
@@ -3917,7 +3956,13 @@ fn tool_error(message: &str) -> CallToolResponse {
 )]
 impl ServerHandler for MailTools {
     fn get_info(&self) -> ServerConfig {
-        let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build());
+        let mut info = ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_skills()
+                .build(),
+        );
         info.server_info = Implementation::new("postkeep", env!("CARGO_PKG_VERSION"))
             .with_title("postkeep")
             .with_website_url("https://postkeep.dev")
@@ -3971,31 +4016,78 @@ impl ServerHandler for MailTools {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let supports_cache_hints = context
-            .protocol_version()
-            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
         let mut tools = self.context.router.list_all();
-        // With an extension, callers can see different lists.
-        let scope = if let Some(extension) = &self.context.extension {
-            let caller = context
-                .extensions
-                .get::<Parts>()
-                .and_then(|parts| parts.extensions.get::<Authenticated>());
-            if let Some(caller) = caller {
-                tools.extend(self.extension_tools(extension.as_ref(), caller));
-            }
-            CacheScope::Private
-        } else {
-            CacheScope::Public
-        };
+        if let Some((extension, caller)) = self.extension_caller(context.extensions.get::<Parts>())
+        {
+            tools.extend(self.extension_tools(extension, caller));
+        }
+        let (ttl_ms, cache_scope) = self.cache_hints(&context).unzip();
         Ok(ListToolsResult {
             result_type: Some(ResultType::COMPLETE),
             tools,
             meta: None,
             next_cursor: None,
-            ttl_ms: supports_cache_hints.then_some(0),
-            cache_scope: supports_cache_hints.then_some(scope),
+            ttl_ms,
+            cache_scope,
         })
+    }
+
+    async fn list_skills(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListSkillsResult, ErrorData> {
+        let skills = self.skills_for(&context);
+        let mut result = ListSkillsResult::with_all_items(
+            skills.iter().map(|doc| doc.skill().clone()).collect(),
+        );
+        (result.ttl_ms, result.cache_scope) = self.cache_hints(&context).unzip();
+        Ok(result)
+    }
+
+    async fn get_skill(
+        &self,
+        request: GetSkillRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetSkillResult, ErrorData> {
+        let skills = self.skills_for(&context);
+        let doc = skills
+            .iter()
+            .find(|doc| doc.uri() == request.uri)
+            .ok_or_else(|| ErrorData::invalid_params("skill not found", None))?;
+        let mut result = GetSkillResult::new(doc.skill().clone());
+        (result.ttl_ms, result.cache_scope) = self.cache_hints(&context).unzip();
+        Ok(result)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let skills = self.skills_for(&context);
+        let mut result = ListResourcesResult::with_all_items(
+            skills.iter().map(|doc| doc.resource().clone()).collect(),
+        );
+        (result.ttl_ms, result.cache_scope) = self.cache_hints(&context).unzip();
+        Ok(result)
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let skills = self.skills_for(&context);
+        let doc = skills
+            .iter()
+            .find(|doc| doc.uri() == request.uri)
+            .ok_or_else(|| ErrorData::resource_not_found("resource not found", None))?;
+        let contents =
+            ResourceContents::text(doc.markdown(), doc.uri()).with_mime_type(MARKDOWN_MIME_TYPE);
+        let mut result = ReadResourceResult::new(vec![contents]);
+        (result.ttl_ms, result.cache_scope) = self.cache_hints(&context).unzip();
+        Ok(result.into())
     }
 }
 

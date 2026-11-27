@@ -493,3 +493,17 @@ The add is refused, and nothing is stored, with these messages:
 | `all` | `true` removes every rule of the mailbox. |
 
 Give exactly one of `id` or `all: true`; otherwise the tool answers `Give either id or all: true.` Returns `removed`, how many rules were removed: 0 for an unknown id or another mailbox's rule, so the same call again changes nothing. It works past the limit and on rules this server can't read, and restarts the mailbox's watcher when it removed something. The tool needs a webhook saved on `/account`.
+
+## Skills
+
+The server also offers three workflow playbooks through the MCP Skills
+extension (SEP-2640):
+
+- `cross-inbox-search` — find mail across providers and folders, report search
+  coverage, and recover message IDs after moves.
+- `multi-inbox-triage` — turn unread or recent mail into a prioritized digest
+  without changing any messages.
+- `safe-bulk-cleanup` — preview and confirm the exact scope of bulk changes.
+
+Use `skills/list` to discover the playbooks and `skills/get` for a manifest.
+Their `SKILL.md` files are also listed and readable as MCP resources.

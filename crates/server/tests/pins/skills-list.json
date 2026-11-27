@@ -1,0 +1,50 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "skills": [
+      {
+        "uri": "skill://cross-inbox-search/SKILL.md",
+        "frontmatter": {
+          "name": "cross-inbox-search",
+          "description": "Search email reliably across providers, folders, and mailboxes with clear scope disclosure and safe handling of post-move message IDs."
+        },
+        "resources": [
+          {
+            "uri": "skill://cross-inbox-search/SKILL.md",
+            "digest": "sha256:62642c77b9bfc3cd13ddb55d27c8cb6adf4aa07058d0aabae7e6804fad993086",
+            "size": 1607
+          }
+        ]
+      },
+      {
+        "uri": "skill://multi-inbox-triage/SKILL.md",
+        "frontmatter": {
+          "name": "multi-inbox-triage",
+          "description": "Triage unread or recent email across connected mailboxes into a prioritized digest with clear scope disclosure and no unapproved changes."
+        },
+        "resources": [
+          {
+            "uri": "skill://multi-inbox-triage/SKILL.md",
+            "digest": "sha256:ab6a5b30bf1b33480ccc302bcd4fdd3340e6d7905f13d1c7f12b13f0a74a2ad1",
+            "size": 1766
+          }
+        ]
+      },
+      {
+        "uri": "skill://safe-bulk-cleanup/SKILL.md",
+        "frontmatter": {
+          "name": "safe-bulk-cleanup",
+          "description": "Preview and run bulk email cleanup (archive, flag, mark read, or move to trash) with bounded targets, dry_run previews, and explicit user confirmation."
+        },
+        "resources": [
+          {
+            "uri": "skill://safe-bulk-cleanup/SKILL.md",
+            "digest": "sha256:b4a475d2ab4f8836482954a9c0fcf0cdb63911b806ce2d828de729ce1138e88f",
+            "size": 1981
+          }
+        ]
+      }
+    ]
+  }
+}
