@@ -4,7 +4,7 @@
 // then the page and the polite live region the copy buttons speak through.
 import "../design/tokens.css";
 import "../styles/site.css";
-import { CSP_META } from "../lib/csp";
+import { CSP_META, REFERRER_POLICY } from "../lib/csp";
 import { t } from "../lib/copy";
 import { SITE } from "../lib/data";
 import { CANVAS } from "../lib/canvas";
@@ -30,7 +30,7 @@ const ogImage = new URL(SITE.ogImage, Astro.site).href;
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Content-Security-Policy" content={CSP_META} />
-  <meta name="referrer" content="no-referrer" />
+  <meta name="referrer" content={REFERRER_POLICY} />
   <meta name="color-scheme" content="light dark" />
   <meta name="theme-color" content={CANVAS.light} media="(prefers-color-scheme: light)" data-light={CANVAS.light} data-dark={CANVAS.dark} />
   <meta name="theme-color" content={CANVAS.dark} media="(prefers-color-scheme: dark)" data-light={CANVAS.light} data-dark={CANVAS.dark} />

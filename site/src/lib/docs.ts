@@ -20,7 +20,7 @@ const GROUPS: [string, string[]][] = [
 ];
 
 /** Docs pages the design has no slot for, by their path under /docs/. */
-const EXTRA = ["embedding/", "providers/microsoft-admin-consent/"];
+const EXTRA = ["embedding/", "providers/microsoft-admin-consent/", "privacy/"];
 
 export type DocEntry = CollectionEntry<"docs"> | CollectionEntry<"repo">;
 

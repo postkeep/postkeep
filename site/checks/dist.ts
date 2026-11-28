@@ -1,6 +1,8 @@
 // Static checks over the built site in dist/ (run `bun run build` first):
 //
 // - every page carries the CSP meta tag (src/lib/csp.ts), and dist/_headers carries the CSP header
+// - the policy allows only 'self', 'none' and Cloudflare Web Analytics' script host (script-src only), and the
+//   referrer policy is same-origin in the header and in every page's meta tag
 // - nothing inline: no <script> without src, no <style> element, no style attribute, no on* handler,
 //   no javascript: URL
 // - nothing from another origin: scripts, stylesheets, icons, images and CSS url() are same-origin paths
@@ -15,7 +17,7 @@
 //   bun checks/dist.ts
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { CSP_HEADER, CSP_META } from "../src/lib/csp";
+import { CSP_HEADER, CSP_META, HEADERS } from "../src/lib/csp";
 import { EMAIL } from "../src/lib/highlight";
 import copy from "../src/data/copy.json";
 import own from "../src/data/site.json";
@@ -56,6 +58,7 @@ interface Page {
   file: string;
   path: string;
   csp: string[];
+  referrer: string[];
   ids: Set<string>;
   loads: string[];
   links: string[];
@@ -67,7 +70,7 @@ interface Page {
 }
 
 async function read(file: string): Promise<Page> {
-  const page: Page = { file: relative(DIST, file), path: pathOf(file), csp: [], ids: new Set(), loads: [], links: [], inline: [], title: "", meta: {}, canonical: null, noindex: false };
+  const page: Page = { file: relative(DIST, file), path: pathOf(file), csp: [], referrer: [], ids: new Set(), loads: [], links: [], inline: [], title: "", meta: {}, canonical: null, noindex: false };
   let inScript = false;
   let inTitle = false;
   await new HTMLRewriter()
@@ -85,6 +88,7 @@ async function read(file: string): Promise<Page> {
     .on("meta", {
       element(el) {
         if (el.getAttribute("http-equiv")?.toLowerCase() === "content-security-policy") page.csp.push(el.getAttribute("content") ?? "");
+        if (el.getAttribute("name")?.toLowerCase() === "referrer") page.referrer.push(el.getAttribute("content") ?? "");
         const key = el.getAttribute("property") ?? el.getAttribute("name");
         if (key) page.meta[key] = el.getAttribute("content") ?? "";
         if (key === "robots" && /noindex/.test(el.getAttribute("content") ?? "")) page.noindex = true;
@@ -126,11 +130,33 @@ const pages = await Promise.all(html.map(read));
 const byPath = new Map(pages.map((p) => [p.path, p]));
 
 // ------------------------------------------------------------------ CSP and inline content
+const BEACON = "https://static.cloudflareinsights.com";
+/** The policy's invariants, whatever its text: no empty or repeated directive (a browser keeps the first), no source but 'self', 'none' and the beacon's host in script-src (so no *, unsafe-*, data:, blob: or http:), and the directives default-src doesn't cover. */
+function policyProblems(csp: string): string[] {
+  const out: string[] = [];
+  const dirs = new Map<string, string>();
+  for (const d of csp.split(";")) {
+    const [name = "", ...sources] = d.trim().split(/\s+/);
+    const key = name.toLowerCase();
+    if (!key) out.push("an empty directive");
+    else if (dirs.has(key)) out.push(`${key} appears twice`);
+    else dirs.set(key, sources.join(" "));
+    for (const s of sources) if (!["'self'", "'none'"].includes(s) && !(key === "script-src" && s === BEACON)) out.push(`${key} allows ${s}`);
+  }
+  for (const [name, value] of Object.entries({ "default-src": "'none'", "connect-src": "'self'", "base-uri": "'none'", "form-action": "'none'" })) if (dirs.get(name) !== value) out.push(`${name} is not ${value}`);
+  return out;
+}
 const headers = existsSync(join(DIST, "_headers")) ? readFileSync(join(DIST, "_headers"), "utf8") : "";
-if (!headers.includes(`Content-Security-Policy: ${CSP_HEADER}`)) fail("_headers: no Content-Security-Policy header matching src/lib/csp.ts");
+if (headers !== HEADERS) fail("_headers: differs from HEADERS in src/lib/csp.ts");
+const all = headers.split("\n").filter((l) => /^\s*(content-security-policy|referrer-policy)\s*:/i.test(l));
+const first = headers.split("\n\n")[0]!.split("\n");
+if (all.length !== 2 || !first.includes(`  Content-Security-Policy: ${CSP_HEADER}`) || !first.includes("  Referrer-Policy: same-origin")) fail("_headers: the /* block needs exactly one CSP header and one Referrer-Policy: same-origin (Cloudflare Web Analytics needs the Referer header)");
 if (/set-cookie/i.test(headers)) fail("_headers: sets a cookie");
+for (const problem of policyProblems(CSP_HEADER)) fail(`src/lib/csp.ts: ${problem}`);
+if (CSP_HEADER !== `${CSP_META}; frame-ancestors 'none'`) fail("src/lib/csp.ts: CSP_HEADER adds more than frame-ancestors 'none' to CSP_META");
 for (const p of pages) {
   if (p.csp.length !== 1 || p.csp[0] !== CSP_META) fail(`${p.file}: CSP meta tag missing or different from src/lib/csp.ts`);
+  if (p.referrer.length !== 1 || p.referrer[0] !== "same-origin") fail(`${p.file}: needs exactly one referrer meta tag, same-origin`);
   for (const i of new Set(p.inline)) fail(`${p.file}: ${i}`);
 }
 

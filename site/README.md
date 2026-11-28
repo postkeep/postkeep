@@ -67,21 +67,22 @@ tools list the facts test reads. The site is dark until the reader picks a theme
   `check:dist`.
 - Titles: the home page uses M1; every other page is `<page> · postkeep` and docs pages
   `<page> · postkeep docs`, from the formats in `src/data/site.json`.
-- No names of people and no real email addresses: examples use `alice@example.com` and
-  `mail.example.com`.
+- No names of people and no personal email addresses (only the published `support@postkeep.ai` address in the
+  privacy note): examples use `alice@example.com` and `mail.example.com`.
 - The console on /compare/ is a picture of postkeep Cloud's console in its own words and design: it changes when
   they do, not only when the product's code does.
 
 ## Docs
 
 - The docs pages are one page per file at `/docs/<path>/`. The repository's `docs/` is the one source of
-  every plain-Markdown page, written to `src/content/repo/` by `scripts/docs.ts` before `dev`, `build` and
+  the pages it holds, written to `src/content/repo/` by `scripts/docs.ts` before `dev`, `build` and
   `check:types` (its header comment says what it converts). Edit `docs/`, never the output; restart `dev`
   to see a change.
-- `src/content/docs/docs/` keeps the site's own pages built from components (Quickstart, Mail providers
-  and iCloud Mail), which link to `docs/` rather than copy it.
+- `src/content/docs/docs/` keeps the site's own pages: those built from components (Quickstart, Mail
+  providers and iCloud Mail), which link to `docs/` rather than copy it, and site-only Markdown such as
+  `privacy.md`.
 - `src/lib/docs.ts` builds the sidebar from the docs index steps in the copy deck. The sidebar label is
-  the page's title; pages the design has no slot for (Embedding) go at the end of Reference. The build
+  the page's title; pages the design has no slot for (such as Embedding and Privacy) go at the end of Reference. The build
   fails if a sidebar page has no file or another title, a file has no place in the sidebar, or two files
   give one address.
 - `src/lib/markdown.ts` adds Sätteri plugins: `:::note` and `:::caution` become an aside, long inline
@@ -100,7 +101,7 @@ tools list the facts test reads. The site is dark until the reader picks a theme
 | --- | --- |
 | `check:types` | `astro check` and `tsc --noEmit` |
 | `check:content` | the built pages hold no forbidden word (stored as SHA-256 digests) and no glued separators |
-| `check:dist` | the CSP meta tag on every page and the header in `dist/_headers`; no inline script, `<style>`, style attribute, event handler or `javascript:` URL; every script, stylesheet, image, icon and CSS `url()` is a same-origin file in `dist/`; every internal link, `#fragment` and `_redirects` target resolves; titles follow the formats in `src/data/site.json`, with `og:site_name`, a description, `og:image` on the origin, and a canonical URL and `og:url` matching each indexed page; the sitemap lists exactly the indexed pages and `robots.txt` points to it; every email address in a page's text stands alone between `<!--email_off-->` comments, and no link is `mailto:` |
+| `check:dist` | the CSP meta tag on every page and the header in `dist/_headers`; the policy allows nothing but `'self'`, `'none'` and the beacon's script host, and the referrer policy is `same-origin`; no inline script, `<style>`, style attribute, event handler or `javascript:` URL; every script, stylesheet, image, icon and CSS `url()` is a same-origin file in `dist/`; every internal link, `#fragment` and `_redirects` target resolves; titles follow the formats in `src/data/site.json`, with `og:site_name`, a description, `og:image` on the origin, and a canonical URL and `og:url` matching each indexed page; the sitemap lists exactly the indexed pages and `robots.txt` points to it; every email address in a page's text stands alone between `<!--email_off-->` comments, and no link is `mailto:` |
 | `facts.test.ts` | after the build: the home lists exactly the tools in `crates/server/tests/pins/tools-list.json` and its tools title counts them; every home and /compare/ slot that quotes `README.md` (the headline, the tool descriptions, the mailboxes and agent apps, the install and self-host lines, /compare/'s address line) is its words; `docs/clients.md` has a section per agent app, opening with the home's line for it and linked from the docs index; the install snippets are the commands in `docs/deployment.md`, and `README.md`'s is its Docker Compose one, with the Rust version and repository links from `Cargo.toml`; `docs/reference/tools.md`'s summary table is `README.md`'s, its parameter rows match the pin's descriptions, and the tools it names as destructive or not destructive match the pin's hints; the footer's independence line is `README.md`'s; it names the owner of every logo, as `src/lib/LOGO-SOURCES.md` records it; each app-password link in `crates/mail/src/presets.rs` is on its provider's page and in `docs/clients.md` |
 | `check:design` | the copied brand files match their source; for maintainers with a checkout of the brand source in `DESIGN_SRC`, so not part of `bun run check` |
 
@@ -109,7 +110,11 @@ tools list the facts test reads. The site is dark until the reader picks a theme
 ## Security headers
 
 `src/lib/csp.ts` holds the Content Security Policy: everything from this origin, nothing inline (no inline
-scripts, no `<style>`, no style attributes). Each page carries it in a meta tag, and `dist/_headers` sends
+scripts, no `<style>`, no style attributes), and one outside script, Cloudflare Web Analytics' beacon
+(`https://static.cloudflareinsights.com`), which Cloudflare adds to the pages at its edge, not in `dist/`; it
+sets no cookie and reports to this origin's `/cdn-cgi/rum`, which `connect-src 'self'` allows. `Referrer-Policy`
+is `same-origin` (header and meta tag), because the beacon needs the `Referer` header; other sites still get
+none. `/docs/privacy/` is the privacy note. Each page carries the policy in a meta tag, and `dist/_headers` sends
 it as a header with `frame-ancestors 'none'`. The theme is set before the first paint by
 `public/js/theme-init.js`, a file rather than an inline script. Nothing sets a cookie: the theme choice
 stays in local storage.
