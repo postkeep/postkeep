@@ -44,8 +44,8 @@ use super::capabilities::SelectionFilterRules;
 use super::id::{self, GRAPH_PREFIX};
 use super::{
     Change, Criteria, Cutoff, DRAFT_UNCONFIRMED, Fetched, FolderEntry, IdsFrom, MAY_HAVE_BEEN_SENT,
-    MailboxError, MailboxResult, Mode, NOTHING_LEFT, Outcome, Page, SENT_NO_ANSWER, SavedDraft,
-    Selected, Selector, SendError, Status, Summary, TIME_EXHAUSTED, account_store_code, maybe_sent,
+    MailboxError, MailboxResult, Mode, NOTHING_LEFT, Outcome, Page, SavedDraft, Selected, Selector,
+    SendError, Status, Summary, TIME_EXHAUSTED, account_store_code, maybe_sent,
     provider_may_have_acted, provider_outcomes, too_large_to_forward, unanswered,
 };
 
@@ -178,6 +178,10 @@ impl Batch {
                 }
                 Some(response) => {
                     let err = response.error();
+                    if matches!(stage, BatchStage::Write { .. }) && unanswered(&err) {
+                        out.sent_no_answer();
+                        continue;
+                    }
                     let (code, retry_after) = classify_api_error(&err);
                     let status = if response.status == 404 {
                         Status::NotFound
@@ -198,12 +202,7 @@ impl Batch {
                         ToolErrorCode::ProviderUnavailable,
                         None,
                     ),
-                    BatchStage::Write { .. } => out.fail(
-                        Status::Failed,
-                        SENT_NO_ANSWER,
-                        ToolErrorCode::SubmissionUncertain,
-                        None,
-                    ),
+                    BatchStage::Write { .. } => out.sent_no_answer(),
                 },
             }
         }
@@ -1147,20 +1146,17 @@ impl GraphMailbox {
                     let reason = api_error_message(&err, "Microsoft");
                     let (code, retry_after) = classify_api_error(&err);
                     pending_reason(outcomes, &reason, (code, retry_after));
-                    let (status, reason, code, retry_after) = if writing && no_answer {
-                        (
-                            Status::Failed,
-                            SENT_NO_ANSWER,
-                            ToolErrorCode::SubmissionUncertain,
-                            None,
-                        )
-                    } else if err.is_rate_limited() || err.status().is_none() {
-                        (Status::NotReached, reason.as_str(), code, retry_after)
+                    let status = if err.is_rate_limited() || err.status().is_none() {
+                        Status::NotReached
                     } else {
-                        (Status::Failed, reason.as_str(), code, retry_after)
+                        Status::Failed
                     };
                     for index in requests.iter().filter_map(batch_index) {
-                        outcomes[index].fail(status, reason, code, retry_after);
+                        if writing && no_answer {
+                            outcomes[index].sent_no_answer();
+                        } else {
+                            outcomes[index].fail(status, &reason, code, retry_after);
+                        }
                     }
                     return Ok(false);
                 }
@@ -2343,7 +2339,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::mailbox::{Mailbox, SEARCH_TIME_EXHAUSTED};
+    use crate::mailbox::{Mailbox, SEARCH_TIME_EXHAUSTED, SENT_NO_ANSWER};
 
     fn date(value: &str) -> Option<chrono::NaiveDate> {
         chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
@@ -2839,7 +2835,14 @@ mod tests {
     }
 
     async fn whole_request_refusals_stop_later_batches() {
-        for status in [503, 401] {
+        for (status, ids_from) in [
+            (500, IdsFrom::Selection),
+            (502, IdsFrom::Selection),
+            (503, IdsFrom::Selection),
+            (504, IdsFrom::Selection),
+            (503, IdsFrom::Caller),
+            (401, IdsFrom::Selection),
+        ] {
             let server = MockServer::start().await;
             let (mailbox, _dir) = outlook(&server).await;
             Mock::given(method("POST")).and(path("/graph/v1.0/$batch"))
@@ -2861,7 +2864,7 @@ mod tests {
             let outcomes = mailbox
                 .apply(
                     &ids,
-                    IdsFrom::Selection,
+                    ids_from,
                     &Change::Flags {
                         read: Some(true),
                         flagged: None,
@@ -2871,17 +2874,38 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            // A 5xx answering a write may come after the change was made.
+            let uncertain = status >= 500 && ids_from == IdsFrom::Selection;
+            let (later, error) = (&outcomes[20].reason, outcomes[20].error);
+            let first = if uncertain {
+                (
+                    SENT_NO_ANSWER,
+                    Some((ToolErrorCode::SubmissionUncertain, None)),
+                )
+            } else {
+                (later.as_str(), error)
+            };
             assert!(
                 outcomes[..20]
                     .iter()
-                    .all(|out| out.status == Status::Failed)
+                    .all(|out| out.status == Status::Failed
+                        && (out.reason.as_str(), out.error) == first),
+                "{status} {ids_from:?}"
             );
             assert!(
                 outcomes[20..]
                     .iter()
-                    .all(|out| out.status == Status::NotReached)
+                    .all(|out| out.status == Status::NotReached
+                        && out.reason == *later
+                        && out.error == error),
+                "{status} {ids_from:?}"
             );
-            assert!(outcomes.iter().all(|out| out.reason == outcomes[0].reason));
+            assert_ne!(later, SENT_NO_ANSWER);
+            assert_eq!(
+                error.map(|(code, retry)| (code == ToolErrorCode::ProviderUnavailable, retry)),
+                Some((status >= 500, (status == 503).then_some(10))),
+                "{status} {ids_from:?}"
+            );
             assert_eq!(
                 server.received_requests().await.unwrap().len(),
                 if status == 401 { 3 } else { 1 }
@@ -3813,6 +3837,44 @@ mod tests {
         ] {
             let err = ApiError::Token(TokenError::Store(err));
             assert_eq!(classify_api_error(&err), (code, None));
+        }
+    }
+
+    #[test]
+    fn item_server_errors_leave_only_writes_unknown() {
+        let batch: Batch = serde_json::from_value(json!({ "responses": [
+            { "id": "0", "status": 503, "headers": { "Retry-After": "7" } }
+        ] }))
+        .unwrap();
+        let change = Change::Flags {
+            read: Some(true),
+            flagged: None,
+        };
+        for writing in [false, true] {
+            let mut ready = Vec::new();
+            let mut stage = if writing {
+                BatchStage::Write { moved: false }
+            } else {
+                BatchStage::Read {
+                    change: &change,
+                    destination: None,
+                    mode: Mode::Act,
+                    ready: &mut ready,
+                }
+            };
+            let mut outcomes = [Outcome::pending("graph.item".to_owned())];
+            batch.finish(&[json!({ "id": "0" })], &mut outcomes, &mut stage);
+            let (reason, error) = if writing {
+                (SENT_NO_ANSWER, (ToolErrorCode::SubmissionUncertain, None))
+            } else {
+                (
+                    "Microsoft is having trouble (503 Service Unavailable); try again shortly",
+                    (ToolErrorCode::ProviderUnavailable, Some(7)),
+                )
+            };
+            let out = &outcomes[0];
+            assert_eq!(out.status, Status::Failed);
+            assert_eq!((out.reason.as_str(), out.error), (reason, Some(error)));
         }
     }
 
