@@ -39,8 +39,8 @@ use super::graph::{
 use super::id::{self, GMAIL_PREFIX};
 use super::{
     Change, Criteria, Cutoff, DRAFT_UNCONFIRMED, Fetched, FolderEntry, IdsFrom, MailboxError,
-    MailboxResult, Mode, Outcome, Page, SENT_NO_ANSWER, SavedDraft, Selected, Selector, SendError,
-    Status, Summary, maybe_sent, provider_may_have_acted, provider_outcomes, unanswered,
+    MailboxResult, Mode, Outcome, Page, SavedDraft, Selected, Selector, SendError, Status, Summary,
+    maybe_sent, provider_may_have_acted, provider_outcomes, unanswered,
 };
 
 const USER_PATH: &[&str] = &["gmail", "v1", "users", "me"];
@@ -1161,19 +1161,14 @@ fn stop_after_gmail_write(err: &ApiError) -> bool {
     err.is_any_rate_limit() || unanswered(err)
 }
 
-const fn gmail_unsent(err: &ApiError) -> bool {
+fn gmail_unsent(err: &ApiError) -> bool {
     err.status().is_none() && !unanswered(err)
 }
 
 fn finish_gmail(out: &mut Outcome, result: &Result<HttpResponse, ApiError>) {
     match result {
         Ok(_) => out.ok(""),
-        Err(err) if unanswered(err) => out.fail(
-            Status::Failed,
-            SENT_NO_ANSWER,
-            ToolErrorCode::SubmissionUncertain,
-            None,
-        ),
+        Err(err) if unanswered(err) => out.sent_no_answer(),
         Err(err) => {
             let (reason, code, retry_after) = gmail_cause(err);
             let status = if gmail_unsent(err) || err.is_any_rate_limit() {

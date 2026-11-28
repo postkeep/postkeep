@@ -4140,8 +4140,19 @@ async fn gmail_accounts_work_through_the_gmail_api() {
         );
         assert_eq!(result["messages"][0]["ids"], json!(["gmail.chunk-50"]));
     }
-    for answered in [true, false] {
-        let prefix = if answered { "huge" } else { "no-state" };
+    // A write answered too large or with a 5xx may have been made, so the call stops after it.
+    let huge = ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 2 * 1024 * 1024 + 1]);
+    for (prefix, write) in [
+        ("huge", Some(huge)),
+        ("bad-gateway", Some(ResponseTemplate::new(502))),
+        (
+            "unavailable",
+            Some(ResponseTemplate::new(503).insert_header("Retry-After", "7")),
+        ),
+        ("gateway-timeout", Some(ResponseTemplate::new(504))),
+        ("no-state", None),
+    ] {
+        let answered = write.is_some();
         let ids: Vec<_> = (0..51).map(|n| format!("{prefix}-{n}")).collect();
         for id in &ids[..50] {
             gmail_labels(id)
@@ -4164,9 +4175,7 @@ async fn gmail_accounts_work_through_the_gmail_api() {
             .and(body_json(
                 json!({ "ids": ids[..50], "addLabelIds": [], "removeLabelIds": ["UNREAD"] }),
             ))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 2 * 1024 * 1024 + 1]),
-            )
+            .respond_with(write.unwrap_or_else(|| ResponseTemplate::new(204)))
             .expect(u64::from(answered))
             .mount(server)
             .await;
@@ -4188,12 +4197,37 @@ async fn gmail_accounts_work_through_the_gmail_api() {
             );
             assert_eq!(messages[1]["status"], "not_reached");
             assert_eq!(messages[1]["ids"], json!(ids[50..]));
+            assert_ne!(
+                messages[1]["reason"],
+                "sent, no answer: check before repeating"
+            );
         } else {
             assert_eq!(messages.as_array().unwrap().len(), 1, "{messages}");
             assert_eq!(messages[0]["status"], "not_reached");
             assert_eq!(messages[0]["ids"], json!(ids));
         }
     }
+    gmail_labels("gateway1")
+        .respond_with(gmail_label_state("gateway1", &["UNREAD"]))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/gmail/gmail/v1/users/me/messages/gateway1/modify"))
+        .respond_with(ResponseTemplate::new(503).insert_header("Retry-After", "7"))
+        .expect(1)
+        .mount(server)
+        .await;
+    let single = json!({ "id": "gmail.gateway1", "read": true });
+    let result = harness.call(&token, "update_flags", single).await;
+    assert_eq!(
+        error_text(&result),
+        "sent, no answer: check before repeating"
+    );
+    assert_eq!(
+        common::error_meta(&result),
+        json!({"code":"submission_uncertain","retryable":false,"outcome_uncertain":true})
+    );
 
     // A delayed 401 must not start either a token exchange or another modify.
     {

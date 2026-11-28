@@ -406,17 +406,9 @@ const SENT_NO_ANSWER: &str = "sent, no answer: check before repeating";
 pub(crate) const ALREADY_UNSEEN: &str =
     "the source folder doesn't show what the destination already held";
 
-const fn transport_may_have_acted(error: &ApiError) -> bool {
-    matches!(
-        error,
-        ApiError::Http(
-            HttpError::Timeout(_) | HttpError::Transport { .. } | HttpError::TooLarge(_)
-        )
-    )
-}
-
-const fn unanswered(error: &ApiError) -> bool {
-    transport_may_have_acted(error) || matches!(error, ApiError::Malformed { .. })
+/// A change that may have been made, or whose success answer could not be read.
+fn unanswered(error: &ApiError) -> bool {
+    provider_may_have_acted(error) || matches!(error, ApiError::Malformed { .. })
 }
 
 const TOO_LARGE_TO_FORWARD: &str = "the message to forward is too large for postkeep to read";
@@ -424,11 +416,16 @@ pub(crate) const MAY_HAVE_BEEN_SENT: &str = "The message may have been sent. Che
 pub(crate) const DRAFT_UNCONFIRMED: &str =
     "The provider did not confirm the draft. Check Drafts before trying again.";
 
+/// No usable answer, or a server error (5xx): the provider may have acted.
 fn provider_may_have_acted(error: &ApiError) -> bool {
-    transport_may_have_acted(error)
-        || error
-            .status()
-            .is_some_and(|status| status.is_server_error())
+    matches!(
+        error,
+        ApiError::Http(
+            HttpError::Timeout(_) | HttpError::Transport { .. } | HttpError::TooLarge(_)
+        )
+    ) || error
+        .status()
+        .is_some_and(|status| status.is_server_error())
 }
 
 enum SendError {
@@ -600,6 +597,15 @@ impl Outcome {
         self.status = status;
         self.reason = reason.into();
         self.error = Some((code, retry_after));
+    }
+
+    fn sent_no_answer(&mut self) {
+        self.fail(
+            Status::Failed,
+            SENT_NO_ANSWER,
+            ToolErrorCode::SubmissionUncertain,
+            None,
+        );
     }
 
     fn reset_pending(&mut self) {
